@@ -126,3 +126,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   for inv in inventories/*/; do for pb in site.yml wipe.yml verify.yml; do
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done'
 ```
+
+## License
+
+GPL-3.0-only, see [LICENSE](LICENSE) (same as upstream 3x-ui).
