@@ -1,0 +1,108 @@
+---
+# One hop of the plan (loop var hop_item: its inventory spec plus action add|rejoin and prev, the name
+# of its inward neighbour or '' for the panel). Registry first, then the box.
+- name: "Re-read the registry: {{ hop_item.name }}"
+  ansible.builtin.include_tasks: list.yml
+
+- name: "Find the hop and its next hop in the registry: {{ hop_item.name }}"
+  ansible.builtin.set_fact:
+    hop_entry: "{{ hop_registry.hops | selectattr('name', 'equalto', hop_item.name) | first | default({}) }}"
+    hop_prev_entry: "{{ hop_registry.hops | selectattr('name', 'equalto', hop_item.prev) | first | default({}) }}"
+
+- name: Require the inward neighbour in the registry
+  ansible.builtin.assert:
+    that:
+      - hop_item.prev == '' or hop_prev_entry | length > 0
+    fail_msg: >-
+      {{ hop_item.name }} relays to {{ hop_item.prev }}, which is not in the chain registry; converge
+      {{ hop_item.prev }} first (it is outside --limit or unreachable).
+    quiet: true
+
+- name: "Choose the next hop: {{ hop_item.name }}"
+  ansible.builtin.set_fact:
+    hop_next_target: >-
+      {{ {'host': hop_item.next, 'port': hop_item.next_sub_port | int, 'scheme': hop_item.next_sub_scheme}
+         if hop_item.next | length > 0 else
+         {'host': hop_panel_address, 'port': hop_panel_sub_port | int, 'scheme': hop_panel_sub_scheme}
+         if hop_item.prev == '' else
+         {'host': hop_prev_entry.host, 'port': hop_prev_entry.subPort | int, 'scheme': hop_prev_entry.subScheme} }}
+
+# An inner hop goes right outside its inward neighbour; registry positions count from 0 (next to the panel).
+- name: "Add to the chain registry: {{ hop_item.name }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: add
+    hop_api_method: POST
+    hop_api_body: >-
+      {{ {'name': hop_item.name, 'host': hop_item.host, 'role': hop_item.role,
+          'subPort': hop_item.sub_port | int, 'subScheme': hop_item.sub_scheme}
+         | combine({'position': (hop_prev_entry.position | int + 1) if hop_prev_entry | length > 0 else 0}
+                   if hop_item.role == 'inner' else {}) }}
+  when: hop_entry | length == 0
+
+- name: Keep the join token of the new hop
+  ansible.builtin.set_fact:
+    hop_join_token: "{{ hop_api.obj.joinToken }}"
+    hop_entry: "{{ hop_api.obj.hop }}"
+  no_log: true
+  when: hop_entry | length == 0
+
+- name: "Update host, sub port or scheme in the registry: {{ hop_item.name }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: "update/{{ hop_entry.id }}"
+    hop_api_method: POST
+    hop_api_body: >-
+      {{ {}
+         | combine({'host': hop_item.host} if hop_entry.host != hop_item.host else {})
+         | combine({'subPort': hop_item.sub_port | int} if hop_entry.subPort | int != hop_item.sub_port | int else {})
+         | combine({'subScheme': hop_item.sub_scheme} if hop_entry.subScheme != hop_item.sub_scheme else {}) }}
+  when:
+    - hop_item.action == 'rejoin'
+    - hop_entry.host != hop_item.host or hop_entry.subPort | int != hop_item.sub_port | int or hop_entry.subScheme != hop_item.sub_scheme
+
+- name: "Reissue the join token: {{ hop_item.name }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: "reissueToken/{{ hop_entry.id }}"
+    hop_api_method: POST
+  when: hop_item.action == 'rejoin'
+
+- name: Keep the reissued join token
+  ansible.builtin.set_fact:
+    hop_join_token: "{{ hop_api.obj.joinToken }}"
+  no_log: true
+  when: hop_item.action == 'rejoin'
+
+- name: Install the box of {{ hop_item.name }}
+  ansible.builtin.include_tasks: install.yml
+
+- name: "Wait for the registry to report joined: {{ hop_item.name }}"
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/chain/list"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+  register: hop_join_wait
+  until: >-
+    (hop_join_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name)
+     | map(attribute='state') | first | default('')) == 'joined'
+  retries: "{{ hop_join_retries | int }}"
+  delay: "{{ hop_join_delay | int }}"
+  failed_when: false
+  no_log: true
+
+- name: "Require joined: {{ hop_item.name }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        (hop_join_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name)
+         | map(attribute='state') | first | default('')) == 'joined'
+    fail_msg: >-
+      {{ hop_item.name }} is not joined after install.sh (registry state
+      {{ hop_join_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name)
+         | map(attribute='state') | first | default('?') }}); see the install output above and
+      `x-ui chain status` / `journalctl -u x-ui` on {{ hop_item.inventory_host }}.
+    quiet: true

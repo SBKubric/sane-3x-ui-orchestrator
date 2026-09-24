@@ -1,0 +1,28 @@
+---
+# del every registry hop the inventory does not list (the imported `legacy` edge included). Edges go
+# first so that an extra inner loses its outer neighbours and is deleted at once instead of draining;
+# inner hops go from the outside in. A hop that still has live outer neighbours is left draining by
+# the panel (it hands them over, then disappears). The active edge is deleted only when the inventory
+# has no edge at all, and then with force: the panel publishes the real server address again.
+- name: Re-read the registry before deleting
+  ansible.builtin.include_tasks: list.yml
+
+- name: Pick the registry hops the inventory does not list
+  ansible.builtin.set_fact:
+    hop_delete: >-
+      {{ (hop_registry.hops | rejectattr('name', 'in', hop_names) | rejectattr('state', 'equalto', 'draining')
+          | selectattr('role', 'equalto', 'edge') | sort(attribute='isActive') | list)
+         + (hop_registry.hops | rejectattr('name', 'in', hop_names) | rejectattr('state', 'equalto', 'draining')
+          | selectattr('role', 'equalto', 'inner') | sort(attribute='position', reverse=true) | list) }}
+
+- name: Delete registry hop
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: "del/{{ hop_extra_entry.id }}"
+    hop_api_method: POST
+    hop_api_body:
+      force: "{{ hop_extra_entry.isActive | bool and hop_active_edge | length == 0 }}"
+  loop: "{{ hop_delete }}"
+  loop_control:
+    loop_var: hop_extra_entry
+    label: "{{ hop_extra_entry.name }} ({{ hop_extra_entry.role }}, {{ hop_extra_entry.state }})"

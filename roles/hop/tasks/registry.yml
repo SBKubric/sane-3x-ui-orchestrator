@@ -1,0 +1,148 @@
+---
+# The registry run, on the first host of the play. Inventory = every host of group `hops` (also the
+# ones outside --limit: they are never deleted, only not touched); managed = the hosts of this play.
+- name: Read the chain from the inventory
+  ansible.builtin.set_fact:
+    hop_inventory: >-
+      {%- set hops = [] -%}
+      {%- for h in groups['hops'] -%}
+      {%-   set v = hostvars[h] -%}
+      {%-   if v.hop_spec is defined -%}
+      {%-     set _ = hops.append(v.hop_spec | combine({'managed': h in ansible_play_hosts})) -%}
+      {%-   else -%}
+      {%-     set _ = hops.append({'inventory_host': h, 'name': v.hop_name | default(h), 'role': v.hop_role | default(''),
+                                   'position': v.hop_position | default(0) | int, 'active': v.hop_active | default(false) | bool,
+                                   'managed': false}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ hops }}
+
+- name: Order the chain from the panel outward
+  ansible.builtin.set_fact:
+    hop_inners: "{{ hop_inventory | selectattr('role', 'equalto', 'inner') | sort(attribute='position') }}"
+    hop_edges: "{{ hop_inventory | selectattr('role', 'equalto', 'edge') | sort(attribute='name') }}"
+    hop_names: "{{ hop_inventory | map(attribute='name') | list }}"
+    hop_active_edge: "{{ hop_inventory | selectattr('role', 'equalto', 'edge') | selectattr('active') | map(attribute='name') | first | default('') }}"
+
+- name: Check the chain topology of the inventory
+  ansible.builtin.assert:
+    that:
+      - hop_names | unique | length == hop_names | length
+      - hop_inners | map(attribute='position') | unique | length == hop_inners | length
+      - hop_inventory | rejectattr('role', 'in', ['inner', 'edge']) | list | length == 0
+      - hop_inventory | selectattr('active') | list | length == ([1] if hop_edges | length > 0 else []) | length
+      - hop_inventory | selectattr('active') | rejectattr('role', 'equalto', 'edge') | list | length == 0
+    fail_msg: >-
+      group hops: hop names and inner positions must be unique, every hop needs hop_role inner|edge, and
+      exactly one edge carries hop_active: true (none when there is no edge). Got
+      {{ hop_inventory | map(attribute='name') | zip(hop_inventory | map(attribute='role'),
+         hop_inventory | map(attribute='position'), hop_inventory | map(attribute='active')) | list }}
+      as [name, role, position, active].
+    quiet: true
+
+- name: Link every hop to its inward neighbour
+  ansible.builtin.set_fact:
+    hop_order: >-
+      {%- set out = [] -%}
+      {%- for hop in hop_inners -%}
+      {%-   set _ = out.append(hop | combine({'prev': hop_inners[loop.index0 - 1].name if loop.index0 > 0 else ''})) -%}
+      {%- endfor -%}
+      {%- for hop in hop_edges -%}
+      {%-   set _ = out.append(hop | combine({'prev': (hop_inners | last).name if hop_inners | length > 0 else ''})) -%}
+      {%- endfor -%}
+      {{ out }}
+
+# The login is read-only, so it also runs in check mode (uri would skip it there).
+- name: Log in to the panel
+  ansible.builtin.include_role:
+    name: panel
+    tasks_from: api_login
+    apply:
+      check_mode: false
+
+- name: Read the chain registry
+  ansible.builtin.include_tasks: list.yml
+
+- name: Compare the registry with the inventory
+  ansible.builtin.set_fact:
+    hop_conflicts: >-
+      {%- set out = [] -%}
+      {%- for hop in hop_order -%}
+      {%-   set entry = hop_registry.hops | selectattr('name', 'equalto', hop.name) | first | default({}) -%}
+      {%-   if entry and entry.role != hop.role -%}
+      {%-     set _ = out.append(hop.name ~ ' is ' ~ entry.role ~ ' in the registry but ' ~ hop.role
+                               ~ ' in the inventory (role cannot change: delete it in the panel first)') -%}
+      {%-   elif entry and entry.state == 'draining' -%}
+      {%-     set _ = out.append(hop.name ~ ' is draining in the registry (wait until it is gone or delete it with skipDrain)') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set listed = hop_inners | map(attribute='name') | list -%}
+      {%- set registered = hop_registry.hops | selectattr('role', 'equalto', 'inner') | rejectattr('state', 'equalto', 'draining')
+                             | map(attribute='name') | select('in', listed) | list -%}
+      {%- if registered != listed | select('in', registered) | list -%}
+      {%-   set _ = out.append('inner order in the registry ' ~ registered ~ ' differs from hop_position ' ~ listed
+                               ~ ' (position cannot change: delete the misplaced hop in the panel first)') -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Refuse what the registry API cannot converge
+  ansible.builtin.assert:
+    that:
+      - hop_conflicts | length == 0
+    fail_msg: "chain registry vs inventory: {{ hop_conflicts | join('; ') }}"
+    quiet: true
+
+# add: not in the registry. skip: joined, same host/sub port/scheme, `x-ui chain status` answers with
+# this name and the box runs xui_version. rejoin: anything else (update, reissueToken, reinstall).
+- name: Plan the hops
+  ansible.builtin.set_fact:
+    hop_plan: >-
+      {%- set out = [] -%}
+      {%- for hop in hop_order -%}
+      {%-   set entry = hop_registry.hops | selectattr('name', 'equalto', hop.name) | first | default({}) -%}
+      {%-   if not hop.managed -%}
+      {%-     set action = 'untouched' -%}
+      {%-   elif not entry -%}
+      {%-     set action = 'add' -%}
+      {%-   else -%}
+      {%-     set box = hostvars[hop.inventory_host].hop_box -%}
+      {%-     set same = entry.state == 'joined' and entry.host == hop.host and entry.subPort | int == hop.sub_port | int
+                         and entry.subScheme == hop.sub_scheme and box.status_ok and box.status_name == hop.name
+                         and box.version == hop.version -%}
+      {%-     set action = 'skip' if same else 'rejoin' -%}
+      {%-   endif -%}
+      {%-   set _ = out.append(hop | combine({'action': action})) -%}
+      {%- endfor -%}
+      {{ out }}
+    hop_extra: "{{ hop_registry.hops | rejectattr('name', 'in', hop_names) | map(attribute='name') | list }}"
+
+- name: Show the plan
+  ansible.builtin.debug:
+    msg: >-
+      hops: {{ hop_plan | map(attribute='name') | zip(hop_plan | map(attribute='action')) | map('join', '=') | join(', ') }};
+      active edge: {{ hop_active_edge if hop_active_edge | length > 0 else '(none)' }};
+      delete: {{ (hop_extra | join(', ')) if hop_extra | length > 0 and hop_prune | bool else '(nothing)' }}{{
+      '' if hop_prune | bool or hop_extra | length == 0 else ' (hop_prune=false, not in the inventory: ' ~ hop_extra | join(', ') ~ ')' }}
+
+# Check mode stops at the plan: registry writes and installs cannot be simulated.
+- name: Apply the plan
+  when: not ansible_check_mode
+  block:
+    - name: Find the panel address for the innermost hop
+      ansible.builtin.include_tasks: panel_address.yml
+      when: hop_plan | selectattr('action', 'in', ['add', 'rejoin']) | selectattr('prev', 'equalto', '') | list | length > 0
+
+    - name: Converge hop
+      ansible.builtin.include_tasks: converge_hop.yml
+      loop: "{{ hop_plan | selectattr('action', 'in', ['add', 'rejoin']) | list }}"
+      loop_control:
+        loop_var: hop_item
+        label: "{{ hop_item.name }} ({{ hop_item.action }})"
+
+    - name: Make the hop_active edge the active one
+      ansible.builtin.include_tasks: activate.yml
+      when: hop_active_edge | length > 0
+
+    - name: Delete registry hops that the inventory does not list
+      ansible.builtin.include_tasks: prune.yml
+      when: hop_prune | bool

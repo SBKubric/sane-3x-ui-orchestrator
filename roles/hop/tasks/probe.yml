@@ -1,0 +1,64 @@
+---
+# Reads what the box runs: version, `x-ui chain status` (the running hop, asked with its own secret)
+# and, for letsencrypt-ip, whether a certificate for hop_host is already there. Read-only, so it runs
+# in check mode too. Result: fact hop_box.
+- name: Check for an installed x-ui binary
+  ansible.builtin.stat:
+    path: "{{ hop_bin }}"
+  register: hop_bin_stat
+
+- name: Read installed x-ui version
+  ansible.builtin.command:
+    argv: ["{{ hop_bin }}", "-v"]
+  register: hop_box_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: hop_bin_stat.stat.exists
+
+- name: Read chain status of the running hop
+  ansible.builtin.command:
+    argv: ["{{ hop_bin }}", chain, status, -c, "{{ hop_proxy_config }}"]
+  register: hop_box_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: hop_bin_stat.stat.exists
+
+# Valid for at least another day and issued for hop_host; openssl comes from role common.
+- name: Check the Let's Encrypt IP certificate already on the box
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -in
+      - "{{ hop_le_cert_dir }}/fullchain.pem"
+      - -noout
+      - -checkend
+      - "86400"
+      - -ext
+      - subjectAltName
+  register: hop_le_cert
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: hop_tls == 'letsencrypt-ip' and hop_tls_reuse | bool
+
+- name: Check the Let's Encrypt IP key
+  ansible.builtin.stat:
+    path: "{{ hop_le_cert_dir }}/privkey.pem"
+  register: hop_le_key
+  when: hop_tls == 'letsencrypt-ip' and hop_tls_reuse | bool
+
+- name: Summarise the box
+  ansible.builtin.set_fact:
+    hop_box:
+      installed: "{{ hop_bin_stat.stat.exists }}"
+      version: "{{ (hop_box_version.stdout | default('')) | trim if (hop_box_version.rc | default(1)) == 0 else '' }}"
+      status_ok: "{{ (hop_box_status.rc | default(1)) == 0 }}"
+      status_name: "{{ hop_box_status.stdout | default('') | regex_findall('(?m)^name:\\s+(\\S+)') | first | default('') }}"
+      le_cert_reusable: >-
+        {{ hop_tls == 'letsencrypt-ip' and hop_tls_reuse | bool
+           and (hop_le_cert.rc | default(1)) == 0
+           and (hop_le_cert.stdout | default('')) is search('IP Address:' ~ (hop_host | regex_escape) ~ '(,|\\s|$)')
+           and (hop_le_key.stat.exists | default(false)) }}
