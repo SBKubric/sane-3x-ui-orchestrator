@@ -1,0 +1,149 @@
+---
+# One entry of panel_inbounds (loop var panel_inbound) against panel_inbounds_current, matched by remark.
+#   xray       add: POST inbounds/add; Reality keys from GET server/getNewX25519Cert and a shortId made here
+#              when the entry does not give them. Existing: the declared fields are merged into what the panel
+#              has (settings/streamSettings/sniffing parsed and merged key by key, lists replaced), and
+#              POST inbounds/update/<id> sends the whole inbound only when the merge changes something. The
+#              JSON strings are compared parsed, never as text: the panel re-serializes them (indentation,
+#              client timestamps, the monitoring probe client it adds).
+#   amneziawg  add: POST inbounds/add, a bare record on the AWG server's port (peers live in the AWG tables).
+#              Existing: only enable is converged (POST inbounds/setEnable/<id>); the port follows the server.
+- name: "Find the inbound in the panel: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
+    panel_inbound_entry: "{{ panel_inbounds_current | selectattr('remark', 'equalto', panel_inbound.remark) | first | default({}) }}"
+    panel_inbound_awg: "{{ panel_inbound.protocol == 'amneziawg' }}"
+    # Top-level fields the entry manages: enable always (default true), the rest when declared; the AWG
+    # inbound's port belongs to the server.
+    panel_inbound_top: >-
+      {{ {'enable': true} | combine(panel_inbound | dict2items
+         | selectattr('key', 'in', ['enable'] if panel_inbound.protocol == 'amneziawg'
+                                   else ['port', 'enable', 'listen', 'total', 'expiryTime', 'trafficReset'])
+         | items2dict) }}
+  no_log: true
+
+- name: "Compare with the panel: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
+    panel_inbound_have: "{{ panel_inbound_have_blobs }}"
+    panel_inbound_want: >-
+      {%- set want = {} -%}
+      {%- for blob in ['settings', 'streamSettings', 'sniffing'] -%}
+      {%-   set _ = want.update({blob: panel_inbound_have_blobs[blob] | combine(panel_inbound[blob] | default({}), recursive=true)}) -%}
+      {%- endfor -%}
+      {{ want }}
+  vars:
+    panel_inbound_have_blobs: >-
+      {%- set have = {} -%}
+      {%- for blob in ['settings', 'streamSettings', 'sniffing'] -%}
+      {%-   set raw = panel_inbound_entry[blob] | default('', true) -%}
+      {%-   set _ = have.update({blob: raw | from_json if raw | trim | length > 0 else {}}) -%}
+      {%- endfor -%}
+      {{ have }}
+  when: panel_inbound_entry | length > 0
+  no_log: true
+
+- name: "Plan the inbound: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
+    panel_inbound_action: >-
+      {{ 'add' if panel_inbound_entry | length == 0 else ('update' if panel_inbound_found | length > 0 else 'ok') }}
+    panel_inbound_changes: "{{ panel_inbound_found }}"
+  vars:
+    # Names of the managed fields whose panel value differs from panel_inbounds.
+    panel_inbound_found: >-
+      {%- set out = [] -%}
+      {%- if panel_inbound_entry | length > 0 -%}
+      {%-   for key, value in panel_inbound_top.items() -%}
+      {%-     if panel_inbound_entry[key] | default(none) != value -%}
+      {%-       set _ = out.append(key) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if not panel_inbound_awg | bool -%}
+      {%-     for blob in ['settings', 'streamSettings', 'sniffing'] -%}
+      {%-       if panel_inbound_want[blob] != panel_inbound_have[blob] -%}
+      {%-         set _ = out.append(blob) -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: "Show the plan: {{ panel_inbound.remark }}"
+  ansible.builtin.debug:
+    msg: >-
+      inbound {{ panel_inbound.remark }} ({{ panel_inbound.protocol }}): {{ panel_inbound_action }}{{
+      (' ' ~ panel_inbound_changes | join(', ')) if panel_inbound_action == 'update' else '' }}
+
+# Reality without keys in the entry: keys from the panel's generator and a shortId made here, on add only.
+- name: "Check for Reality: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
+    panel_inbound_reality_keys: >-
+      {{ (panel_inbound.streamSettings | default({})).security | default('') == 'reality'
+         and ((panel_inbound.streamSettings.realitySettings | default({})).privateKey | default('') | length == 0) }}
+    panel_inbound_reality_short_ids: >-
+      {{ (panel_inbound.streamSettings | default({})).security | default('') == 'reality'
+         and (panel_inbound.streamSettings.realitySettings | default({})).shortIds is not defined }}
+
+# Check mode stops at the plan: the API writes cannot be simulated.
+- name: "Add the inbound: {{ panel_inbound.remark }}"
+  when:
+    - panel_inbound_action == 'add'
+    - not ansible_check_mode
+  block:
+    - name: "Generate Reality keys in the panel: {{ panel_inbound.remark }}"
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: server/getNewX25519Cert
+        panel_call_method: GET
+      when: panel_inbound_reality_keys | bool
+    - name: "Add the inbound through the API: {{ panel_inbound.remark }}"
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: inbounds/add
+        panel_call_method: POST
+        panel_call_body: >-
+          {{ {'remark': panel_inbound.remark, 'protocol': panel_inbound.protocol,
+              'port': panel_awg_port | int if panel_inbound_awg | bool else panel_inbound.port,
+              'enable': panel_inbound.enable | default(true), 'listen': panel_inbound.listen | default(''),
+              'total': panel_inbound.total | default(0), 'expiryTime': panel_inbound.expiryTime | default(0),
+              'trafficReset': panel_inbound.trafficReset | default('never'),
+              'settings': ({'clients': []} | combine(panel_inbound.settings | default({}), recursive=true)) | to_json,
+              'streamSettings': panel_inbound_stream | to_json if panel_inbound_stream | length > 0 else '',
+              'sniffing': panel_inbound.sniffing | default(panel_inbound_default_sniffing) | to_json} }}
+        panel_inbound_stream: >-
+          {{ panel_inbound.streamSettings | default({})
+             | combine({'realitySettings': {'privateKey': panel_call.obj.privateKey, 'settings': {'publicKey': panel_call.obj.publicKey}}}
+                       if panel_inbound_reality_keys | bool else {}, recursive=true)
+             | combine({'realitySettings': {'shortIds': ['%016x' | format(18446744073709551615 | random)]}}
+                       if panel_inbound_reality_short_ids | bool else {}, recursive=true) }}
+
+- name: "Update the inbound: {{ panel_inbound.remark }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: "inbounds/update/{{ panel_inbound_entry.id }}"
+    panel_call_method: POST
+    # The whole inbound as the panel has it (the update copies every field), with the managed fields replaced.
+    panel_call_body: >-
+      {%- set body = panel_inbound_entry | dict2items | selectattr('key', 'in', ['up', 'down', 'total', 'remark', 'enable', 'expiryTime',
+                       'trafficReset', 'lastTrafficResetTime', 'listen', 'port', 'protocol', 'settings', 'streamSettings', 'sniffing'])
+                     | items2dict | combine(panel_inbound_top) -%}
+      {%- for blob in ['settings', 'streamSettings', 'sniffing'] -%}
+      {%-   if panel_inbound_want[blob] != panel_inbound_have[blob] -%}
+      {%-     set _ = body.update({blob: panel_inbound_want[blob] | to_json}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ body }}
+  when:
+    - panel_inbound_action == 'update'
+    - not panel_inbound_awg | bool
+    - not ansible_check_mode
+
+- name: "Enable or disable the AmneziaWG inbound: {{ panel_inbound.remark }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: "inbounds/setEnable/{{ panel_inbound_entry.id }}"
+    panel_call_method: POST
+    panel_call_body:
+      enable: "{{ panel_inbound_top.enable | bool }}"
+  when:
+    - panel_inbound_action == 'update'
+    - panel_inbound_awg | bool
+    - not ansible_check_mode

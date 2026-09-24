@@ -1,6 +1,7 @@
 ---
 # Role panel: install/update by tag, self-signed TLS, account from the vault, Telegram and monitoring
-# through the x-ui CLI; leaves panel_url, panel_ca_pem and (with monitoring) panel_mon_token as facts.
+# through the x-ui CLI, inbounds from panel_inbounds through the API; leaves panel_url, panel_ca_pem and
+# (with monitoring) panel_mon_token as facts.
 - name: Check role inputs
   ansible.builtin.assert:
     that:
@@ -42,6 +43,12 @@
 
 - name: Apply pending panel restarts
   ansible.builtin.meta: flush_handlers
+
+# Before the hops play (site.yml order): hops that join afterwards find the relayed ports in the chain
+# document; hops already joined pick up the new revision on their next poll.
+- name: Inbounds from panel_inbounds
+  ansible.builtin.include_tasks: inbounds.yml
+  when: panel_inbounds | length > 0
 
 - name: Export panel facts
   ansible.builtin.include_tasks: facts.yml

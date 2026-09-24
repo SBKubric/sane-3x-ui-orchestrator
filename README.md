@@ -25,13 +25,14 @@ inventories/
   stand-full/          panel + hops + monserver + monclient
 roles/
   common/              supported OS check, base packages, time sync
-  panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token;
-                       tasks/api_login.yml is the panel API login helper for other roles
+  panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, inbounds
+                       from panel_inbounds; tasks/api_login.yml is the panel API login helper for other roles
   hop/                 chain registry converged with group hops through the panel API; install + join
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
                        tasks/api_login.yml is the mon-server admin API login helper for other roles
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
-tests/hop/             role hop and the chain part of verify.yml against a mock of the panel chain API (CI)
+tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API (CI)
+tests/panel/           role panel's inbounds and the targets part of verify.yml against the same mock (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
 ```
 
@@ -73,6 +74,12 @@ panel's chain registry:
 | `hop_next` | next hop inward; empty = derived (edge -> outermost inner, inner N -> N-1, inner 1 -> panel) |
 | `hop_tls` | `PROXY_TLS` for install.sh: `letsencrypt-ip` (default), `none`, `manual` |
 
+Panel inbounds (`inventories/<profile>/group_vars/panel.yml`), see [Inbounds](#inbounds):
+
+| Variable | Meaning |
+|---|---|
+| `panel_inbounds` | inbounds of the panel, matched by `remark`; missing ones are added, declared fields that differ are updated, others are left alone |
+
 Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`; group `monclient`:
 `mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
 
@@ -101,6 +108,8 @@ skipped when the host already matches, so a second run reports `changed=0`.
 5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
    if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
    The token is read back every run and never stored in the vault.
+6. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
+   hops play, so hops that join in the same run find the relayed ports in the chain document.
 
 Secrets never reach the output: the tasks that carry the password, the Telegram token, the monitoring
 token or the session cookie are `no_log`. install.sh prints random credentials of its own; they are
@@ -115,6 +124,97 @@ Facts left on the panel host for later plays (`hostvars[groups['panel'][0]]`):
 | `panel_mon_token` | monitoring bearer token (only with a `monserver` host) | monserver (`monToken`) |
 
 The facts exist only in a run that includes the panel play (`--tags panel` or a full run).
+
+### Inbounds
+
+`panel_inbounds` lists the inbounds the panel must have; nothing else about the panel's inbounds is
+assumed. Each entry:
+
+| Field | Meaning |
+|---|---|
+| `remark` | name of the inbound, unique; the match key between the inventory and the panel (required) |
+| `protocol` | xray protocol (`vless`, `vmess`, `trojan`, `shadowsocks`, ...) or `amneziawg` (required; `nativewg` and `mtproto` are not managed) |
+| `port` | listen port (required for xray). For `amneziawg`: the AWG server's UDP port; default: the random port the panel picked |
+| `enable` | default `true`; for `amneziawg` it switches the inbound and the AWG server |
+| `listen`, `total`, `expiryTime`, `trafficReset` | as in the panel (xray only); not declared = left as the panel has it (on add: `""`, `0`, `0`, `never`) |
+| `settings`, `streamSettings`, `sniffing` | mappings (xray only) merged key by key into the panel's JSON of the same name; keys the entry does not name stay as the panel has them, lists are replaced. `settings.clients` is refused: users are added in the panel, the monitoring probe client by the panel itself. `sniffing` not declared on add = the UI default |
+
+The converge, on the panel host (`POST <base>login`, then `panel/api/...`):
+
+1. `GET inbounds/list`. Refused before anything is written: two panel inbounds with one declared remark,
+   a declared remark whose panel inbound has another `protocol` (delete it in the panel first), an
+   `amneziawg` entry while the panel's AWG inbound has another remark (one per panel). Malformed entries
+   (missing fields, unknown fields, wrong types) are refused before the login.
+2. **AmneziaWG server** (with an `amneziawg` entry). The panel keeps one server and makes it with its keys,
+   obfuscation and a random port (install.sh already reads it). `GET awg/server`; when `enable` or the port
+   differs, or the AWG inbound record lags behind the server's port, `POST awg/server` with the server as
+   read plus `enable`/`listenPort` — the keys are sent back unchanged, never regenerated. The save
+   brings the interface up, moves the AWG inbound record to the port and bumps the chain revision.
+3. **Per entry**, matched by `remark`:
+   - missing, xray: `POST inbounds/add` with `settings` (`clients: []` added), `streamSettings`, `sniffing` as
+     JSON strings. With `streamSettings.security: reality` and no `realitySettings.privateKey`, the keys come
+     from the panel's generator (`GET server/getNewX25519Cert`: `realitySettings.privateKey` and
+     `realitySettings.settings.publicKey`); without `realitySettings.shortIds` one random 16-hex-digit shortId
+     is made. This happens only on add.
+   - missing, `amneziawg`: `POST inbounds/add`, a bare record on the server's port (peers live in the AWG
+     tables; the panel adds the monitoring probe peer itself).
+   - present, xray: the declared top-level fields replace the panel's, the declared mappings are merged into
+     the parsed JSON; only when that changes something, `POST inbounds/update/<id>` sends the whole inbound
+     as the panel has it with the merge applied. The JSON is compared parsed, never as text: the panel
+     re-serializes it (indentation, client timestamps, the probe client monitoring adds), and all of that,
+     the Reality keys and shortIds included, survives the update.
+   - present, `amneziawg`: `POST inbounds/setEnable/<id>` when `enable` differs.
+
+A second run reports `changed=0`. Nothing generated is stored in the inventory or the vault; the keys live
+in the panel and are only read back. Check mode (`--check`) reads the panel and prints the plan
+(`inbound vless-reality (vless): add`, `AmneziaWG server: save`) without writing. Every API call is
+`no_log` (private keys, the session cookie).
+
+The chain: adding, updating or switching an inbound (and saving the AWG server) makes the panel recompute
+the relayed ports (`x-ui chain ports`: enabled xray inbounds as TCP, the enabled AWG server as UDP) and bump
+the chain revision when the registry has hops. Hops that join afterwards get the ports with their first
+document; joined hops pick them up on their next poll (`chainPollSeconds`, 30 s ±20 %, one poll per hop
+from the panel outward) and restart the relay. verify.yml waits up to 2 minutes for that.
+
+Example (`inventories/stand-full/group_vars/panel.yml`):
+
+```yaml
+panel_inbounds:
+  - remark: vless-reality
+    protocol: vless
+    port: 443
+    settings:
+      decryption: none
+      fallbacks: []
+    streamSettings:
+      network: tcp
+      security: reality
+      realitySettings:            # privateKey, settings.publicKey and shortIds are made on add
+        show: false
+        xver: 0
+        target: www.microsoft.com:443
+        serverNames: [www.microsoft.com]
+        settings:
+          fingerprint: chrome
+          serverName: ""
+          spiderX: /
+      tcpSettings:
+        acceptProxyProtocol: false
+        header:
+          type: none
+    sniffing:
+      enabled: true
+      destOverride: [http, tls, quic]
+      metadataOnly: false
+      routeOnly: false
+  - remark: awg
+    protocol: amneziawg
+    port: 51820
+```
+
+Monitoring: mon-server's periodic `probe/ensure` gives every enabled xray inbound a probe client and the
+AWG server a probe peer as soon as an `amneziawg` inbound exists, so both become targets on every
+mon-client path (`xray:<id>` and `awg:0`).
 
 Knobs in `roles/panel/defaults/main.yml`: `panel_public_ip` (default IPv4 from facts; set it in
 `host_vars` behind NAT), `panel_cert_sans`, `panel_cert_valid_days`, `panel_tls_dir`,
@@ -347,10 +447,10 @@ to look; the first group that fails ends the run.
 | Play | Checks |
 |---|---|
 | panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
-| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` (up to 1 minute: `hop_verify_retries` x `hop_verify_delay`) |
+| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`) |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (the probe configs are readable too) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
-| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, there are targets, every mon-client has targets, and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each of its `mon_paths`, and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
 
 ## Prerequisites
 
@@ -423,8 +523,8 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify
    ansible-playbook -i inventories/stand-full wipe.yml -e wipe_confirm=yes --ask-vault-pass
    ansible-playbook -i inventories/stand-full site.yml --ask-vault-pass
    ```
-   A fresh panel gets new inbounds and a new chain registry, so clients' subscriptions from before the
-   wipe are dead. Keep the output of both runs if the run is the resolution of a ticket.
+   A fresh panel gets new inbounds (`panel_inbounds`, with new Reality and AWG keys) and a new chain
+   registry, so clients' subscriptions from before the wipe are dead. Keep the output of both runs if the run is the resolution of a ticket.
 6. **Verify alone**, any time later (read-only):
    ```sh
    ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass
@@ -451,11 +551,18 @@ IP address) in 7 days.
 CI (`.github/workflows/ci.yml`) runs `ansible-lint` with the `production` profile (`.ansible-lint`),
 `ansible-playbook --syntax-check` of every playbook against every inventory,
 `tests/hop/test_hop_role.py`: role hop on local stand-in hosts against `tests/hop/mock_panel.py` (the panel
-chain API: login, list/add/update/reissueToken/setActive/del with the panel's refusals) and a fake
+API: login, chain list/add/update/reissueToken/setActive/del with the panel's refusals; inbounds
+list/add/update/setEnable, the AWG server and getNewX25519Cert, the monitoring targets) and a fake
 install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
 certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
 panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
-wrong; `tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
+wrong; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
+the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
+idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
+field updated without re-keying, port and enable, the AWG server switched off by hand, unlisted inbounds
+left alone, check mode, refusals, no private key or cookie in `-vvv` output; and the targets play of
+`verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target;
+`tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
 the certificate flags, a repeated wipe and a bare box with `changed=0`, one group by tag; and checks that
 `wipe.yml` refuses without confirmation. The mon-server/mon-client plays of `verify.yml` have no mock and
 are exercised on the stand. No Molecule. Locally without an ansible install:
@@ -467,7 +574,8 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   ansible-lint &&
   for inv in inventories/*/; do for pb in site.yml wipe.yml verify.yml; do
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
-  python3 tests/hop/test_hop_role.py && python3 tests/wipe/test_wipe.py'
+  python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
+  python3 tests/wipe/test_wipe.py'
 ```
 
 ## License

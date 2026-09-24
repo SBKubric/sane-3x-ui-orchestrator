@@ -1,0 +1,46 @@
+---
+# The AmneziaWG server behind the amneziawg entry (panel_awg_want). The panel keeps exactly one: it makes it
+# with its keys, obfuscation and a random UDP port on first read (install.sh reads it), and every read after
+# that returns the same server, so the keys are never touched here. Converged: enable (the entry's, default
+# true) and the listen port (the entry's port, when given). A save goes through POST awg/server with the whole
+# server as read, which also moves the AWG inbound record to the port and bumps the chain revision, so the
+# hops relay the new UDP port. Result: fact panel_awg_port (the port the server listens on).
+- name: Read the AmneziaWG server
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: awg/server
+    panel_call_method: GET
+
+- name: Keep the AmneziaWG server
+  ansible.builtin.set_fact:
+    panel_awg_server: "{{ panel_call.obj }}"
+    panel_awg_port: "{{ panel_awg_want.port | default(panel_call.obj.listenPort) | int }}"
+  no_log: true
+
+# The inbound record carries the server's port; one that lags behind (made in the UI, which sends a random
+# port) is brought in line by the same save.
+- name: Compare the AmneziaWG server with panel_inbounds
+  ansible.builtin.set_fact:
+    panel_awg_drift: >-
+      {{ (panel_awg_server.enable | bool) != (panel_awg_want.enable | default(true) | bool)
+         or panel_awg_server.listenPort | int != panel_awg_port | int
+         or (panel_inbounds_current | selectattr('protocol', 'equalto', 'amneziawg') | map(attribute='port')
+             | reject('equalto', panel_awg_port | int) | list | length > 0) }}
+
+- name: "Show the plan: AmneziaWG server"
+  ansible.builtin.debug:
+    msg: >-
+      AmneziaWG server: {{ 'save' if panel_awg_drift | bool else 'ok' }}
+      (enable {{ panel_awg_server.enable | bool | lower }} -> {{ panel_awg_want.enable | default(true) | bool | lower }},
+      port {{ panel_awg_server.listenPort }} -> {{ panel_awg_port }})
+
+- name: Save the AmneziaWG server
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: awg/server
+    panel_call_method: POST
+    panel_call_body: >-
+      {{ panel_awg_server | combine({'enable': panel_awg_want.enable | default(true) | bool, 'listenPort': panel_awg_port | int}) }}
+  when:
+    - panel_awg_drift | bool
+    - not ansible_check_mode

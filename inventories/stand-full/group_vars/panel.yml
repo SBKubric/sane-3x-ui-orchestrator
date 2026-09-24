@@ -1,0 +1,37 @@
+---
+# Inbounds of the panel, converged by role panel through the panel API (README "Inbounds"), matched by
+# remark. The Reality keys (the panel's generator) and shortId (made once by the role) are created with the
+# inbound, the AWG server's keys by the panel itself; afterwards they are only read back from the panel.
+# Nothing secret lives here or in the vault.
+# The chain relays both ports on every hop (443/tcp, 51820/udp) and monitoring probes both inbounds.
+panel_inbounds:
+  - remark: vless-reality
+    protocol: vless
+    port: 443
+    settings:
+      decryption: none
+      fallbacks: []
+    streamSettings:
+      network: tcp
+      security: reality
+      realitySettings:
+        show: false
+        xver: 0
+        target: www.microsoft.com:443
+        serverNames: [www.microsoft.com]
+        settings:
+          fingerprint: chrome
+          serverName: ""
+          spiderX: /
+      tcpSettings:
+        acceptProxyProtocol: false
+        header:
+          type: none
+    sniffing:
+      enabled: true
+      destOverride: [http, tls, quic]
+      metadataOnly: false
+      routeOnly: false
+  - remark: awg
+    protocol: amneziawg
+    port: 51820
