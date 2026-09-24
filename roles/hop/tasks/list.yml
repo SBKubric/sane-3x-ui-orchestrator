@@ -1,0 +1,11 @@
+---
+# GET chain/list -> fact hop_registry {revision, activeEdge, hops[], draining[]}.
+- name: List the chain registry
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: list
+    hop_api_method: GET
+
+- name: Keep the chain registry
+  ansible.builtin.set_fact:
+    hop_registry: "{{ hop_api.obj | combine({'hops': hop_api.obj.hops | default([], true)}) }}"

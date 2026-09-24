@@ -1,0 +1,23 @@
+---
+# The innermost hop relays to the panel: hop_panel_host, else the host of panel_url (set by role panel
+# in this run), else panel_public_ip from the panel's host_vars, else the panel's default IPv4.
+- name: Take the panel address from the inventory or role panel
+  ansible.builtin.set_fact:
+    hop_panel_address: >-
+      {{ hop_panel_host if hop_panel_host | length > 0
+         else hostvars[panel_api_host].panel_url | urlsplit('hostname') if hostvars[panel_api_host].panel_url is defined
+         else hostvars[panel_api_host].panel_public_ip | default('') }}
+
+- name: Gather network facts of the panel host
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  delegate_to: "{{ panel_api_host }}"
+  delegate_facts: true
+  when:
+    - hop_panel_address | length == 0
+    - hostvars[panel_api_host].ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Take the panel address from its facts
+  ansible.builtin.set_fact:
+    hop_panel_address: "{{ hostvars[panel_api_host].ansible_facts['default_ipv4']['address'] }}"
+  when: hop_panel_address | length == 0

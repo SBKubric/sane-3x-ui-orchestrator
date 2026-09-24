@@ -1,21 +1,70 @@
 ---
-# Role hop (SBKubric/3ax-ui-orchestrator#3). Runs on every host of group `hops`;
-# the inventory is the source of truth for the panel's chain registry.
+# Role hop (SBKubric/3ax-ui-orchestrator#3, decision SBKubric/3ax-ui-monitoring#55 items 3 and 5).
+# Runs on the hosts of group `hops`. The inventory is the source of truth for the panel's chain
+# registry: every hop of the group is added (or re-joined) and installed, the edge with
+# hop_active becomes the active one, and registry hops missing from the group are deleted.
 #
 # Per-host inputs (inventories/<profile>/host_vars/<hop>.yml):
 #   hop_role       inner | edge                                   (required)
 #   hop_position   integer order of inner hops, 1 = next to panel (required for inner)
 #   hop_active     true on exactly one edge hop                   (default below)
-#   hop_name       name in the chain registry                     (default below)
-#   hop_next       next hop inward; empty = derived: edge -> outermost inner, inner N -> inner N-1, inner 1 -> panel
+#   hop_name       name in the chain registry, [a-z0-9-]{1,32}    (default below)
+#   hop_next       next hop inward; empty = derived: edge -> outermost inner, inner N -> inner N-1,
+#                  inner 1 -> panel (address and sub port of a derived next hop come from the registry)
 #   hop_tls        PROXY_TLS mode for install.sh                  (default below)
 #   hop_host       public address registered in the chain         (default below)
-# Group inputs: xui_version (group_vars/all).
-# Needs the panel facts from role panel (panel_url, login via the vault account).
+# Group inputs: xui_version (group_vars/all), panel_* from the vault (API login through role panel).
 
 hop_name: "{{ inventory_hostname }}"
 hop_active: false
 hop_next: ""
-# letsencrypt-ip (production LE, issued once per box thanks to idempotency) | none | manual.
+# Sub port and scheme of an explicit hop_next (a derived next hop takes them from the registry).
+hop_next_sub_port: 2096
+hop_next_sub_scheme: https
+
+# letsencrypt-ip (production LE for the box IP, issued once per box thanks to idempotency) | none | manual.
 hop_tls: letsencrypt-ip
+# PROXY_CERT / PROXY_KEY for hop_tls: manual (paths on the hop box).
+hop_cert: ""
+hop_key: ""
+# On a reinstall of a box that already holds a valid LE IP certificate for hop_host, install.sh gets
+# PROXY_TLS=manual with that certificate instead of issuing a new one (acme.sh keeps renewing it).
+hop_tls_reuse: true
+hop_le_cert_dir: /root/cert/ip
+
+# Address registered in the chain and used by the outer neighbour as its next hop.
 hop_host: "{{ ansible_facts['default_ipv4']['address'] }}"
+# PROXY_DOMAIN: public host name for subscription links; empty = none.
+hop_domain: ""
+# Sub port of this hop (PROXY_SUB_PORT, registry subPort) and its scheme (registry subScheme).
+hop_sub_port: 2096
+hop_sub_scheme: "{{ 'http' if hop_tls == 'none' else 'https' }}"
+
+# Next hop of the innermost hop: the panel. Empty address = host of panel_url (a run with the panel
+# play), else panel_public_ip from the panel's host_vars, else the panel host's default IPv4.
+hop_panel_host: ""
+hop_panel_sub_port: 2096
+hop_panel_sub_scheme: https
+
+# Release tag; `x-ui -v` prints it without the leading "v".
+hop_version: "{{ xui_version }}"
+hop_repo: SBKubric/3ax-ui-proxy
+hop_install_ref: "{{ hop_version }}"
+hop_install_url: "https://raw.githubusercontent.com/{{ hop_repo }}/{{ hop_install_ref }}/install.sh"
+hop_install_script: /root/3ax-ui-install.sh
+hop_install_timeout: 900
+# Extra environment for install.sh, e.g. {PROXY_TLS_IPV6: "1"}.
+hop_install_environment: {}
+# The join token travels to install.sh through this root-only file, never through the command line
+# or the task environment; the wrapper deletes it before install.sh starts.
+hop_token_file: /root/.3ax-ui-join-token
+
+hop_bin: /usr/local/x-ui/x-ui
+hop_proxy_config: /etc/x-ui/proxy.json
+
+# After an install, wait for the registry to report the hop joined.
+hop_join_retries: 12
+hop_join_delay: 5
+
+# Delete registry hops that are not in group `hops` (legacy included). false = report them only.
+hop_prune: true

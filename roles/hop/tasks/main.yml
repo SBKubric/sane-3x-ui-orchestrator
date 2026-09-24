@@ -1,7 +1,66 @@
 ---
-# Placeholder: the role is implemented in SBKubric/3ax-ui-orchestrator#3.
-# Until then it is a no-op so that site.yml and both profiles already run end to end.
-- name: Role hop is not implemented yet
-  ansible.builtin.debug:
-    msg: "role hop: no-op stub, see SBKubric/3ax-ui-orchestrator#3"
-    verbosity: 1
+# Role hop. Every hop host checks its inputs and reads its box (in parallel); then the first host of
+# the play converges the panel's chain registry with group `hops` for all of them, from the panel
+# outward: add or re-join each hop and install its box, make the hop_active edge active, delete what
+# the inventory does not list. Registry calls run on the panel host (role panel's api_login helper),
+# box operations on each hop host (delegate_to).
+- name: Check hop inputs
+  ansible.builtin.assert:
+    that:
+      - xui_version is defined and xui_version | string | length > 0
+      - hop_role is defined and hop_role in ['inner', 'edge']
+      - hop_name is match('^[a-z0-9-]{1,32}$')
+      - hop_role != 'inner' or (hop_position is defined and hop_position | string is match('^[0-9]+$') and hop_position | int >= 1)
+      - not hop_active | bool or hop_role == 'edge'
+      - hop_tls in ['letsencrypt-ip', 'none', 'manual']
+      - hop_tls != 'manual' or (hop_cert | length > 0 and hop_key | length > 0)
+      - hop_sub_port | int >= 1 and hop_sub_port | int <= 65535
+      - hop_sub_scheme in ['http', 'https']
+    fail_msg: >-
+      hop {{ inventory_hostname }}: needs xui_version, hop_role inner|edge, hop_name [a-z0-9-]{1,32},
+      hop_position >= 1 on an inner hop, hop_active only on an edge, hop_tls letsencrypt-ip|none|manual
+      (manual needs hop_cert and hop_key), hop_sub_port 1-65535, hop_sub_scheme http|https.
+    quiet: true
+
+- name: Gather network facts for the hop address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when: ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Read the hop box
+  ansible.builtin.include_tasks: probe.yml
+
+- name: Keep this hop's resolved settings for the registry run
+  ansible.builtin.set_fact:
+    hop_spec:
+      inventory_host: "{{ inventory_hostname }}"
+      name: "{{ hop_name }}"
+      role: "{{ hop_role }}"
+      position: "{{ hop_position | default(0) | int }}"
+      active: "{{ hop_active | bool }}"
+      host: "{{ hop_host }}"
+      sub_port: "{{ hop_sub_port | int }}"
+      sub_scheme: "{{ hop_sub_scheme }}"
+      next: "{{ hop_next }}"
+      next_sub_port: "{{ hop_next_sub_port | int }}"
+      next_sub_scheme: "{{ hop_next_sub_scheme }}"
+      tls: "{{ hop_tls }}"
+      cert: "{{ hop_cert }}"
+      key: "{{ hop_key }}"
+      domain: "{{ hop_domain }}"
+      install_environment: "{{ hop_install_environment }}"
+      tag: "{{ hop_version }}"
+      repo: "{{ hop_repo }}"
+      install_url: "{{ hop_install_url }}"
+      install_script: "{{ hop_install_script }}"
+      install_timeout: "{{ hop_install_timeout | int }}"
+      token_file: "{{ hop_token_file }}"
+      le_cert_dir: "{{ hop_le_cert_dir }}"
+      bin: "{{ hop_bin }}"
+      version: "{{ hop_version | regex_replace('^v', '') }}"
+
+# One registry run for the whole chain: the order between hops matters (an outer hop joins through
+# its inner neighbour), so it is a loop on one host rather than a play over all of them.
+- name: Converge the chain registry
+  ansible.builtin.include_tasks: registry.yml
+  when: inventory_hostname == ansible_play_hosts | first

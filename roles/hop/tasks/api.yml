@@ -1,0 +1,38 @@
+---
+# One call of the panel chain API (<base path>panel/api/chain/<hop_api_path>) on the panel host with
+# the api_login session. Inputs: hop_api_path, hop_api_method (GET|POST), hop_api_body (POST, optional).
+# Result: fact hop_api (the {success, msg, obj} envelope). A refusal (HTTP 200, success false, msg
+# "<wording> (<code>: <detail>)") or any other status fails with that message.
+# no_log: the request carries the session cookie and add/reissueToken answer with a join token.
+- name: Call the panel chain API
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/chain/{{ hop_api_path }}"
+    method: "{{ hop_api_method | default('GET') }}"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    body_format: json
+    body: "{{ hop_api_body | default({}) if hop_api_method | default('GET') == 'POST' else omit }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: hop_api_raw
+  failed_when: false
+  changed_when: hop_api_method | default('GET') == 'POST'
+  check_mode: false
+  no_log: true
+
+- name: Keep the chain API answer
+  ansible.builtin.set_fact:
+    hop_api: "{{ hop_api_raw.json | default({}) }}"
+  no_log: true
+
+- name: Require success from the chain API
+  ansible.builtin.assert:
+    that:
+      - hop_api_raw.status | default(0) == 200
+      - hop_api.success | default(false) | bool
+    fail_msg: >-
+      {{ hop_api_method | default('GET') }} chain/{{ hop_api_path }} failed: HTTP {{ hop_api_raw.status | default('?') }}
+      {{ hop_api.msg | default(hop_api_raw.msg | default('')) }}
+    quiet: true

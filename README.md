@@ -5,8 +5,8 @@ Ansible that deploys a whole 3ax-ui installation from an inventory: the panel
 monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring): mon-server and
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
-> Status: roles `common`, `panel`, `monserver` and `monclient` are real; role `hop`,
-> `wipe.yml` and `verify.yml` are no-op stubs, implemented in #3 and #5.
+> Status: roles `common`, `panel`, `hop`, `monserver` and `monclient` are real; `wipe.yml` and
+> `verify.yml` are no-op stubs, implemented in #5.
 
 ## Layout
 
@@ -25,10 +25,11 @@ roles/
   common/              supported OS check, base packages, time sync
   panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token;
                        tasks/api_login.yml is the panel API login helper for other roles
-  hop/                 (stub; variables documented in defaults/main.yml)
+  hop/                 chain registry converged with group hops through the panel API; install + join
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
                        tasks/api_login.yml is the mon-server admin API login helper for other roles
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
+tests/hop/             role hop against a mock of the panel chain API (CI)
 ```
 
 ## Profiles
@@ -142,6 +143,67 @@ It sets `panel_api_cookie`, `panel_api_url`, `panel_api_host`, `panel_api_ca_pat
 `panel_api_logged_in` on the calling host and fails on a wrong login unless `panel_api_login_required:
 false` is passed. Wrong credentials are HTTP 200 with `success: false`; API paths answer 404 without a
 session.
+
+## Role hop
+
+Runs on the hosts of group `hops` (decision #55, items 3 and 5). The inventory is the source of truth for
+the panel's chain registry. Each hop host checks its variables and reads its box in parallel (`x-ui -v`,
+`x-ui chain status`); then the first host of the play converges the registry for the whole chain, one hop
+after another from the panel outward (inner hops by `hop_position`, then the edges), because an outer hop
+joins through its inner neighbour. Registry calls go through role panel's `api_login` helper (on the panel
+host); box operations run on each hop host.
+
+Per hop, against `GET panel/api/chain/list`:
+
+| Registry / box | Action |
+|---|---|
+| no hop of that name | `add {name, host, role, subPort, subScheme, position}` → install with the join token |
+| `joined`, same host / sub port / scheme, `x-ui chain status` answers with this name, `x-ui -v` = `xui_version` | nothing |
+| anything else (pending, broken box, other version, new host) | `update` of what changed → `reissueToken` → install |
+
+Install = `install.sh <xui_version>` from the same tag with `XUI_PROXY_MODE=1`, `PROXY_NEXT_HOP`,
+`PROXY_NEXT_HOP_SUB_PORT`/`_SCHEME`, `PROXY_SUB_PORT`, `PROXY_TLS`, `PROXY_JOIN_TOKEN`; without a TTY and
+with an explicit tag install.sh reinstalls that tag and joins before the service starts. The role then
+waits for the registry to report the hop `joined` and checks the installed version.
+
+The next hop of the box is `hop_next` when set, otherwise derived: the inward neighbour's host, sub port
+and scheme as registered, or the panel for the innermost hop (`hop_panel_host`, else the host of
+`panel_url`, else `panel_public_ip` from the panel's `host_vars`, else its default IPv4; sub port
+`hop_panel_sub_port`, default 2096).
+
+After the loop: `setActive` on the edge with `hop_active: true` (exactly one edge must carry it, asserted
+before anything is written), then `del` of every registry hop the inventory does not list — the imported
+`legacy` edge included. Edges go first, inner hops from the outside in; an inner that still has live outer
+neighbours is left `draining` by the panel. The active edge is only deleted when the inventory has no edge
+at all, and then with `force` (the panel publishes the real server address again). `hop_prune: false`
+only reports the extra hops.
+
+What the role refuses instead of guessing (fix it in the panel, then rerun): a hop whose role differs
+from the registry, a hop that is `draining`, inner hops registered in another order than `hop_position`
+(role and position cannot change through `update`). With `--limit` only the hosts in the limit are
+converged; hops outside it are never deleted. Check mode (`--check`) logs in, reads the registry and the
+boxes and prints the plan (`hops: bridge=add, proxy=skip; active edge: proxy; delete: legacy`) without
+writing anything.
+
+Secrets: the join token and the session cookie never reach the output (`no_log` on every API call). The
+token goes to the box as a root-only file that the install wrapper reads and deletes before install.sh
+starts, so it is neither in the task arguments nor in the environment ansible sends; the install output is
+shown with the token masked.
+
+**Let's Encrypt on hops.** `hop_tls: letsencrypt-ip` (default) gets a production LE certificate for the
+box IP (short-lived, renewed by acme.sh from cron; port 80 must stay free). A converged hop is skipped, so
+the certificate is issued once per box; a reinstall of a box that still holds a valid certificate for its
+`hop_host` hands it to install.sh as `PROXY_TLS=manual` instead of issuing a new one (`hop_tls_reuse`).
+Every wipe of a hop box costs a new certificate: **wiping a hop more than 4 times a week is not
+supported** (LE limits on duplicate certificates). `hop_tls: none` (plain HTTP sub port) and `manual`
+(`hop_cert`/`hop_key` on the box) avoid LE.
+
+Variables beyond the per-hop table above (`roles/hop/defaults/main.yml`): `hop_host` (registered address,
+default IPv4 from facts), `hop_sub_port`/`hop_sub_scheme` (2096, `https` or `http` with `hop_tls: none`),
+`hop_domain` (`PROXY_DOMAIN`), `hop_next_sub_port`/`hop_next_sub_scheme` (for an explicit `hop_next`),
+`hop_panel_host`/`hop_panel_sub_port`/`hop_panel_sub_scheme`, `hop_install_environment` (extra install.sh
+environment, e.g. `PROXY_TLS_IPV6`), `hop_install_timeout`, `hop_join_retries`/`hop_join_delay`,
+`hop_prune`, `hop_tls_reuse`.
 
 ## Role monserver
 
@@ -295,9 +357,13 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify
 
 ## Development
 
-CI (`.github/workflows/ci.yml`) runs `ansible-lint` with the `production` profile (`.ansible-lint`) and
-`ansible-playbook --syntax-check` of every playbook against every inventory. No Molecule. Locally
-without an ansible install:
+CI (`.github/workflows/ci.yml`) runs `ansible-lint` with the `production` profile (`.ansible-lint`),
+`ansible-playbook --syntax-check` of every playbook against every inventory, and
+`tests/hop/test_hop_role.py`: role hop on local stand-in hosts against `tests/hop/mock_panel.py` (the panel
+chain API: login, list/add/update/reissueToken/setActive/del with the panel's refusals) and a fake
+install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
+certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output. No
+Molecule. Locally without an ansible install:
 
 ```sh
 docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
@@ -305,7 +371,8 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   ansible-galaxy collection install -r requirements.yml &&
   ansible-lint &&
   for inv in inventories/*/; do for pb in site.yml wipe.yml verify.yml; do
-    ansible-playbook -i "$inv" "$pb" --syntax-check; done; done'
+    ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
+  python3 tests/hop/test_hop_role.py'
 ```
 
 ## License

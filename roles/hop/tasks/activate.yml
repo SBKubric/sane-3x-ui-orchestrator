@@ -1,0 +1,23 @@
+---
+# setActive on the edge with hop_active (asserted to be exactly one). Only the published host changes;
+# nothing on any box does. Refused by the panel unless that edge is joined (or legacy).
+- name: Re-read the registry before activation
+  ansible.builtin.include_tasks: list.yml
+
+- name: Find the hop_active edge in the registry
+  ansible.builtin.set_fact:
+    hop_active_entry: "{{ hop_registry.hops | selectattr('name', 'equalto', hop_active_edge) | first | default({}) }}"
+
+- name: Require the hop_active edge in the registry
+  ansible.builtin.assert:
+    that:
+      - hop_active_entry | length > 0
+    fail_msg: "{{ hop_active_edge }} (hop_active) is not in the chain registry; converge it first (outside --limit or unreachable?)"
+    quiet: true
+
+- name: "Make the hop_active edge active: {{ hop_active_edge }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: "setActive/{{ hop_active_entry.id }}"
+    hop_api_method: POST
+  when: not hop_active_entry.isActive | bool

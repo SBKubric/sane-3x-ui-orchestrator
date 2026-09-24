@@ -1,0 +1,97 @@
+---
+# install.sh <tag> in proxy mode on the box of hop_item, joining with hop_join_token. Without a TTY
+# and with an explicit tag install.sh reinstalls that tag over an existing box, rewrites
+# /etc/x-ui/proxy.json and joins with `x-ui chain rejoin` before the service starts.
+- name: "Download install.sh: {{ hop_item.name }}"
+  ansible.builtin.get_url:
+    url: "{{ hop_item.install_url }}"
+    dest: "{{ hop_item.install_script }}"
+    mode: "0700"
+    force: true
+  delegate_to: "{{ hop_item.inventory_host }}"
+
+# letsencrypt-ip on a box that already holds a valid certificate for its address: hand that
+# certificate over as manual, so a reinstall does not spend a Let's Encrypt issuance (acme.sh still
+# renews it and restarts x-ui).
+- name: "Choose the TLS mode: {{ hop_item.name }}"
+  ansible.builtin.set_fact:
+    hop_install_tls: >-
+      {{ {'PROXY_TLS': 'manual', 'PROXY_CERT': hop_item.le_cert_dir ~ '/fullchain.pem', 'PROXY_KEY': hop_item.le_cert_dir ~ '/privkey.pem'}
+         if hostvars[hop_item.inventory_host].hop_box.le_cert_reusable | bool else
+         {'PROXY_TLS': 'manual', 'PROXY_CERT': hop_item.cert, 'PROXY_KEY': hop_item.key}
+         if hop_item.tls == 'manual' else
+         {'PROXY_TLS': hop_item.tls} }}
+
+- name: "Install and join the chain: {{ hop_item.name }}"
+  block:
+    - name: "Hand the join token to the box: {{ hop_item.name }}"
+      ansible.builtin.copy:
+        content: "{{ hop_join_token }}"
+        dest: "{{ hop_item.token_file }}"
+        mode: "0600"
+      delegate_to: "{{ hop_item.inventory_host }}"
+      no_log: true
+
+    # The wrapper reads the token from the file and removes it, so the token never shows in the task
+    # arguments, the environment ansible sends or the log. no_log hides the raw result; the next task
+    # prints its tail with the token masked.
+    - name: "Run install.sh in proxy mode: {{ hop_item.name }}"
+      ansible.builtin.command:
+        argv:
+          - bash
+          - -c
+          - 'PROXY_JOIN_TOKEN="$(cat -- "$1")" && rm -f -- "$1" && export PROXY_JOIN_TOKEN && exec bash "$2" "$3"'
+          - hop-install
+          - "{{ hop_item.token_file }}"
+          - "{{ hop_item.install_script }}"
+          - "{{ hop_item.tag }}"
+        chdir: "{{ hop_item.install_script | dirname }}"
+        stdin: ""
+      environment: >-
+        {{ {'XUI_REPO': hop_item.repo, 'XUI_PROXY_MODE': '1',
+            'PROXY_NEXT_HOP': hop_next_target.host, 'PROXY_NEXT_HOP_SUB_PORT': hop_next_target.port | string,
+            'PROXY_NEXT_HOP_SCHEME': hop_next_target.scheme,
+            'PROXY_SUB_PORT': hop_item.sub_port | string, 'PROXY_DOMAIN': hop_item.domain}
+           | combine(hop_install_tls) | combine(hop_item.install_environment) }}
+      timeout: "{{ hop_item.install_timeout | int }}"
+      delegate_to: "{{ hop_item.inventory_host }}"
+      register: hop_install
+      changed_when: true
+      failed_when: false
+      no_log: true
+  always:
+    - name: "Remove the join token file: {{ hop_item.name }}"
+      ansible.builtin.file:
+        path: "{{ hop_item.token_file }}"
+        state: absent
+      delegate_to: "{{ hop_item.inventory_host }}"
+
+- name: Show the end of the install.sh output
+  ansible.builtin.debug:
+    msg: "{{ (hop_install.stdout_lines | default([]))[-15:] | map('replace', hop_join_token, '<join token>') | list }}"
+    verbosity: 1
+
+- name: Require a successful install.sh
+  ansible.builtin.assert:
+    that:
+      - hop_install.rc | default(1) == 0
+    fail_msg: >-
+      install.sh {{ hop_item.tag }} on {{ hop_item.inventory_host }} exited with {{ hop_install.rc | default('?') }}
+      {{ hop_install.msg | default('') | replace(hop_join_token, '<join token>') }};
+      last output: {{ ((hop_install.stdout_lines | default([])) + (hop_install.stderr_lines | default([])))[-20:]
+                      | map('replace', hop_join_token, '<join token>') | list }}
+    quiet: true
+
+- name: "Read installed x-ui version: {{ hop_item.name }}"
+  ansible.builtin.command:
+    argv: ["{{ hop_item.bin }}", "-v"]
+  delegate_to: "{{ hop_item.inventory_host }}"
+  register: hop_new_version
+  changed_when: false
+
+- name: "Check the installed version: {{ hop_item.tag }}"
+  ansible.builtin.assert:
+    that:
+      - hop_new_version.stdout | trim == hop_item.version
+    fail_msg: "install.sh {{ hop_item.tag }} left version {{ hop_new_version.stdout | trim }} on {{ hop_item.inventory_host }}"
+    quiet: true
