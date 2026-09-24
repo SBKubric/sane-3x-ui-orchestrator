@@ -1,0 +1,44 @@
+---
+# Converges the whole installation described by the inventory profile:
+#   ansible-playbook -i inventories/<profile> site.yml
+# One play per group, in order panel -> hops -> monserver -> monclient.
+# An empty group (e.g. monserver/monclient in stand-chain) matches no hosts and is skipped.
+# site.yml never wipes anything; a fresh start is wipe.yml followed by site.yml.
+
+- name: Common host setup
+  hosts: all
+  tags: [common]
+  roles:
+    - role: common
+
+- name: Panel
+  hosts: panel
+  gather_facts: false
+  tags: [panel]
+  roles:
+    - role: panel
+
+- name: Proxy chain hops
+  hosts: hops
+  gather_facts: false
+  tags: [hops]
+  roles:
+    - role: hop
+
+- name: Monitoring server
+  hosts: monserver
+  gather_facts: false
+  tags: [monserver]
+  roles:
+    - role: monserver
+
+- name: Monitoring clients
+  hosts: monclient
+  gather_facts: false
+  tags: [monclient]
+  roles:
+    - role: monclient
+
+- name: Verify
+  ansible.builtin.import_playbook: verify.yml
+  tags: [verify]

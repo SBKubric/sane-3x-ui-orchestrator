@@ -1,0 +1,13 @@
+---
+# Post-deploy checks; imported last by site.yml (tag verify) and runnable on its own:
+#   ansible-playbook -i inventories/<profile> verify.yml
+# Non-destructive only. Implemented in SBKubric/3ax-ui-orchestrator#5.
+
+- name: Verify deployment
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verification is not implemented yet
+      ansible.builtin.debug:
+        msg: "verify.yml: no-op stub, see SBKubric/3ax-ui-orchestrator#5"
+        verbosity: 1

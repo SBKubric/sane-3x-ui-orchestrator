@@ -1,0 +1,21 @@
+---
+# Role hop (SBKubric/3ax-ui-orchestrator#3). Runs on every host of group `hops`;
+# the inventory is the source of truth for the panel's chain registry.
+#
+# Per-host inputs (inventories/<profile>/host_vars/<hop>.yml):
+#   hop_role       inner | edge                                   (required)
+#   hop_position   integer order of inner hops, 1 = next to panel (required for inner)
+#   hop_active     true on exactly one edge hop                   (default below)
+#   hop_name       name in the chain registry                     (default below)
+#   hop_next       next hop inward; empty = derived: edge -> outermost inner, inner N -> inner N-1, inner 1 -> panel
+#   hop_tls        PROXY_TLS mode for install.sh                  (default below)
+#   hop_host       public address registered in the chain         (default below)
+# Group inputs: xui_version (group_vars/all).
+# Needs the panel facts from role panel (panel_url, login via the vault account).
+
+hop_name: "{{ inventory_hostname }}"
+hop_active: false
+hop_next: ""
+# letsencrypt-ip (production LE, issued once per box thanks to idempotency) | none | manual.
+hop_tls: letsencrypt-ip
+hop_host: "{{ ansible_facts['default_ipv4']['address'] }}"

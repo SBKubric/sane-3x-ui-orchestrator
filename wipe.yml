@@ -1,0 +1,27 @@
+---
+# Destroys the installation on every host of the profile so that site.yml can start from scratch:
+#   ansible-playbook -i inventories/<profile> wipe.yml -e wipe_confirm=yes
+# Refuses to run without wipe_confirm=yes. Wipe steps are implemented in SBKubric/3ax-ui-orchestrator#5.
+
+- name: Require explicit wipe confirmation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Refuse without -e wipe_confirm=yes
+      ansible.builtin.assert:
+        that:
+          - wipe_confirm | default('') | string == 'yes'
+        fail_msg: "wipe.yml deletes panel, chain and monitoring state; rerun with -e wipe_confirm=yes"
+        success_msg: "wipe confirmed"
+        quiet: true
+
+- name: Wipe installation
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Wipe is not implemented yet
+      ansible.builtin.debug:
+        msg: "wipe.yml: no-op stub, see SBKubric/3ax-ui-orchestrator#5"
+        verbosity: 1

@@ -1,0 +1,6 @@
+---
+# Inner hop next to the panel.
+hop_name: bridge
+hop_role: inner
+hop_position: 1
+hop_tls: letsencrypt-ip

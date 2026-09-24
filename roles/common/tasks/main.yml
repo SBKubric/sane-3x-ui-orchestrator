@@ -1,0 +1,82 @@
+---
+- name: Assert supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] in common_supported_os
+      - >-
+        (ansible_facts['distribution_major_version'] if ansible_facts['distribution'] == 'Debian'
+        else ansible_facts['distribution_version']) in common_supported_os[ansible_facts['distribution']]
+    fail_msg: >-
+      {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is not supported;
+      supported: Debian 12/13, Ubuntu 22.04/24.04.
+    success_msg: "{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is supported"
+    quiet: true
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Gather installed packages
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Choose time sync daemon
+  ansible.builtin.set_fact:
+    common_time_service: >-
+      {{ 'none' if ansible_facts['virtualization_role'] == 'guest'
+                   and ansible_facts['virtualization_type'] in common_container_virtualization
+      else 'chrony' if 'chrony' in ansible_facts['packages']
+      else 'ntpsec' if 'ntpsec' in ansible_facts['packages']
+      else 'systemd-timesyncd' }}
+
+- name: Report time sync left to the container host
+  ansible.builtin.debug:
+    msg: "{{ ansible_facts['virtualization_type'] }} container: the clock belongs to the host, time sync is not managed"
+  when: common_time_service == 'none'
+
+- name: Install systemd-timesyncd
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+  when: common_time_service == 'systemd-timesyncd'
+
+- name: Configure systemd-timesyncd servers
+  when: common_time_service == 'systemd-timesyncd'
+  block:
+    - name: Create timesyncd drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/timesyncd.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write timesyncd servers drop-in
+      ansible.builtin.copy:
+        dest: /etc/systemd/timesyncd.conf.d/10-3ax-ui.conf
+        content: |
+          # Managed by ansible (3ax-ui-orchestrator, role common).
+          [Time]
+          NTP={{ common_ntp_servers | join(' ') }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: common_ntp_servers | length > 0
+      notify: Restart time sync
+
+    - name: Remove timesyncd servers drop-in
+      ansible.builtin.file:
+        path: /etc/systemd/timesyncd.conf.d/10-3ax-ui.conf
+        state: absent
+      when: common_ntp_servers | length == 0
+      notify: Restart time sync
+
+- name: Enable and start time sync
+  ansible.builtin.systemd_service:
+    name: "{{ common_time_service }}"
+    enabled: true
+    state: started
+  when: common_time_service != 'none'

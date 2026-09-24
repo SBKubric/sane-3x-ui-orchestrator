@@ -1,0 +1,6 @@
+# Real vault files never go to git; only *.example templates are committed.
+vault.yml
+.vault-pass*
+*.retry
+/collections/
+.ansible/

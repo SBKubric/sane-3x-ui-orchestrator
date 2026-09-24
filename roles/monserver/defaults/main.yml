@@ -1,0 +1,16 @@
+---
+# Role monserver (SBKubric/3ax-ui-orchestrator#4). Runs on the single host of group `monserver`.
+#
+# Inputs from the inventory (group_vars/all):
+#   mon_version       release tag of SBKubric/3ax-ui-monitoring, e.g. v0.1.0-stand.2
+#   acme_production   false = Let's Encrypt staging for mon-server (MON_TLS_ACME_CA)
+# Inputs from the vault: mon_admin_user, mon_admin_password, tg_bot_token, tg_chat_id.
+# Inputs from role panel facts: panel_url, panel_mon_token, panel_ca_pem (Settings via admin API).
+
+monserver_repo: SBKubric/3ax-ui-monitoring
+monserver_version: "{{ mon_version }}"
+monserver_acme_ca: "{{ 'production' if acme_production | default(false) | bool else 'staging' }}"
+# publicIp in the config is mandatory.
+monserver_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+monserver_config_path: /etc/mon-server/config.json
+monserver_bin_path: /usr/local/bin/mon-server

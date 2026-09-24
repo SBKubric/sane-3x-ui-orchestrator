@@ -1,0 +1,50 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ansible-lint and syntax-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install ansible-core and ansible-lint
+        run: pip install -r requirements.txt
+
+      - name: Install collections
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: ansible-lint (profile from .ansible-lint)
+        run: ansible-lint
+
+      - name: Syntax check every playbook against every inventory profile
+        run: |
+          set -e
+          for inv in inventories/*/; do
+            for pb in site.yml wipe.yml verify.yml; do
+              echo "::group::$pb @ $inv"
+              ansible-playbook -i "$inv" "$pb" --syntax-check
+              echo "::endgroup::"
+            done
+          done
+
+      - name: wipe.yml refuses without confirmation
+        run: |
+          if ansible-playbook -i inventories/stand-full wipe.yml; then
+            echo "wipe.yml ran without -e wipe_confirm=yes" >&2
+            exit 1
+          fi

@@ -1,0 +1,20 @@
+---
+# Template for group_vars/all/vault.yml (git-ignored). Copy, fill, encrypt:
+#   cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+#   ansible-vault encrypt group_vars/all/vault.yml
+# Shared by every inventory profile (playbook-level group_vars).
+
+# Panel account, applied by role panel via `x-ui setting` right after install (#2).
+panel_user: admin
+panel_password: change-me
+panel_port: 2053
+# Web base path with leading and trailing slash, e.g. /s3cr3t/.
+panel_base_path: /change-me/
+
+# mon-server admin account (`mon-server admin set`), role monserver (#4).
+mon_admin_user: monadmin
+mon_admin_password: change-me
+
+# One Telegram bot and chat for both the panel and mon-server (#2, #4).
+tg_bot_token: "123456:change-me"
+tg_chat_id: "-1000000000000"

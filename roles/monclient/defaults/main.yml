@@ -1,0 +1,20 @@
+---
+# Role monclient (SBKubric/3ax-ui-orchestrator#4). Runs on every host of group `monclient`.
+#
+# Inputs from the inventory:
+#   mon_version        release tag of SBKubric/3ax-ui-monitoring   (group_vars/all)
+#   mon_xray_version   xray release tag for mon-client             (group_vars/monclient)
+#   acme_production    false = trust the vendored LE staging roots (SSL_CERT_FILE)
+#   mon_auto_approve   true = approve the pairing request through the mon-server admin API
+#   mon_name, mon_region, mon_paths   approval payload             (host_vars, optional)
+# Inputs from the vault: mon_admin_user, mon_admin_password (admin API of mon-server).
+
+monclient_repo: SBKubric/3ax-ui-monitoring
+monclient_version: "{{ mon_version }}"
+monclient_xray_version: "{{ mon_xray_version }}"
+monclient_name: "{{ mon_name | default(inventory_hostname) }}"
+monclient_region: "{{ mon_region | default('') }}"
+monclient_paths: "{{ mon_paths | default(['direct', 'proxy']) }}"
+monclient_auto_approve: "{{ mon_auto_approve | default(true) | bool }}"
+monclient_bin_path: /usr/local/bin/mon-client
+monclient_le_staging_roots: /etc/mon-client/le-staging-roots.pem

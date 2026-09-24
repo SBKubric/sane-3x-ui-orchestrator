@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: SBKubric
+  description: "Base host setup for 3ax-ui: supported OS check, base packages, time sync"
+  license: GPL-3.0-only
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+        - trixie
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+dependencies: []
