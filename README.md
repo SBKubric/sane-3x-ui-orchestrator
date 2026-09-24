@@ -176,13 +176,17 @@ the chain revision when the registry has hops. Hops that join afterwards get the
 document; joined hops pick them up on their next poll (`chainPollSeconds`, 30 s ±20 %, one poll per hop
 from the panel outward) and restart the relay. verify.yml waits up to 2 minutes for that.
 
+Port 443 is not available for an inbound while the panel's nginx front is on (`nginxMode` other than `off`;
+install.sh sets `shared`): nginx owns the public port and the panel refuses the add with "Port already
+exists: 443". The stand inventories therefore put VLESS-Reality on 8443.
+
 Example (`inventories/stand-full/group_vars/panel.yml`):
 
 ```yaml
 panel_inbounds:
   - remark: vless-reality
     protocol: vless
-    port: 443
+    port: 8443
     settings:
       decryption: none
       fallbacks: []

@@ -119,7 +119,7 @@ class PanelInboundsTest(unittest.TestCase):
         keys = panel["x25519"][0]
 
         vless = self.inbounds()["vless-reality"]
-        self.assertEqual((vless["protocol"], vless["port"], vless["enable"], vless["tag"]), ("vless", 443, True, "inbound-443"))
+        self.assertEqual((vless["protocol"], vless["port"], vless["enable"], vless["tag"]), ("vless", 8443, True, "inbound-8443"))
         self.assertEqual(json.loads(vless["settings"]), {"clients": [], "decryption": "none", "fallbacks": []})
         stream = json.loads(vless["streamSettings"])
         reality = stream["realitySettings"]
@@ -137,7 +137,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(json.loads(awg["settings"]), {"clients": []})
         self.assertTrue(panel["awg"]["enable"])
         self.assertEqual(panel["awg"]["listenPort"], 51820)
-        self.assertEqual(panel["ports"], [443, 51820], "the chain relays both inbounds")
+        self.assertEqual(panel["ports"], [8443, 51820], "the chain relays both inbounds")
         self.assertGreater(self.state()["revision"], revision, "the chain revision moved with the ports")
 
         self.assert_idempotent()
@@ -174,7 +174,7 @@ class PanelInboundsTest(unittest.TestCase):
     def test_port_and_enable_are_converged(self):
         self.converge_fresh()
         changed = json.loads(json.dumps(STAND_INBOUNDS))
-        changed[0]["port"] = 8443
+        changed[0]["port"] = 9443
         changed[1]["enable"] = False
         self.play(inbounds=changed)
         ids = {r: i["id"] for r, i in self.inbounds().items()}
@@ -182,10 +182,10 @@ class PanelInboundsTest(unittest.TestCase):
                          [("POST", "awg/server"), ("POST", f"inbounds/update/{ids['vless-reality']}"),
                           ("POST", f"inbounds/setEnable/{ids['awg']}")])
         inbounds = self.inbounds()
-        self.assertEqual((inbounds["vless-reality"]["port"], inbounds["vless-reality"]["tag"]), (8443, "inbound-8443"))
+        self.assertEqual((inbounds["vless-reality"]["port"], inbounds["vless-reality"]["tag"]), (9443, "inbound-9443"))
         self.assertFalse(inbounds["awg"]["enable"])
         self.assertFalse(self.panel()["awg"]["enable"])
-        self.assertEqual(self.panel()["ports"], [8443])
+        self.assertEqual(self.panel()["ports"], [9443])
         self.assert_idempotent(inbounds=changed)
 
     def test_awg_server_switched_off_by_hand_is_switched_on(self):
@@ -226,7 +226,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(self.reads, [])
 
     def test_malformed_entries_are_refused(self):
-        bad = [{"remark": "a", "protocol": "vless", "port": 443, "settings": {"clients": []}},
+        bad = [{"remark": "a", "protocol": "vless", "port": 8443, "settings": {"clients": []}},
                {"remark": "b", "protocol": "vless"},
                {"remark": "c", "protocol": "amneziawg", "settings": {}},
                {"remark": "d", "protocol": "vless", "port": 444, "sreamSettings": {}},
@@ -239,7 +239,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(self.writes, [])
 
     def test_protocol_change_is_refused(self):
-        post("/test/panel/reset", {"inbounds": [{"remark": "vless-reality", "protocol": "trojan", "port": 443,
+        post("/test/panel/reset", {"inbounds": [{"remark": "vless-reality", "protocol": "trojan", "port": 8443,
                                                  "settings": '{"clients": []}'}]})
         out = self.play(expect_rc=2)
         self.assertIn("vless-reality is trojan in the panel but vless in panel_inbounds", out)
@@ -247,8 +247,8 @@ class PanelInboundsTest(unittest.TestCase):
 
     # --- verify.yml: monitoring targets --------------------------------------------------------------
     def seed_targets(self, awg_targets):
-        vless = {"kind": "xray", "inboundId": 1, "tag": "inbound-443", "remark": "vless-reality", "protocol": "vless",
-                 "port": 443, "enable": True, "worst": "UP",
+        vless = {"kind": "xray", "inboundId": 1, "tag": "inbound-8443", "remark": "vless-reality", "protocol": "vless",
+                 "port": 8443, "enable": True, "worst": "UP",
                  "targets": [target("xray", 1, "direct"), target("xray", 1, "proxy")]}
         awg = {"kind": "awg", "inboundId": 0, "tag": "inbound-amneziawg", "remark": "awg", "protocol": "amneziawg",
                "port": 51820, "enable": True, "worst": "UP", "targets": awg_targets}
