@@ -1,7 +1,44 @@
 ---
-# Placeholder: the role is implemented in SBKubric/3ax-ui-orchestrator#4.
-# Until then it is a no-op so that site.yml and both profiles already run end to end.
-- name: Role monclient is not implemented yet
-  ansible.builtin.debug:
-    msg: "role monclient: no-op stub, see SBKubric/3ax-ui-orchestrator#4"
-    verbosity: 1
+# Role monclient: mon-client and xray release binaries by tag, systemd unit with MON_SERVER_URL (and the
+# LE staging roots on a staging mon-server), then the pairing request approved through mon-server's
+# admin API.
+- name: Check role inputs
+  ansible.builtin.assert:
+    that:
+      - mon_version is defined and mon_version | string | length > 0
+      - mon_xray_version is defined and mon_xray_version | string | length > 0
+      - monclient_name | string | length > 0
+      - monclient_paths | length > 0
+      - monclient_paths | difference(['direct', 'proxy']) | length == 0
+      - monclient_server_url | length > 0 or monclient_server_host | length > 0
+    fail_msg: >-
+      role monclient needs mon_version (group_vars/all), mon_xray_version (group_vars/monclient), a non-empty
+      mon_name, mon_paths from [direct, proxy], and a mon-server: a host in group monserver or monclient_server_url.
+    quiet: true
+
+- name: Gather facts of the mon-server host for its address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  delegate_to: "{{ monclient_server_host }}"
+  delegate_facts: true
+  run_once: true
+  when:
+    - monclient_server_url | length == 0
+    - hostvars[monclient_server_host]['monserver_url'] is not defined
+    - hostvars[monclient_server_host]['ansible_facts']['default_ipv4']['address'] is not defined
+
+- name: Resolve MON_SERVER_URL
+  ansible.builtin.set_fact:
+    monclient_server_url_effective: >-
+      {{ monclient_server_url if monclient_server_url | length > 0
+         else hostvars[monclient_server_host]['monserver_url'] if hostvars[monclient_server_host]['monserver_url'] is defined
+         else 'https://' ~ hostvars[monclient_server_host]['ansible_facts']['default_ipv4']['address'] ~ ':443' }}
+
+- name: Install mon-client and xray
+  ansible.builtin.include_tasks: install.yml
+
+- name: Service user, trust and unit
+  ansible.builtin.include_tasks: service.yml
+
+- name: Approve the pairing request
+  ansible.builtin.include_tasks: approve.yml

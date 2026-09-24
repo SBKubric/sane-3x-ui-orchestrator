@@ -1,0 +1,26 @@
+# {{ ansible_managed }} (3ax-ui-orchestrator, role monclient)
+[Unit]
+Description=3ax-ui mon-client
+Documentation=https://github.com/{{ monclient_repo }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={{ monclient_bin_path }} run --state-dir {{ monclient_state_dir }} --xray-bin {{ monclient_xray_bin_path }} --log-level {{ monclient_log_level }}
+Environment=MON_SERVER_URL={{ monclient_server_url_effective }}
+{% if monclient_staging_roots | bool %}
+# mon-server on Let's Encrypt staging: trust its roots (Go still reads /etc/ssl/certs as well).
+Environment=SSL_CERT_FILE={{ monclient_le_staging_roots }}
+{% endif %}
+Restart=always
+RestartSec=5
+User={{ monclient_user }}
+Group={{ monclient_user }}
+NoNewPrivileges=true
+# state.json holds the client token: owner-only.
+StateDirectory={{ monclient_state_dir | basename }}
+StateDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+---
+# A replacement keeps the old record's region and paths; bring them (and those of a record edited by
+# hand) back to the inventory values. Changing paths gives the mon-client a new config revision.
+- name: Read the mon-client record
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/clients"
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+    validate_certs: false
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  register: monclient_registry_after
+
+- name: Update region and paths of {{ monclient_name }}
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/clients/{{ monclient_record.id }}"
+    method: POST
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body:
+      name: "{{ monclient_name }}"
+      region: "{{ monclient_region }}"
+      paths: "{{ monclient_paths }}"
+    validate_certs: false
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  vars:
+    monclient_record: >-
+      {{ monclient_registry_after.json.obj.clients | selectattr('name', 'equalto', monclient_name)
+         | rejectattr('tokenRevoked') | first | default({}) }}
+  when:
+    - monclient_record | length > 0
+    - monclient_record.region != monclient_region or monclient_record.paths | sort != monclient_paths | sort
+  changed_when: true
