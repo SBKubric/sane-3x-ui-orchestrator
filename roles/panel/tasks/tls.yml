@@ -1,0 +1,53 @@
+---
+# A self-signed certificate for the panel's public IP, made once and kept: the key, the CSR and the
+# certificate are regenerated only when missing or when the SANs change (e.g. a new public IP).
+- name: Install python3-cryptography for community.crypto
+  ansible.builtin.apt:
+    name: python3-cryptography
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create panel TLS directory
+  ansible.builtin.file:
+    path: "{{ panel_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Generate panel private key
+  community.crypto.openssl_privatekey:
+    path: "{{ panel_key_file }}"
+    type: ECC
+    curve: secp256r1
+    owner: root
+    group: root
+    mode: "0600"
+  notify: panel restart
+
+- name: Generate panel certificate signing request
+  community.crypto.openssl_csr:
+    path: "{{ panel_csr_file }}"
+    privatekey_path: "{{ panel_key_file }}"
+    common_name: "{{ panel_public_ip }}"
+    subject_alt_name: "{{ panel_cert_sans }}"
+    # Same shape as `openssl req -x509`: the certificate is its own CA, so mon-server (panelCa) and
+    # ca_path of the uri module can trust it directly.
+    basic_constraints: ["CA:TRUE"]
+    basic_constraints_critical: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Generate self-signed panel certificate
+  community.crypto.x509_certificate:
+    path: "{{ panel_cert_file }}"
+    privatekey_path: "{{ panel_key_file }}"
+    csr_path: "{{ panel_csr_file }}"
+    provider: selfsigned
+    selfsigned_not_after: "+{{ panel_cert_valid_days }}d"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: panel restart

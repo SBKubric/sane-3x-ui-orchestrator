@@ -1,0 +1,16 @@
+---
+# The panel serves panel_cert_file/panel_key_file; `x-ui cert` sets both (and the subscription pair).
+- name: Read panel certificate settings
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", setting, -getCert]
+  register: panel_cert_setting
+  changed_when: false
+
+- name: Point the panel at the self-signed certificate
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", cert, -webCert, "{{ panel_cert_file }}", -webCertKey, "{{ panel_key_file }}"]
+  when: >-
+    ('cert: ' ~ panel_cert_file) not in panel_cert_setting.stdout_lines
+    or ('key: ' ~ panel_key_file) not in panel_cert_setting.stdout_lines
+  changed_when: true
+  notify: panel restart

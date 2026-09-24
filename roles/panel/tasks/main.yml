@@ -1,7 +1,47 @@
 ---
-# Placeholder: the role is implemented in SBKubric/3ax-ui-orchestrator#2.
-# Until then it is a no-op so that site.yml and both profiles already run end to end.
-- name: Role panel is not implemented yet
-  ansible.builtin.debug:
-    msg: "role panel: no-op stub, see SBKubric/3ax-ui-orchestrator#2"
-    verbosity: 1
+# Role panel: install/update by tag, self-signed TLS, account from the vault, Telegram and monitoring
+# through the x-ui CLI; leaves panel_url, panel_ca_pem and (with monitoring) panel_mon_token as facts.
+- name: Check role inputs
+  ansible.builtin.assert:
+    that:
+      - xui_version is defined and xui_version | string | length > 0
+      - panel_user is defined and panel_user | string | length > 0
+      - panel_password is defined and panel_password | string | length > 0
+      - panel_port is defined and panel_port | int > 0 and panel_port | int < 65536
+      - panel_base_path is defined and panel_base_path | regex_replace('^/+|/+$', '') | length >= 4
+      - (panel_tg_bot_token | length > 0) == (panel_tg_chat_id | string | length > 0)
+    fail_msg: >-
+      role panel needs xui_version (group_vars) and panel_user, panel_password, panel_port 1-65535,
+      panel_base_path of at least 4 characters (vault); tg_bot_token and tg_chat_id go together.
+    quiet: true
+
+- name: Gather network facts for the certificate address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when: ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Self-signed TLS certificate
+  ansible.builtin.include_tasks: tls.yml
+
+- name: Install or update the panel
+  ansible.builtin.include_tasks: install.yml
+
+- name: Keep the certificate paths in the panel settings
+  ansible.builtin.include_tasks: cert_sync.yml
+
+- name: Account, port and web base path from the vault
+  ansible.builtin.include_tasks: account.yml
+
+- name: Telegram bot from the vault
+  ansible.builtin.include_tasks: telegram.yml
+  when: panel_tg_bot_token | length > 0
+
+- name: Monitoring endpoint and token
+  ansible.builtin.include_tasks: monitoring.yml
+  when: panel_monitoring | bool
+
+- name: Apply pending panel restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Export panel facts
+  ansible.builtin.include_tasks: facts.yml

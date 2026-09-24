@@ -2,25 +2,66 @@
 # Role panel (SBKubric/3ax-ui-orchestrator#2). Runs on the single host of group `panel`.
 #
 # Inputs from the inventory (group_vars/all):
-#   xui_version        release tag passed to install.sh, e.g. v1.9.0-chain.3
+#   xui_version        release tag passed to install.sh, e.g. v1.9.0-chain.4
 # Inputs from the vault (group_vars/all/vault.yml):
 #   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
-#   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...`
+#   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...` (optional)
 # Monitoring is switched on only when group `monserver` is not empty.
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
-#   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver)
+#   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver; only with monitoring)
 #   panel_ca_pem       PEM of the self-signed panel certificate       (role monserver: panelCa)
 #   panel_url          https://<panel_public_ip>:<panel_port><panel_base_path>  (roles hop, monserver, verify)
+#
+# API login helper for other roles (hop, verify), see README "Panel API from other roles":
+#   - ansible.builtin.include_role: {name: panel, tasks_from: api_login}
+#   sets panel_api_cookie, panel_api_url, panel_api_host, panel_api_ca_path on the calling host.
 
-# Repository whose install.sh and releases are used.
+# Release tag to install; `x-ui -v` prints it without the leading "v".
+panel_version: "{{ xui_version }}"
+
+# Repository whose install.sh and releases are used (install.sh reads XUI_REPO).
 panel_repo: SBKubric/3ax-ui-proxy
+# Git ref install.sh is taken from; the tag keeps the prompt sequence in step with the release.
+panel_install_ref: "{{ panel_version }}"
+panel_install_url: "https://raw.githubusercontent.com/{{ panel_repo }}/{{ panel_install_ref }}/install.sh"
+panel_install_script: /root/3ax-ui-install.sh
+# install.sh also installs AmneziaWG/WireGuard/nginx; a fresh box can take a while.
+panel_install_timeout: 1800
+
+# Panel binary, installed by install.sh, and its service.
+panel_bin: /usr/local/x-ui/x-ui
+panel_service: x-ui
 
 # Address put into the IP SAN of the self-signed certificate and into panel_url.
 panel_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
 
-# Where the self-signed certificate is placed; the paths are given to install.sh (SSL option 3).
+# Where the self-signed certificate is placed; the paths are given to install.sh (SSL option 3)
+# and kept in the panel settings with `x-ui cert -webCert/-webCertKey`.
 panel_tls_dir: /etc/x-ui/tls
 panel_cert_file: "{{ panel_tls_dir }}/panel.crt"
 panel_key_file: "{{ panel_tls_dir }}/panel.key"
+panel_csr_file: "{{ panel_tls_dir }}/panel.csr"
 panel_cert_valid_days: 3650
+# SANs of the certificate. 127.0.0.1 lets on-host API calls (api_login.yml) verify it too.
+panel_cert_sans:
+  - "IP:{{ panel_public_ip }}"
+  - "IP:127.0.0.1"
+
+# Web base path as the panel stores it: leading and trailing slash.
+panel_web_base_path: "/{{ panel_base_path | regex_replace('^/+|/+$', '') }}/"
+
+# Telegram bot, from the vault; empty = leave the panel's Telegram settings alone.
+panel_tg_bot_token: "{{ tg_bot_token | default('') }}"
+panel_tg_chat_id: "{{ tg_chat_id | default('') }}"
+
+# Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
+panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"
+
+# Panel API as seen by api_login.yml: calls run on the panel host itself (delegate_to) against
+# 127.0.0.1 and verify the self-signed certificate.
+panel_api_host: "{{ groups['panel'][0] }}"
+panel_api_url: "https://127.0.0.1:{{ panel_port }}{{ panel_web_base_path }}"
+panel_api_ca_path: "{{ panel_cert_file }}"
+# false = api_login.yml reports a failed login in panel_api_logged_in instead of failing.
+panel_api_login_required: true
