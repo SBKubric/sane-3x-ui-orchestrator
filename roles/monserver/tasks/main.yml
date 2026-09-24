@@ -1,7 +1,38 @@
 ---
-# Placeholder: the role is implemented in SBKubric/3ax-ui-orchestrator#4.
-# Until then it is a no-op so that site.yml and both profiles already run end to end.
-- name: Role monserver is not implemented yet
-  ansible.builtin.debug:
-    msg: "role monserver: no-op stub, see SBKubric/3ax-ui-orchestrator#4"
-    verbosity: 1
+# Role monserver: release binary by tag, bootstrap config, systemd unit, admin account from the vault,
+# Settings (panel + Telegram) through the admin API; leaves monserver_url as a fact for role monclient.
+- name: Check role inputs
+  ansible.builtin.assert:
+    that:
+      - mon_version is defined and mon_version | string | length > 0
+      - mon_admin_user is defined and mon_admin_user | string | length > 0
+      - mon_admin_password is defined and mon_admin_password | string | length > 0
+      - monserver_tls_mode in ['acme-ip', 'files']
+      - monserver_tls_mode == 'acme-ip' or (monserver_tls_cert | length > 0 and monserver_tls_key | length > 0)
+      - (monserver_tg_bot_token | length > 0) == (monserver_tg_chat_id | string | length > 0)
+    fail_msg: >-
+      role monserver needs mon_version (group_vars) and mon_admin_user, mon_admin_password (vault);
+      monserver_tls_mode is acme-ip or files (files needs monserver_tls_cert and monserver_tls_key);
+      tg_bot_token and tg_chat_id go together.
+    quiet: true
+
+- name: Gather network facts for publicIp
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when: ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Install mon-server {{ monserver_version }}
+  ansible.builtin.include_tasks: install.yml
+
+- name: Config, service user and unit
+  ansible.builtin.include_tasks: service.yml
+
+- name: Admin account from the vault
+  ansible.builtin.include_tasks: admin.yml
+
+- name: Settings through the admin API
+  ansible.builtin.include_tasks: settings.yml
+
+- name: Export mon-server facts
+  ansible.builtin.set_fact:
+    monserver_url: "https://{{ monserver_public_ip }}:{{ monserver_port }}"

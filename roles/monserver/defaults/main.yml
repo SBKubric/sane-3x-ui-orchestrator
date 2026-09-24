@@ -3,14 +3,68 @@
 #
 # Inputs from the inventory (group_vars/all):
 #   mon_version       release tag of SBKubric/3ax-ui-monitoring, e.g. v0.1.0-stand.2
-#   acme_production   false = Let's Encrypt staging for mon-server (MON_TLS_ACME_CA)
+#   acme_production   false = Let's Encrypt staging for mon-server (MON_TLS_ACME_CA=staging)
 # Inputs from the vault: mon_admin_user, mon_admin_password, tg_bot_token, tg_chat_id.
-# Inputs from role panel facts: panel_url, panel_mon_token, panel_ca_pem (Settings via admin API).
+# Inputs from role panel facts (hostvars[groups['panel'][0]]): panel_url, panel_mon_token,
+# panel_ca_pem -> Settings panelUrl, monToken, panelCa through the admin API.
+#
+# Facts the role leaves for later plays (hostvars[groups['monserver'][0]]):
+#   monserver_url      https://<monserver_public_ip>:<monserver_port>  (role monclient: MON_SERVER_URL)
+#
+# Admin API login helper for other roles (monclient, verify), see README "mon-server admin API":
+#   - ansible.builtin.include_role: {name: monserver, tasks_from: api_login}
+#   sets monserver_api_cookie, monserver_api_url, monserver_api_host on the calling host.
 
 monserver_repo: SBKubric/3ax-ui-monitoring
 monserver_version: "{{ mon_version }}"
-monserver_acme_ca: "{{ 'production' if acme_production | default(false) | bool else 'staging' }}"
-# publicIp in the config is mandatory.
-monserver_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
-monserver_config_path: /etc/mon-server/config.json
+monserver_release_url: "https://github.com/{{ monserver_repo }}/releases/download/{{ monserver_version }}"
+monserver_asset: mon-server-linux-amd64.tar.gz
+# Downloaded archives, one directory per version; a download is skipped when the archive is
+# already there with the published sha256.
+monserver_cache_dir: "/var/cache/3ax-ui-orchestrator/mon-server/{{ monserver_version }}"
 monserver_bin_path: /usr/local/bin/mon-server
+
+monserver_user: mon-server
+monserver_service: mon-server
+monserver_config_path: /etc/mon-server/config.json
+# Must stay /var/lib/<monserver_service>: the unit's StateDirectory= owns it.
+monserver_data_dir: "/var/lib/{{ monserver_service }}"
+
+# Bootstrap config (README of 3ax-ui-monitoring, "Bootstrap config").
+monserver_port: 443
+# publicIp is mandatory in both TLS modes; set it in host_vars behind NAT.
+monserver_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+# acme-ip = Let's Encrypt certificate for publicIp; files = own certificate (test environments).
+monserver_tls_mode: acme-ip
+monserver_acme_ca: "{{ 'production' if acme_production | default(false) | bool else 'staging' }}"
+# tls.mode=files only: paths on the host, readable by the service user; the certificate needs an
+# IP SAN for publicIp.
+monserver_tls_cert: ""
+monserver_tls_key: ""
+# First start in acme-ip mode waits for the certificate; seconds to wait for /healthz.
+monserver_start_timeout: 180
+
+# Admin account (vault); `mon-server admin set` runs as the service user.
+monserver_admin_user: "{{ mon_admin_user }}"
+monserver_admin_password: "{{ mon_admin_password }}"
+
+# Admin API as seen by api_login.yml: calls run on the mon-server host itself (delegate_to) against
+# 127.0.0.1. The certificate is issued for publicIp (and on staging chains to an untrusted root), so
+# these loopback calls do not verify it.
+monserver_api_host: "{{ groups['monserver'][0] }}"
+monserver_api_url: "https://127.0.0.1:{{ monserver_port }}/admin/"
+# false = api_login.yml reports a failed login in monserver_api_logged_in instead of failing.
+monserver_api_login_required: true
+
+# Settings -> Real server, from the panel play's facts. Empty (no panel play in this run, e.g.
+# --tags monserver) = Settings are left alone with a warning.
+monserver_panel_host: "{{ (groups['panel'] | default([]) + [''])[0] }}"
+monserver_panel_url: "{{ hostvars[monserver_panel_host]['panel_url'] | default('') if monserver_panel_host else '' }}"
+monserver_panel_mon_token: "{{ hostvars[monserver_panel_host]['panel_mon_token'] | default('') if monserver_panel_host else '' }}"
+monserver_panel_ca: "{{ hostvars[monserver_panel_host]['panel_ca_pem'] | default('') if monserver_panel_host else '' }}"
+# Settings -> Check must answer "Panel reachable"; false = only warn.
+monserver_require_panel_reachable: true
+
+# Settings -> Telegram, from the vault; empty = leave mon-server's Telegram settings alone.
+monserver_tg_bot_token: "{{ tg_bot_token | default('') }}"
+monserver_tg_chat_id: "{{ tg_chat_id | default('') }}"

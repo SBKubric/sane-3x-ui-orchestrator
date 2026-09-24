@@ -1,0 +1,110 @@
+---
+# Settings -> Real server (panelUrl, monToken, panelCa) from the panel play's facts and Settings ->
+# Telegram from the vault. POST /admin/api/settings replaces the whole form, so the current settings
+# are read first and only these fields are changed; nothing is written when they already match.
+- name: Warn that the panel settings are left alone
+  ansible.builtin.debug:
+    msg: >-
+      No panel facts in this run (panel_url/panel_mon_token come from the panel play): mon-server's
+      panelUrl, monToken and panelCa are left as they are. Run the panel play too, e.g. --tags panel,monserver.
+  when: monserver_panel_url | length == 0 or monserver_panel_mon_token | length == 0
+
+- name: Read mon-server settings
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/settings"
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+    validate_certs: false
+    return_content: true
+  register: monserver_settings_current
+  no_log: true
+
+# panelCa arrived with SBKubric/3ax-ui-monitoring#65 (after v0.1.0-stand.2); without it mon-server
+# cannot trust the panel's self-signed certificate.
+- name: Require panelCa support
+  ansible.builtin.assert:
+    that:
+      - "'panelCa' in monserver_settings_current.json.obj.settings or not monserver_require_panel_reachable | bool"
+    fail_msg: >-
+      mon-server {{ monserver_version }} has no panelCa setting (SBKubric/3ax-ui-monitoring#65) and cannot trust
+      the panel's self-signed certificate; use a newer mon_version.
+    quiet: true
+
+- name: Compute wanted settings
+  ansible.builtin.set_fact:
+    monserver_settings_wanted: >-
+      {{ monserver_settings_current.json.obj.settings
+         | combine(monserver_settings_panel if monserver_panel_url | length > 0 and monserver_panel_mon_token | length > 0 else {})
+         | combine(monserver_settings_tg if monserver_tg_bot_token | length > 0 else {}) }}
+  vars:
+    monserver_settings_panel: >-
+      {{ {'panelUrl': monserver_panel_url | trim, 'monToken': monserver_panel_mon_token | trim}
+         | combine({'panelCa': monserver_panel_ca | trim} if 'panelCa' in monserver_settings_current.json.obj.settings else {}) }}
+    monserver_settings_tg:
+      tgToken: "{{ monserver_tg_bot_token | trim }}"
+      tgChatId: "{{ monserver_tg_chat_id | string | trim }}"
+  no_log: true
+
+- name: Save settings
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/settings"
+    method: POST
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body: "{{ monserver_settings_wanted }}"
+    validate_certs: false
+    status_code: [200, 400, 500]
+    return_content: true
+  register: monserver_settings_saved
+  when: monserver_settings_wanted != monserver_settings_current.json.obj.settings
+  changed_when: true
+  no_log: true
+
+- name: Check that the settings were saved
+  ansible.builtin.assert:
+    that:
+      - monserver_settings_saved.json.success | default(false) | bool
+    fail_msg: "POST /admin/api/settings failed (HTTP {{ monserver_settings_saved.status }}): {{ monserver_settings_saved.json.msg | default('') }}"
+    success_msg: "{{ monserver_settings_saved.json.msg | default('') }}"
+  when: monserver_settings_saved is not skipped
+
+# Settings -> Check: GET /state on the panel with the saved values, as the admin UI's Check button.
+- name: Check the panel from mon-server
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/settings/check"
+    method: POST
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body:
+      panelUrl: "{{ monserver_settings_wanted.panelUrl }}"
+      monToken: "{{ monserver_settings_wanted.monToken }}"
+      panelCa: "{{ monserver_settings_wanted.panelCa | default('') }}"
+      realHost: "{{ monserver_settings_wanted.realHost }}"
+    validate_certs: false
+    status_code: [200, 400, 502]
+    return_content: true
+  register: monserver_panel_check
+  when: monserver_settings_wanted.panelUrl | length > 0 and monserver_settings_wanted.monToken | length > 0
+  no_log: true
+
+- name: Evaluate the panel check
+  ansible.builtin.set_fact:
+    monserver_panel_reachable: >-
+      {{ (monserver_panel_check.json.success | default(false) | bool)
+         and (monserver_panel_check.json.msg | default('') is match('Panel reachable')) }}
+  when: monserver_panel_check is not skipped
+
+- name: Require "Panel reachable"
+  ansible.builtin.assert:
+    that:
+      - monserver_panel_reachable | bool or not monserver_require_panel_reachable | bool
+    fail_msg: "mon-server Settings -> Check: {{ monserver_panel_check.json.msg | default('HTTP ' ~ monserver_panel_check.status) }}"
+    success_msg: >-
+      mon-server Settings -> Check: {{ monserver_panel_check.json.msg | default('HTTP ' ~ monserver_panel_check.status) }}
+      {{ '(revision ' ~ monserver_panel_check.json.obj.revision ~ ', ' ~ monserver_panel_check.json.obj.inbounds ~ ' inbounds)'
+         if monserver_panel_reachable | bool else '(not required: monserver_require_panel_reachable=false)' }}
+  when: monserver_panel_check is not skipped
