@@ -1,13 +1,20 @@
 ---
 # Destroys the installation on every host of the profile so that site.yml can start from scratch:
 #   ansible-playbook -i inventories/<profile> wipe.yml -e wipe_confirm=yes
-# Refuses to run without wipe_confirm=yes. Wipe steps are implemented in SBKubric/3ax-ui-orchestrator#5.
+# Refuses to run without wipe_confirm=yes. One play per group, outside in (monclient -> monserver -> hops
+# -> panel); an empty group is skipped, a box with nothing installed reports ok, a second wipe changes
+# nothing. What each group loses is in roles/<role>/tasks/wipe.yml and the role's *_wipe_* defaults.
+# Kept unless asked (Let's Encrypt limits, see README):
+#   -e hop_wipe_le_cert=true         also delete the hops' LE IP certificates (/root/cert/ip, acme.sh)
+#   -e monserver_wipe_certs=true     also delete mon-server's ACME certificates (<data dir>/certs)
+# Tags as in site.yml (monclient, monserver, hops, panel) wipe some groups only.
 
 - name: Require explicit wipe confirmation
   hosts: localhost
   connection: local
   gather_facts: false
   any_errors_fatal: true
+  tags: [always]
   tasks:
     - name: Refuse without -e wipe_confirm=yes
       ansible.builtin.assert:
@@ -17,11 +24,42 @@
         success_msg: "wipe confirmed"
         quiet: true
 
-- name: Wipe installation
-  hosts: all
+- name: Wipe monitoring clients
+  hosts: monclient
   gather_facts: false
+  tags: [monclient]
   tasks:
-    - name: Wipe is not implemented yet
-      ansible.builtin.debug:
-        msg: "wipe.yml: no-op stub, see SBKubric/3ax-ui-orchestrator#5"
-        verbosity: 1
+    - name: Wipe mon-client
+      ansible.builtin.include_role:
+        name: monclient
+        tasks_from: wipe
+
+- name: Wipe monitoring server
+  hosts: monserver
+  gather_facts: false
+  tags: [monserver]
+  tasks:
+    - name: Wipe mon-server
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: wipe
+
+- name: Wipe proxy chain hops
+  hosts: hops
+  gather_facts: false
+  tags: [hops]
+  tasks:
+    - name: Wipe the hop box
+      ansible.builtin.include_role:
+        name: hop
+        tasks_from: wipe
+
+- name: Wipe panel
+  hosts: panel
+  gather_facts: false
+  tags: [panel]
+  tasks:
+    - name: Wipe the panel
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: wipe

@@ -22,3 +22,6 @@ common_ntp_servers: []
 # Container virtualization types (facts virtualization_type) whose clock is owned by the host:
 # time sync is skipped there (systemd-timesyncd refuses to run in containers anyway).
 common_container_virtualization: [lxc, openvz, docker, podman, container, systemd-nspawn]
+
+# Where the roles and install.sh put their systemd units; wipe_service.yml removes them from here.
+common_systemd_dir: /etc/systemd/system

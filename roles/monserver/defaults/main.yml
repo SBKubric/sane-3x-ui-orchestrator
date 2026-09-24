@@ -21,7 +21,8 @@ monserver_release_url: "https://github.com/{{ monserver_repo }}/releases/downloa
 monserver_asset: mon-server-linux-amd64.tar.gz
 # Downloaded archives, one directory per version; a download is skipped when the archive is
 # already there with the published sha256.
-monserver_cache_dir: "/var/cache/3ax-ui-orchestrator/mon-server/{{ monserver_version }}"
+monserver_cache_root: /var/cache/3ax-ui-orchestrator/mon-server
+monserver_cache_dir: "{{ monserver_cache_root }}/{{ monserver_version }}"
 monserver_bin_path: /usr/local/bin/mon-server
 
 monserver_user: mon-server
@@ -68,3 +69,15 @@ monserver_require_panel_reachable: true
 # Settings -> Telegram, from the vault; empty = leave mon-server's Telegram settings alone.
 monserver_tg_bot_token: "{{ tg_bot_token | default('') }}"
 monserver_tg_chat_id: "{{ tg_chat_id | default('') }}"
+
+# wipe.yml (tasks/wipe.yml): unit, binary, bootstrap config, downloaded releases and the data dir
+# (database: accounts, settings, mon-client registry). The ACME account and certificates certmagic keeps
+# in <data dir>/certs stay by default, together with the service user that owns them: a new mon-server on
+# the same publicIp reuses the certificate instead of asking Let's Encrypt again (production allows 5
+# certificates per identifier in 7 days). true = delete them and the user too.
+monserver_wipe_paths:
+  - "{{ monserver_bin_path }}"
+  - "{{ monserver_config_path | dirname }}"
+  - "{{ monserver_cache_root }}"
+monserver_wipe_certs: false
+monserver_certs_dir: "{{ monserver_data_dir }}/certs"

@@ -52,3 +52,14 @@ monclient_auto_approve: "{{ mon_auto_approve | default(true) | bool }}"
 # box to collect its token. A pending request lives 5 minutes.
 monclient_pairing_retries: 36
 monclient_pairing_delay: 5
+
+# wipe.yml (tasks/wipe.yml): unit, binaries, config dir (LE staging roots), state dir (state.json with the
+# token), downloaded releases; the service user and group go too.
+monclient_wipe_paths:
+  - "{{ monclient_bin_path }}"
+  - "{{ monclient_xray_bin_path }}"
+  - "{{ monclient_le_staging_roots | dirname }}"
+  - "{{ monclient_state_dir }}"
+  - "{{ monclient_cache_dir }}/mon-client"
+  - "{{ monclient_cache_dir }}/xray"
+

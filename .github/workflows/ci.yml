@@ -42,8 +42,11 @@ jobs:
             done
           done
 
-      - name: Role hop against the mock panel chain API
+      - name: Role hop and verify.yml against the mock panel chain API
         run: python3 tests/hop/test_hop_role.py
+
+      - name: wipe.yml on local stand-in boxes
+        run: python3 tests/wipe/test_wipe.py
 
       - name: wipe.yml refuses without confirmation
         run: |

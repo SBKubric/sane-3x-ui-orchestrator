@@ -1,0 +1,37 @@
+---
+# wipe.yml on a hop box: the x-ui service and the box's files (hop_wipe_paths). The panel's registry is
+# not touched here: a wiped panel forgets its hops, and a kept one sees the box broken and re-joins it on
+# the next site.yml. The LE IP certificate stays unless hop_wipe_le_cert is true.
+- name: Remove the x-ui service
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: wipe_service
+  vars:
+    common_wipe_unit: "{{ hop_service }}"
+
+- name: Remove hop files, chain state and join token
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ hop_wipe_paths }}"
+
+- name: Delete the Let's Encrypt IP certificate
+  when: hop_wipe_le_cert | bool
+  block:
+    # acme.sh keeps one directory per certificate, named after the IP (with _ecc for an ECDSA key); with
+    # it gone the acme.sh cron no longer renews (and re-installs) the certificate.
+    - name: Find acme.sh certificates for IP addresses
+      ansible.builtin.find:
+        paths: "{{ hop_acme_home }}"
+        file_type: directory
+        use_regex: true
+        patterns:
+          - '^[0-9]{1,3}(\.[0-9]{1,3}){3}(_ecc)?$'
+          - '^[0-9a-fA-F:]*:[0-9a-fA-F:]*(_ecc)?$'
+      register: hop_wipe_acme_certs
+
+    - name: Remove the certificate and its acme.sh entries
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ [hop_le_cert_dir] + hop_wipe_acme_certs.files | map(attribute='path') | list }}"

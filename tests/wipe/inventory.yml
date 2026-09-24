@@ -1,0 +1,64 @@
+---
+# Test inventory for wipe.yml: every host is local and each box is a directory under WIPE_TEST_ROOT
+# (the real paths below it, e.g. <box>/etc/x-ui). Unit names and users do not exist on the test machine,
+# so wipe.yml only works on the files. Driven by test_wipe.py.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    box: "{{ lookup('ansible.builtin.env', 'WIPE_TEST_ROOT') }}/{{ inventory_hostname }}"
+    common_systemd_dir: "{{ box }}/etc/systemd/system"
+    # panel
+    panel_service: 3axui-wipe-test-x-ui
+    panel_etc_dir: "{{ box }}/etc/x-ui"
+    panel_bin: "{{ box }}/usr/local/x-ui/x-ui"
+    panel_cli: "{{ box }}/usr/bin/x-ui"
+    panel_log_dir: "{{ box }}/var/log/x-ui"
+    panel_install_script: "{{ box }}/root/3ax-ui-install.sh"
+    panel_wipe_tunnel_dirs:
+      - {dir: "{{ box }}/etc/amnezia/amneziawg", quick: "false"}
+      - {dir: "{{ box }}/etc/wireguard", quick: "false"}
+    panel_wipe_nginx_files:
+      - "{{ box }}/etc/nginx/stream-enabled/3ax-ui.conf"
+      - "{{ box }}/etc/nginx/conf.d/3ax-ui.conf"
+    panel_wipe_nginx_conf: "{{ box }}/etc/nginx/nginx.conf"
+    panel_wipe_firewall_chain: 3AXUI-WIPE-TEST
+    # hops
+    hop_service: 3axui-wipe-test-x-ui
+    hop_proxy_config: "{{ box }}/etc/x-ui/proxy.json"
+    hop_bin: "{{ box }}/usr/local/x-ui/x-ui"
+    hop_cli: "{{ box }}/usr/bin/x-ui"
+    hop_log_dir: "{{ box }}/var/log/x-ui"
+    hop_install_script: "{{ box }}/root/3ax-ui-install.sh"
+    hop_token_file: "{{ box }}/root/.3ax-ui-join-token"
+    hop_le_cert_dir: "{{ box }}/root/cert/ip"
+    hop_acme_home: "{{ box }}/root/.acme.sh"
+    # mon-server
+    monserver_service: 3axui-wipe-test-mon-server
+    monserver_user: 3axui-wipe-test-mon-server
+    monserver_bin_path: "{{ box }}/usr/local/bin/mon-server"
+    monserver_config_path: "{{ box }}/etc/mon-server/config.json"
+    monserver_data_dir: "{{ box }}/var/lib/mon-server"
+    monserver_cache_root: "{{ box }}/var/cache/3ax-ui-orchestrator/mon-server"
+    # mon-client
+    monclient_service: 3axui-wipe-test-mon-client
+    monclient_user: 3axui-wipe-test-mon-client
+    monclient_bin_path: "{{ box }}/usr/local/bin/mon-client"
+    monclient_xray_bin_path: "{{ box }}/usr/local/bin/xray"
+    monclient_le_staging_roots: "{{ box }}/etc/mon-client/le-staging-roots.pem"
+    monclient_state_dir: "{{ box }}/var/lib/mon-client"
+    monclient_cache_dir: "{{ box }}/var/cache/3ax-ui-orchestrator"
+  children:
+    panel:
+      hosts:
+        real:
+    hops:
+      hosts:
+        bridge:
+        proxy:
+    monserver:
+      hosts:
+        mon-server:
+    monclient:
+      hosts:
+        mon-client:
