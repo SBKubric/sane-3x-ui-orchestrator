@@ -1,0 +1,75 @@
+---
+# install.sh <tag> when the panel is missing or runs another version; skipped when `x-ui -v` already
+# reports panel_version. Without a TTY and with an explicit tag install.sh reinstalls that tag (it never
+# hands over to update.sh), keeping the database and settings.
+- name: Check for an installed panel binary
+  ansible.builtin.stat:
+    path: "{{ panel_bin }}"
+  register: panel_bin_stat
+
+- name: Read installed panel version
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", "-v"]
+  register: panel_installed_version
+  changed_when: false
+  failed_when: false
+  when: panel_bin_stat.stat.exists
+
+- name: Decide whether install.sh has to run
+  ansible.builtin.set_fact:
+    panel_install_needed: >-
+      {{ not panel_bin_stat.stat.exists
+         or panel_installed_version.rc | default(1) != 0
+         or panel_installed_version.stdout | default('') | trim != panel_version | regex_replace('^v', '') }}
+
+- name: Run install.sh
+  when: panel_install_needed | bool
+  block:
+    # On an existing install the certificate must already be in the settings: install.sh asks for
+    # SSL only when none is configured, and would then read our answers in the wrong order.
+    - name: Point the existing panel at the certificate before reinstalling
+      ansible.builtin.include_tasks: cert_sync.yml
+      when: panel_bin_stat.stat.exists
+
+    - name: Download install.sh
+      ansible.builtin.get_url:
+        url: "{{ panel_install_url }}"
+        dest: "{{ panel_install_script }}"
+        owner: root
+        group: root
+        mode: "0700"
+        force: true
+
+    # Answers, in the order install.sh reads them on a fresh box (on a reinstall only the first one is
+    # read, the rest is ignored):
+    #   "Debug mode? [y/N]"                               -> N
+    #   "customize the Panel Port settings? [y/n]"        -> n (random port; the vault port follows)
+    #   "Choose an option (default 2 for IP)"             -> 3 (custom certificate paths)
+    #   "domain name certificate issued for"              -> empty (the IP is used)
+    #   "Input certificate path" / "Input private key path"
+    # The random credentials install.sh prints are replaced from the vault right after.
+    - name: Install panel {{ panel_version }}
+      ansible.builtin.command:
+        argv: [bash, "{{ panel_install_script }}", "{{ panel_version }}"]
+        chdir: /root
+        stdin: "{{ ['N', 'n', '3', '', panel_cert_file, panel_key_file] | join('\n') }}"
+      environment:
+        XUI_REPO: "{{ panel_repo }}"
+      timeout: "{{ panel_install_timeout | int }}"
+      register: panel_install
+      changed_when: true
+
+    - name: Read panel version after install
+      ansible.builtin.command:
+        argv: ["{{ panel_bin }}", "-v"]
+      register: panel_new_version
+      changed_when: false
+
+    - name: Check that install.sh installed the requested version
+      ansible.builtin.assert:
+        that:
+          - panel_new_version.stdout | trim == panel_version | regex_replace('^v', '')
+        fail_msg: >-
+          install.sh {{ panel_version }} left version {{ panel_new_version.stdout | trim }};
+          last output: {{ panel_install.stdout_lines[-20:] | default([]) }}
+        quiet: true

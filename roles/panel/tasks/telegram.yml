@@ -1,0 +1,39 @@
+---
+# Telegram through the CLI (`panel/setting/update` would zero every field it is not given).
+# The current values are read through the API (`panel/setting/all`, read-only) so that an unchanged
+# bot is not rewritten and the panel is not restarted on every run.
+- name: Read panel settings through the API
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  register: panel_all_settings
+  no_log: true
+
+- name: Compare Telegram settings with the vault
+  ansible.builtin.set_fact:
+    panel_tg_drift: >-
+      {{ not (panel_all_settings.json.success | default(false))
+         or panel_all_settings.json.obj.tgBotToken | default('') != panel_tg_bot_token
+         or panel_all_settings.json.obj.tgBotChatId | default('') | string != panel_tg_chat_id | string
+         or not (panel_all_settings.json.obj.tgBotEnable | default(false) | bool) }}
+  no_log: true
+
+- name: Set Telegram bot token and chat id
+  ansible.builtin.command:
+    argv:
+      - "{{ panel_bin }}"
+      - setting
+      - -tgbottoken
+      - "{{ panel_tg_bot_token }}"
+      - -tgbotchatid
+      - "{{ panel_tg_chat_id | string }}"
+      - -enabletgbot
+  when: panel_tg_drift | bool
+  changed_when: true
+  no_log: true
+  notify: panel restart

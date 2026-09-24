@@ -1,0 +1,66 @@
+---
+# Converges the account, port and web base path on the vault values. `x-ui setting -show` reports
+# the port, the base path and whether the default admin/admin is still set, never the user or the
+# password; those are checked by logging in.
+- name: Enable and start the panel service
+  ansible.builtin.systemd_service:
+    name: "{{ panel_service }}"
+    enabled: true
+    state: started
+
+- name: Read panel settings
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", setting, -show]
+  register: panel_show
+  changed_when: false
+
+- name: Compare panel settings with the vault
+  ansible.builtin.set_fact:
+    panel_account_drift: >-
+      {{ (panel_show.stdout | regex_findall('(?m)^port: *(\d+)\s*$') | first | default('')) != panel_port | string
+         or (panel_show.stdout | regex_findall('(?m)^webBasePath: *(\S+)\s*$') | first | default('')) != panel_web_base_path
+         or (panel_show.stdout | regex_findall('(?m)^hasDefaultCredential: *(\S+)\s*$') | first | default('true')) != 'false' }}
+
+- name: Apply account, port and web base path from the vault
+  ansible.builtin.command:
+    argv:
+      - "{{ panel_bin }}"
+      - setting
+      - -username
+      - "{{ panel_user }}"
+      - -password
+      - "{{ panel_password }}"
+      - -port
+      - "{{ panel_port | string }}"
+      - -webBasePath
+      - "{{ panel_web_base_path }}"
+  when: panel_account_drift | bool
+  changed_when: true
+  no_log: true
+  notify: panel restart
+
+- name: Restart the panel on the new port and base path
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the panel port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ panel_port | int }}"
+    timeout: 120
+
+- name: Try the vault account
+  ansible.builtin.include_tasks: api_login.yml
+  vars:
+    panel_api_login_required: false
+
+# Port and base path match but the login fails: the user or the password was changed by hand.
+- name: Reset user and password to the vault values
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", setting, -username, "{{ panel_user }}", -password, "{{ panel_password }}"]
+  when: not panel_api_logged_in | bool
+  changed_when: true
+  no_log: true
+
+- name: Log in with the reset account
+  ansible.builtin.include_tasks: api_login.yml
+  when: not panel_api_logged_in | bool

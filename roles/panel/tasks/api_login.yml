@@ -1,0 +1,57 @@
+---
+# Logs in to the panel API (POST <base path>login) and keeps the session on the calling host.
+# Usable from any play once role panel has run (vault vars panel_user/panel_password/panel_port/
+# panel_base_path are in group_vars/all):
+#
+#   - name: Log in to the panel
+#     ansible.builtin.include_role:
+#       name: panel
+#       tasks_from: api_login
+#   - name: List chain hops
+#     ansible.builtin.uri:
+#       url: "{{ panel_api_url }}panel/api/chain/list"
+#       headers:
+#         Cookie: "{{ panel_api_cookie }}"
+#       ca_path: "{{ panel_api_ca_path }}"
+#       return_content: true
+#     delegate_to: "{{ panel_api_host }}"
+#
+# Facts set on the calling host:
+#   panel_api_cookie     Cookie header value with the session cookie (`3ax-ui=...`)
+#   panel_api_url        https://127.0.0.1:<port><base path>; append the API path
+#   panel_api_host       inventory host of the panel: delegate_to it, the URL is local to it
+#   panel_api_ca_path    certificate file on the panel host that verifies panel_api_url
+#   panel_api_logged_in  true when the login succeeded
+# A failed login fails the task unless panel_api_login_required is false.
+- name: Log in to the panel API
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}login"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ panel_user }}"
+      password: "{{ panel_password }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_api_login
+  no_log: true
+
+- name: Keep the panel API session
+  ansible.builtin.set_fact:
+    panel_api_cookie: "{{ panel_api_login.cookies_string | default('') }}"
+    panel_api_logged_in: >-
+      {{ (panel_api_login.json.success | default(false) | bool)
+         and (panel_api_login.cookies_string | default('') | length > 0) }}
+    panel_api_url: "{{ panel_api_url }}"
+    panel_api_host: "{{ panel_api_host }}"
+    panel_api_ca_path: "{{ panel_api_ca_path }}"
+  no_log: true
+
+- name: Require a successful panel login
+  ansible.builtin.assert:
+    that:
+      - panel_api_logged_in | bool
+    fail_msg: "login to {{ panel_api_url }} as the vault user failed (HTTP {{ panel_api_login.status | default('?') }})"
+    quiet: true
+  when: panel_api_login_required | bool

@@ -8,13 +8,13 @@
 panel_user: admin
 panel_password: change-me
 panel_port: 2053
-# Web base path with leading and trailing slash, e.g. /s3cr3t/.
+# Web base path with leading and trailing slash, at least 4 characters between them, e.g. /s3cr3t/.
 panel_base_path: /change-me/
 
 # mon-server admin account (`mon-server admin set`), role monserver (#4).
 mon_admin_user: monadmin
 mon_admin_password: change-me
 
-# One Telegram bot and chat for both the panel and mon-server (#2, #4).
+# One Telegram bot and chat for both the panel and mon-server (#2, #4); leave both empty to skip.
 tg_bot_token: "123456:change-me"
 tg_chat_id: "-1000000000000"

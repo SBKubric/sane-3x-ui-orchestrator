@@ -1,0 +1,13 @@
+---
+- name: Restart panel
+  ansible.builtin.systemd_service:
+    name: "{{ panel_service }}"
+    state: restarted
+  listen: panel restart
+
+- name: Wait for panel port
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ panel_port | int }}"
+    timeout: 120
+  listen: panel restart

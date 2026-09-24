@@ -1,0 +1,11 @@
+---
+# Facts for later plays: hostvars[groups['panel'][0]].panel_url / .panel_ca_pem / .panel_mon_token.
+- name: Read the panel certificate
+  ansible.builtin.slurp:
+    src: "{{ panel_cert_file }}"
+  register: panel_cert_content
+
+- name: Set panel facts
+  ansible.builtin.set_fact:
+    panel_url: "https://{{ panel_public_ip }}:{{ panel_port }}{{ panel_web_base_path }}"
+    panel_ca_pem: "{{ panel_cert_content.content | b64decode }}"

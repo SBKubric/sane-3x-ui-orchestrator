@@ -1,0 +1,38 @@
+---
+# Opens /mon/v1 and makes sure a token exists. The token is reset only when none was ever issued,
+# so a running mon-server keeps working across runs; it is read back every run and never stored.
+- name: Read monitoring state
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", setting, -showMonToken]
+  register: panel_mon_state
+  changed_when: false
+  no_log: true
+
+- name: Decide monitoring changes
+  ansible.builtin.set_fact:
+    panel_mon_flags: >-
+      {{ ([] if 'monEnable: true' in panel_mon_state.stdout_lines else ['-monEnable', 'true'])
+         + (['-resetMonToken'] if 'monToken: (not issued)' in panel_mon_state.stdout_lines else []) }}
+
+- name: Enable monitoring and issue the token
+  ansible.builtin.command:
+    argv: "{{ [panel_bin, 'setting'] + panel_mon_flags + ['-showMonToken'] }}"
+  register: panel_mon_applied
+  when: panel_mon_flags | length > 0
+  changed_when: true
+  no_log: true
+
+- name: Keep the monitoring token as a fact
+  ansible.builtin.set_fact:
+    panel_mon_token: >-
+      {{ ((panel_mon_applied.stdout if panel_mon_applied is changed else panel_mon_state.stdout)
+          | regex_findall('(?m)^monToken: *(\S+)\s*$') | first | default('')) }}
+  no_log: true
+
+- name: Check the monitoring token
+  ansible.builtin.assert:
+    that:
+      - panel_mon_token | length > 0
+      - not panel_mon_token.startswith('(')
+    fail_msg: "x-ui setting -showMonToken reports no token after -resetMonToken"
+    quiet: true

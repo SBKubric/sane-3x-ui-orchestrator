@@ -5,8 +5,8 @@ Ansible that deploys a whole 3ax-ui installation from an inventory: the panel
 monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring): mon-server and
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
-> Status: skeleton. Role `common` is real; roles `panel`, `hop`, `monserver`, `monclient`,
-> `wipe.yml` and `verify.yml` are no-op stubs, implemented in #2–#5.
+> Status: roles `common` and `panel` are real; roles `hop`, `monserver`, `monclient`,
+> `wipe.yml` and `verify.yml` are no-op stubs, implemented in #3–#5.
 
 ## Layout
 
@@ -23,7 +23,9 @@ inventories/
   stand-full/          panel + hops + monserver + monclient
 roles/
   common/              supported OS check, base packages, time sync
-  panel/  hop/  monserver/  monclient/   (stubs; variables documented in defaults/main.yml)
+  panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token;
+                       tasks/api_login.yml is the panel API login helper for other roles
+  hop/  monserver/  monclient/   (stubs; variables documented in defaults/main.yml)
 ```
 
 ## Profiles
@@ -66,6 +68,77 @@ panel's chain registry:
 
 Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`; group `monclient`:
 `mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
+
+## Role panel
+
+Runs on the single host of group `panel` (decision #55, items 2, 5, 7). Every step converges and is
+skipped when the host already matches, so a second run reports `changed=0`.
+
+1. **TLS.** `community.crypto` makes an ECDSA P-256 key, a CSR and a self-signed certificate
+   (10 years, `CA:TRUE`, SANs `IP:<panel_public_ip>` and `IP:127.0.0.1`) in `/etc/x-ui/tls/`. They are
+   created once; a new public IP (the SAN changes) re-issues the certificate and restarts the panel.
+   `x-ui setting -getCert` must point at these files, otherwise `x-ui cert -webCert -webCertKey` fixes it.
+2. **Install / update.** `x-ui -v` equal to `xui_version` (without the `v`) → nothing to do. Otherwise
+   `install.sh <xui_version>` (taken from the same tag of `SBKubric/3ax-ui-proxy`, `XUI_REPO` set) runs with
+   its answers on stdin: debug mode `N`, custom port `n`, SSL option `3`, empty domain, certificate path,
+   key path. On an existing panel install.sh (no TTY + explicit tag) reinstalls that tag and keeps the
+   database; the certificate is written into the settings first, so it asks nothing but the debug
+   question. The installed version is checked afterwards.
+3. **Account.** `x-ui setting -show` (port, web base path, `hasDefaultCredential`) differs from the vault
+   → `x-ui setting -username -password -port -webBasePath` and a restart. Then the role logs in with the
+   vault account; a failed login (user or password changed by hand) resets them with `x-ui setting`.
+4. **Telegram** (when `tg_bot_token`/`tg_chat_id` are set). Current values are read through the API
+   (`POST <base>panel/setting/all`, read-only); on a difference `x-ui setting -tgbottoken -tgbotchatid
+   -enabletgbot` and a restart. `panel/setting/update` is never used: it zeroes the fields it is not given.
+   Empty vault values leave the panel's Telegram settings alone.
+5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
+   if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
+   The token is read back every run and never stored in the vault.
+
+Secrets never reach the output: the tasks that carry the password, the Telegram token, the monitoring
+token or the session cookie are `no_log`. install.sh prints random credentials of its own; they are
+replaced right after the install.
+
+Facts left on the panel host for later plays (`hostvars[groups['panel'][0]]`):
+
+| Fact | Value | Used by |
+|---|---|---|
+| `panel_url` | `https://<panel_public_ip>:<panel_port><panel_base_path>` | hop, monserver (`panelUrl`), verify |
+| `panel_ca_pem` | PEM of the self-signed certificate | monserver (`panelCa`) |
+| `panel_mon_token` | monitoring bearer token (only with a `monserver` host) | monserver (`monToken`) |
+
+The facts exist only in a run that includes the panel play (`--tags panel` or a full run).
+
+Knobs in `roles/panel/defaults/main.yml`: `panel_public_ip` (default IPv4 from facts; set it in
+`host_vars` behind NAT), `panel_cert_sans`, `panel_cert_valid_days`, `panel_tls_dir`,
+`panel_install_ref`/`panel_install_url`, `panel_install_timeout`.
+
+### Panel API from other roles
+
+`roles/panel/tasks/api_login.yml` logs in (`POST <base>login`, form `username`/`password`) and keeps the
+session cookie. The API is reached on the panel host itself (`https://127.0.0.1:<port><base>`, verified
+against the self-signed certificate), so calls are delegated there:
+
+```yaml
+- name: Log in to the panel
+  ansible.builtin.include_role:
+    name: panel
+    tasks_from: api_login
+
+- name: List chain hops
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/chain/list"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+```
+
+It sets `panel_api_cookie`, `panel_api_url`, `panel_api_host`, `panel_api_ca_path` and
+`panel_api_logged_in` on the calling host and fails on a wrong login unless `panel_api_login_required:
+false` is passed. Wrong credentials are HTTP 200 with `success: false`; API paths answer 404 without a
+session.
 
 ## Prerequisites
 
