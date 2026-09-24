@@ -94,6 +94,11 @@ panel_wipe_nginx_files:
 panel_wipe_nginx_conf: /etc/nginx/nginx.conf
 # iptables/ip6tables chain of the panel's firewall, jumped to from INPUT.
 panel_wipe_firewall_chain: THREEAX-IN
+# TPROXY wiring of tunnels routed through Xray (the panel's tunnel kinds: AmneziaWG 0x1/100, WireGuard
+# 0x2/101): mangle PREROUTING rules with this mark, the fwmark policy rule and the routing table.
+panel_wipe_tproxy:
+  - {fwmark: "0x1", table: "100"}
+  - {fwmark: "0x2", table: "101"}
 
 # verify.yml (tasks/verify.yml, tasks/verify_targets.yml): how long the monitoring targets may take to
 # come UP after a converge (retries x delay seconds, 3 minutes by default).

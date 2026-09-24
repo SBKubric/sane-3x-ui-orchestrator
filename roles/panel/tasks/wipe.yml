@@ -13,7 +13,7 @@
 - name: Take down the panel's tunnels, nginx front and firewall chain
   ansible.builtin.shell:
     cmd: |
-      set -eu
+      set -euo pipefail
       removed=()
       # Tunnel interfaces: down with their quick tool (runs the PostDown rules), then the config goes.
       for entry in {{ panel_wipe_tunnel_dirs | map(attribute='dir') | zip(panel_wipe_tunnel_dirs | map(attribute='quick'))
@@ -64,6 +64,29 @@
         if "$bin" -n -L "$chain" >/dev/null 2>&1; then
           "$bin" -F "$chain" && "$bin" -X "$chain" && removed+=("$bin chain $chain")
         fi
+      done
+      # Tunnels routed through Xray: the TPROXY rules and fwmark policy routing their PostUp adds. A
+      # PostDown that no longer lists them (the server was switched to direct routing, or never ran)
+      # leaves them behind, and the next tunnel with that name sends all its traffic into a dead port.
+      for mark in {{ panel_wipe_tproxy | map(attribute='fwmark') | zip(panel_wipe_tproxy | map(attribute='table'))
+                     | map('join', ':') | map('quote') | join(' ') }}; do
+        fwmark=${mark%:*}
+        table=${mark##*:}
+        for bin in iptables ip6tables; do
+          command -v "$bin" >/dev/null 2>&1 || continue
+          while read -r rule; do
+            # shellcheck disable=SC2086
+            "$bin" -t mangle ${rule/-A /-D } && removed+=("$bin mangle: ${rule#-A }")
+          done < <("$bin" -t mangle -S PREROUTING 2>/dev/null | grep -- "--tproxy-mark $fwmark/$fwmark")
+        done
+        for family in -4 -6; do
+          while ip "$family" rule del fwmark "$fwmark/$fwmark" lookup "$table" >/dev/null 2>&1; do
+            removed+=("ip $family rule fwmark $fwmark lookup $table")
+          done
+          if [ -n "$(ip "$family" route show table "$table" 2>/dev/null)" ]; then
+            ip "$family" route flush table "$table" && removed+=("ip $family route table $table")
+          fi
+        done
       done
       if [ -n "${removed[*]:-}" ]; then
         printf '%s\n' "${removed[@]}"
