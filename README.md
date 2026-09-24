@@ -244,9 +244,10 @@ Knobs in `roles/monserver/defaults/main.yml`: `monserver_public_ip`, `monserver_
 environment without ACME), `monserver_start_timeout`, `monserver_require_panel_reachable`,
 `monserver_release_url`.
 
-`mon_version` needs a release with `panelCa`/`tls.acmeCa` (SBKubric/3ax-ui-monitoring#65) to trust
-the panel's self-signed certificate and to use LE staging: `v0.1.0-stand.2` predates them (the role then
-stops at "no panelCa setting", and mon-server ignores `MON_TLS_ACME_CA`, i.e. uses production LE).
+`mon_version` needs `v0.1.0-stand.3` or later: it is the first release with `panelCa`/`tls.acmeCa`
+(SBKubric/3ax-ui-monitoring#65), needed to trust the panel's self-signed certificate and to use LE
+staging. With `v0.1.0-stand.2` the role stops at "no panelCa setting", and mon-server ignores
+`MON_TLS_ACME_CA`, i.e. uses production LE.
 
 ### mon-server admin API from other roles
 
