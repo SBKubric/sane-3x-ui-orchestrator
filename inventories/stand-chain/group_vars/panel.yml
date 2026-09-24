@@ -17,8 +17,8 @@ panel_inbounds:
       realitySettings:
         show: false
         xver: 0
-        target: www.microsoft.com:443
-        serverNames: [www.microsoft.com]
+        target: dl.google.com:443
+        serverNames: [dl.google.com]
         settings:
           fingerprint: chrome
           serverName: ""

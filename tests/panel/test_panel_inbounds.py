@@ -127,7 +127,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(reality["privateKey"], keys["privateKey"])
         self.assertEqual(reality["settings"]["publicKey"], keys["publicKey"])
         self.assertEqual(reality["settings"]["fingerprint"], "chrome")
-        self.assertEqual(reality["serverNames"], ["www.microsoft.com"])
+        self.assertEqual(reality["serverNames"], ["dl.google.com"])
         self.assertEqual(len(reality["shortIds"]), 1)
         self.assertRegex(reality["shortIds"][0], r"^[0-9a-f]{16}$")
         self.assertEqual(json.loads(vless["sniffing"])["destOverride"], ["http", "tls", "quic"])
@@ -154,7 +154,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.converge_fresh()
         before = self.inbounds()["vless-reality"]
         changed = json.loads(json.dumps(STAND_INBOUNDS))
-        changed[0]["streamSettings"]["realitySettings"]["serverNames"] = ["www.microsoft.com", "microsoft.com"]
+        changed[0]["streamSettings"]["realitySettings"]["serverNames"] = ["dl.google.com", "microsoft.com"]
         self.play(inbounds=changed)
         self.assertEqual([(m, p) for m, p, _ in self.writes], [("POST", f"inbounds/update/{before['id']}")])
         body = self.writes[0][2]
@@ -162,7 +162,7 @@ class PanelInboundsTest(unittest.TestCase):
         after = self.inbounds()["vless-reality"]
         old_reality = json.loads(before["streamSettings"])["realitySettings"]
         reality = json.loads(after["streamSettings"])["realitySettings"]
-        self.assertEqual(reality["serverNames"], ["www.microsoft.com", "microsoft.com"])
+        self.assertEqual(reality["serverNames"], ["dl.google.com", "microsoft.com"])
         self.assertEqual((reality["privateKey"], reality["settings"]["publicKey"], reality["shortIds"]),
                          (old_reality["privateKey"], old_reality["settings"]["publicKey"], old_reality["shortIds"]),
                          "converge must not re-key")

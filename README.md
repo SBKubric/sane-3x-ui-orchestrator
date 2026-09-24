@@ -179,6 +179,10 @@ from the panel outward) and restart the relay. verify.yml waits up to 2 minutes 
 Port 443 is not available for an inbound while the panel's nginx front is on (`nginxMode` other than `off`;
 install.sh sets `shared`): nginx owns the public port and the panel refuses the add with "Port already
 exists: 443". The stand inventories therefore put VLESS-Reality on 8443.
+The Reality `target` must be a site Xray's Reality can borrow a handshake from: with Xray 26.3.27 and the
+`chrome` fingerprint, `www.microsoft.com` fails every handshake ("REALITY: processed invalid connection ...
+handshake did not complete successfully") while `dl.google.com`, `github.com` and `www.samsung.com` work; the
+stand uses `dl.google.com`.
 
 Example (`inventories/stand-full/group_vars/panel.yml`):
 
@@ -196,8 +200,8 @@ panel_inbounds:
       realitySettings:            # privateKey, settings.publicKey and shortIds are made on add
         show: false
         xver: 0
-        target: www.microsoft.com:443
-        serverNames: [www.microsoft.com]
+        target: dl.google.com:443
+        serverNames: [dl.google.com]
         settings:
           fingerprint: chrome
           serverName: ""
