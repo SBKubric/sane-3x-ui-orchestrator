@@ -89,6 +89,8 @@ hop_wipe_paths:
 hop_wipe_le_cert: false
 hop_acme_home: /root/.acme.sh
 
-# verify.yml (tasks/verify.yml): `x-ui chain status` must be fresh within retries x delay seconds.
-hop_verify_retries: 6
+# verify.yml (tasks/verify.yml): `x-ui chain status` must be fresh within retries x delay seconds. Two
+# minutes: a revision (new inbound ports) reaches the hop next to the panel within one poll (chainPollSeconds
+# 30 s, +-20 % jitter) and each hop further out within one more, and the relay restarts on the new ports.
+hop_verify_retries: 12
 hop_verify_delay: 10

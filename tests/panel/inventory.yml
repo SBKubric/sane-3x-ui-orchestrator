@@ -1,0 +1,31 @@
+---
+# Test inventory for role panel's inbounds (tasks/inbounds.yml) and the targets step of verify.yml
+# (tasks/verify_targets.yml) against tests/hop/mock_panel.py: every host is local. panel_inbounds comes from
+# the stand's own inventories/stand-full/group_vars/panel.yml (-e @...) unless a test passes another list.
+# Driven by test_panel_inbounds.py.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    # Vault values and the API endpoint of role panel's api_login, pointed at the mock.
+    panel_user: admin
+    panel_password: secret-pass
+    panel_port: 2053
+    panel_base_path: /base/
+    panel_api_url: "http://127.0.0.1:{{ lookup('ansible.builtin.env', 'PANEL_TEST_PORT') }}/base/"
+    # uri loads ca_path even for http; any CA bundle will do.
+    panel_api_ca_path: /etc/ssl/certs/ca-certificates.crt
+    panel_verify_targets_retries: 1
+    panel_verify_targets_delay: 1
+  children:
+    panel:
+      hosts:
+        real:
+    hops:
+      hosts: {}
+    monserver:
+      hosts: {}
+    monclient:
+      hosts:
+        mon-client:
+          mon_name: monclient

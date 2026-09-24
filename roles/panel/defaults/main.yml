@@ -6,6 +6,8 @@
 # Inputs from the vault (group_vars/all/vault.yml):
 #   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
 #   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...` (optional)
+# Inputs from the inventory (group_vars/panel.yml, optional):
+#   panel_inbounds     inbounds converged through panel/api/inbounds (tasks/inbounds.yml, README "Inbounds")
 # Monitoring is switched on only when group `monserver` is not empty.
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
@@ -59,6 +61,34 @@ panel_web_base_path: "/{{ panel_base_path | regex_replace('^/+|/+$', '') }}/"
 # Telegram bot, from the vault; empty = leave the panel's Telegram settings alone.
 panel_tg_bot_token: "{{ tg_bot_token | default('') }}"
 panel_tg_chat_id: "{{ tg_chat_id | default('') }}"
+
+# Inbounds of the panel (tasks/inbounds.yml), matched by remark: missing ones are added, declared fields
+# that differ are updated, inbounds the list does not name are left alone. One entry:
+#   remark          name of the inbound, unique (required)
+#   protocol        xray protocol (vless, vmess, trojan, shadowsocks, ...) or amneziawg (required)
+#   port            listen port (required for xray; for amneziawg the AWG server's UDP port, default: the
+#                   port the panel picked)
+#   enable          default true (for amneziawg: the inbound and the AWG server)
+#   listen, total, expiryTime, trafficReset       as in the panel; not declared = left as the panel has it
+#   settings, streamSettings, sniffing            mappings merged into the panel's JSON (xray only); keys
+#                   the entry does not name stay as the panel has them (clients, generated keys)
+# Generated on add and read back from the panel afterwards, never stored in the inventory or the vault:
+# Reality keys (GET panel/api/server/getNewX25519Cert) and shortIds when streamSettings.security is
+# reality; the AWG server's keys and obfuscation (the panel makes them with the server).
+panel_inbounds: []
+# Fields an entry may carry, per kind.
+panel_inbound_xray_keys: [remark, protocol, port, enable, listen, total, expiryTime, trafficReset, settings, streamSettings, sniffing]
+panel_inbound_awg_keys: [remark, protocol, port, enable]
+# Protocols the role does not manage (their clients and ports live outside the inbound record).
+panel_inbound_unsupported: [nativewg, mtproto]
+# sniffing of an added inbound that declares none: what the UI sends by default (also for amneziawg).
+panel_inbound_default_sniffing:
+  enabled: false
+  destOverride: [http, tls, quic, fakedns]
+  metadataOnly: false
+  routeOnly: false
+  ipsExcluded: []
+  domainsExcluded: []
 
 # Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
 panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"

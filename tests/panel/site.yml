@@ -1,0 +1,10 @@
+---
+# Role panel's inbound converge alone, against mock_panel.py (see test_panel_inbounds.py).
+- name: Panel inbounds
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Converge panel_inbounds
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: inbounds
