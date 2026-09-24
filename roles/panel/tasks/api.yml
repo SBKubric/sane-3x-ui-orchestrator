@@ -1,0 +1,39 @@
+---
+# One call of the panel API (<base path>panel/api/<panel_call_path>) on the panel host with the api_login
+# session. Inputs: panel_call_path, panel_call_method (GET|POST), panel_call_body (POST, optional).
+# Result: fact panel_call (the {success, msg, obj} envelope). A refusal (HTTP 200, success false) or any
+# other status fails with the panel's message.
+# no_log: the request carries the session cookie, and inbounds, the AWG server and getNewX25519Cert carry
+# private keys.
+- name: Call the panel API
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/{{ panel_call_path }}"
+    method: "{{ panel_call_method | default('GET') }}"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    body_format: json
+    body: "{{ panel_call_body | default({}) if panel_call_method | default('GET') == 'POST' else omit }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_call_raw
+  failed_when: false
+  changed_when: panel_call_method | default('GET') == 'POST'
+  check_mode: false
+  no_log: true
+
+- name: Keep the panel API answer
+  ansible.builtin.set_fact:
+    panel_call: "{{ panel_call_raw.json | default({}) }}"
+  no_log: true
+
+- name: Require success from the panel API
+  ansible.builtin.assert:
+    that:
+      - panel_call_raw.status | default(0) == 200
+      - panel_call.success | default(false) | bool
+    fail_msg: >-
+      {{ panel_call_method | default('GET') }} panel/api/{{ panel_call_path }} failed: HTTP {{ panel_call_raw.status | default('?') }}
+      {{ panel_call.msg | default(panel_call_raw.msg | default('')) }}
+    quiet: true

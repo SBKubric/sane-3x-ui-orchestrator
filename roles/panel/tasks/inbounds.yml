@@ -1,0 +1,127 @@
+---
+# Inbounds from panel_inbounds, converged through the panel API and matched by remark: a missing inbound is
+# added, one whose declared fields differ is updated, inbounds the list does not name are left alone (no
+# prune). Reality keys and shortIds are made once, on add; the AWG server's keys come with the server the
+# panel keeps. Both are read back from the panel on every run and never re-keyed. Also runnable alone:
+#   - ansible.builtin.include_role: {name: panel, tasks_from: inbounds}
+# Check mode reads the panel and prints the plan; writes need a real run.
+- name: Check panel_inbounds
+  ansible.builtin.set_fact:
+    panel_inbounds_problems: >-
+      {%- set out = [] -%}
+      {%- if panel_inbounds is not sequence or panel_inbounds is string or panel_inbounds is mapping -%}
+      {%-   set _ = out.append('panel_inbounds must be a list') -%}
+      {%- else -%}
+      {%-   for ib in panel_inbounds -%}
+      {%-     if ib is not mapping or not (ib.remark | default('') is string) or ib.remark | default('') | length == 0 -%}
+      {%-       set _ = out.append('entry ' ~ loop.index ~ ' needs a remark') -%}
+      {%-     else -%}
+      {%-       set name = ib.remark -%}
+      {%-       set proto = ib.protocol | default('') -%}
+      {%-       set awg = proto == 'amneziawg' -%}
+      {%-       if not (proto is string) or proto | length == 0 -%}
+      {%-         set _ = out.append(name ~ ': protocol is required') -%}
+      {%-       elif proto in panel_inbound_unsupported -%}
+      {%-         set _ = out.append(name ~ ': protocol ' ~ proto ~ ' is not managed by role panel') -%}
+      {%-       endif -%}
+      {%-       set extra = ib.keys() | reject('in', panel_inbound_awg_keys if awg else panel_inbound_xray_keys) | list -%}
+      {%-       if extra -%}
+      {%-         set _ = out.append(name ~ ': unknown or unsupported fields ' ~ extra | join(', ')
+                                   ~ (' (amneziawg takes ' ~ panel_inbound_awg_keys | join(', ') ~ ')' if awg else '')) -%}
+      {%-       endif -%}
+      {%-       if ib.port is defined and not (ib.port is integer and 1 <= ib.port <= 65535) -%}
+      {%-         set _ = out.append(name ~ ': port must be an integer 1-65535') -%}
+      {%-       elif ib.port is not defined and not awg -%}
+      {%-         set _ = out.append(name ~ ': port is required') -%}
+      {%-       endif -%}
+      {%-       if ib.enable is defined and ib.enable is not boolean -%}
+      {%-         set _ = out.append(name ~ ': enable must be true or false') -%}
+      {%-       endif -%}
+      {%-       for blob in ['settings', 'streamSettings', 'sniffing'] -%}
+      {%-         if ib[blob] is defined and ib[blob] is not mapping -%}
+      {%-           set _ = out.append(name ~ ': ' ~ blob ~ ' must be a mapping') -%}
+      {%-         endif -%}
+      {%-       endfor -%}
+      {%-       if ib.settings is defined and ib.settings is mapping and ib.settings.clients is defined -%}
+      {%-         set _ = out.append(name ~ ': settings.clients is not managed by role panel (users are added in the panel,'
+                                   ~ ' the monitoring probe by the panel itself)') -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   set remarks = panel_inbounds | select('mapping') | map(attribute='remark') | select('defined') | list -%}
+      {%-   if remarks | unique | length != remarks | length -%}
+      {%-     set _ = out.append('remarks must be unique') -%}
+      {%-   endif -%}
+      {%-   if panel_inbounds | select('mapping') | selectattr('protocol', 'defined') | selectattr('protocol', 'equalto', 'amneziawg')
+                | list | length > 1 -%}
+      {%-     set _ = out.append('the panel has one AmneziaWG server: at most one amneziawg entry') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Refuse a malformed panel_inbounds
+  ansible.builtin.assert:
+    that:
+      - panel_inbounds_problems | length == 0
+    fail_msg: "panel_inbounds: {{ panel_inbounds_problems | join('; ') }}"
+    quiet: true
+
+- name: Converge the inbounds
+  when: panel_inbounds | length > 0
+  block:
+    # The login is read-only, so it also runs in check mode (uri would skip it there).
+    - name: Log in to the panel
+      ansible.builtin.include_tasks:
+        file: api_login.yml
+        apply:
+          check_mode: false
+
+    - name: List the inbounds
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: inbounds/list
+        panel_call_method: GET
+
+    - name: Keep the inbounds
+      ansible.builtin.set_fact:
+        panel_inbounds_current: "{{ panel_call.obj | default([], true) }}"
+      no_log: true
+
+    - name: Compare the panel with panel_inbounds
+      ansible.builtin.set_fact:
+        panel_inbounds_conflicts: >-
+          {%- set out = [] -%}
+          {%- for ib in panel_inbounds -%}
+          {%-   set found = panel_inbounds_current | selectattr('remark', 'equalto', ib.remark) | list -%}
+          {%-   if found | length > 1 -%}
+          {%-     set _ = out.append(found | length ~ ' inbounds in the panel are named ' ~ ib.remark ~ ' (rename or delete the extra ones)') -%}
+          {%-   elif found and found[0].protocol != ib.protocol -%}
+          {%-     set _ = out.append(ib.remark ~ ' is ' ~ found[0].protocol ~ ' in the panel but ' ~ ib.protocol
+                                     ~ ' in panel_inbounds (protocol cannot change: delete it in the panel first)') -%}
+          {%-   elif not found and ib.protocol == 'amneziawg' and panel_inbounds_current | selectattr('protocol', 'equalto', 'amneziawg') | list -%}
+          {%-     set _ = out.append('the panel already has an AmneziaWG inbound named '
+                                     ~ (panel_inbounds_current | selectattr('protocol', 'equalto', 'amneziawg') | map(attribute='remark') | first)
+                                     ~ ', not ' ~ ib.remark ~ ' (one per panel: rename one of them)') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Refuse what the inbound API cannot converge
+      ansible.builtin.assert:
+        that:
+          - panel_inbounds_conflicts | length == 0
+        fail_msg: "panel inbounds vs panel_inbounds: {{ panel_inbounds_conflicts | join('; ') }}"
+        quiet: true
+
+    - name: AmneziaWG server
+      ansible.builtin.include_tasks: awg_server.yml
+      vars:
+        panel_awg_want: "{{ panel_inbounds | selectattr('protocol', 'equalto', 'amneziawg') | first }}"
+      when: panel_inbounds | selectattr('protocol', 'equalto', 'amneziawg') | list | length > 0
+
+    - name: Converge inbound
+      ansible.builtin.include_tasks: inbound.yml
+      loop: "{{ panel_inbounds }}"
+      loop_control:
+        loop_var: panel_inbound
+        label: "{{ panel_inbound.remark }} ({{ panel_inbound.protocol }})"

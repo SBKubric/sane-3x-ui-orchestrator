@@ -1,18 +1,21 @@
 ---
 # verify.yml, last step (only with a mon-client in the inventory): the panel's Monitoring page data
-# (GET panel/api/monitoring/targets) must show every target of an enabled inbound UP, each mon-client of
-# group monclient with targets, and a live contact with mon-server. Waits up to
-# panel_verify_targets_retries x panel_verify_targets_delay seconds (3 minutes) for that.
+# (GET panel/api/monitoring/targets) must show a live contact with mon-server, and every enabled inbound
+# (xray and the AmneziaWG one alike) with a target for every mon-client of group monclient on each of its
+# mon_paths, all of them UP. Waits up to panel_verify_targets_retries x panel_verify_targets_delay seconds
+# (3 minutes) for that.
 - name: Log in to the panel
   ansible.builtin.include_tasks: api_login.yml
 
-# mon_name as role monclient reads it (default: inventory hostname).
-- name: Read the mon-client names of group monclient
+# mon_name and mon_paths as role monclient reads them (default: inventory hostname, direct and proxy).
+- name: Read the mon-client paths of group monclient
   ansible.builtin.set_fact:
-    panel_verify_mon_clients: >-
+    panel_verify_mon_paths: >-
       {%- set out = [] -%}
       {%- for h in groups['monclient'] | default([]) -%}
-      {%-   set _ = out.append(hostvars[h].mon_name | default(h)) -%}
+      {%-   for path in hostvars[h].mon_paths | default(['direct', 'proxy']) -%}
+      {%-     set _ = out.append((hostvars[h].mon_name | default(h)) ~ '/' ~ path) -%}
+      {%-   endfor -%}
       {%- endfor -%}
       {{ out }}
 
@@ -27,16 +30,24 @@
   delegate_to: "{{ panel_api_host }}"
   register: panel_verify_targets
   # Targets of disabled inbounds are PAUSED by design; retired ones belong to a mon-client that is gone.
+  # Every enabled inbound needs a live target per mon-client and path: "<kind>/<inboundId>/<mon-client>/<path>".
   until: >-
     (panel_verify_targets.json.success | default(false) | bool)
     and not (panel_verify_targets.json.obj.stale | default(true) | bool)
-    and (panel_verify_targets.json.obj.inbounds | default([], true) | selectattr('enable') | map(attribute='targets')
-         | flatten | rejectattr('retired') | list | length) > 0
-    and (panel_verify_targets.json.obj.inbounds | default([], true) | selectattr('enable') | map(attribute='targets')
-         | flatten | rejectattr('retired') | rejectattr('state', 'equalto', 'UP') | list | length) == 0
-    and (panel_verify_mon_clients | reject('in', panel_verify_targets.json.obj.inbounds | default([], true)
-         | selectattr('enable') | map(attribute='targets') | flatten | rejectattr('retired')
-         | map(attribute='monClientName') | list) | list | length) == 0
+    and panel_verify_live | length > 0
+    and panel_verify_live | rejectattr('state', 'equalto', 'UP') | list | length == 0
+    and panel_verify_expected | difference(panel_verify_covered) | length == 0
+  vars:
+    panel_verify_enabled: "{{ panel_verify_targets.json.obj.inbounds | default([], true) | selectattr('enable') | list }}"
+    panel_verify_live: "{{ panel_verify_enabled | map(attribute='targets') | flatten | rejectattr('retired') | list }}"
+    panel_verify_covered: >-
+      {{ panel_verify_live | map(attribute='inboundKind')
+         | zip(panel_verify_live | map(attribute='inboundId') | map('string'), panel_verify_live | map(attribute='monClientName'),
+               panel_verify_live | map(attribute='path'))
+         | map('join', '/') | list }}
+    panel_verify_expected: >-
+      {{ panel_verify_enabled | map(attribute='kind') | zip(panel_verify_enabled | map(attribute='inboundId') | map('string'))
+         | map('join', '/') | product(panel_verify_mon_paths) | map('join', '/') | list }}
   retries: "{{ panel_verify_targets_retries | int }}"
   delay: "{{ panel_verify_targets_delay | int }}"
   failed_when: false
@@ -65,13 +76,20 @@
       {%-       endif -%}
       {%-     endfor -%}
       {%-   endfor -%}
-      {%-   if live | length == 0 -%}
-      {%-     set _ = out.append('no monitoring targets on any enabled inbound (is there an enabled inbound, and did mon-server'
-                               ~ ' fetch the probe configs?)') -%}
+      {%-   if obj.inbounds | default([], true) | selectattr('enable') | list | length == 0 -%}
+      {%-     set _ = out.append('the panel has no enabled inbound (panel_inbounds in the inventory, role panel)') -%}
+      {%-   elif live | length == 0 -%}
+      {%-     set _ = out.append('no monitoring targets on any enabled inbound (did mon-server fetch the probe configs?)') -%}
       {%-   endif -%}
-      {%-   for mon in panel_verify_mon_clients -%}
-      {%-     if live and mon not in live | map(attribute='monClientName') | list -%}
-      {%-       set _ = out.append('mon-client ' ~ mon ~ ' has no targets') -%}
+      {%-   for ib in obj.inbounds | default([], true) | selectattr('enable') -%}
+      {%-     set have = [] -%}
+      {%-     for t in ib.targets | rejectattr('retired') -%}
+      {%-       set _ = have.append(t.monClientName ~ '/' ~ t.path) -%}
+      {%-     endfor -%}
+      {%-     set missing = panel_verify_mon_paths | reject('in', have) | list -%}
+      {%-     if live and missing -%}
+      {%-       set _ = out.append((ib.remark or ib.tag) ~ ' (' ~ ib.kind ~ ' ' ~ ib.inboundId ~ ', port ' ~ ib.port
+                                   ~ ') has no target for ' ~ missing | join(', ')) -%}
       {%-     endif -%}
       {%-   endfor -%}
       {%- endif -%}
@@ -86,4 +104,5 @@
       {{ panel_verify_targets_problems | join('; ') }}
     success_msg: >-
       monitoring: {{ panel_verify_targets.json.obj.inbounds | selectattr('enable') | map(attribute='targets') | flatten
-                     | rejectattr('retired') | list | length }} targets UP
+                     | rejectattr('retired') | list | length }} targets UP on
+      {{ panel_verify_targets.json.obj.inbounds | selectattr('enable') | map(attribute='remark') | join(', ') }}

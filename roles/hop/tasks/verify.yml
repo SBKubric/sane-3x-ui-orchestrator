@@ -1,7 +1,8 @@
 ---
 # verify.yml on a hop box: x-ui runs xui_version, and `x-ui chain status` (the running hop, asked with its
 # own secret) is fresh: it answers as hop_name, its chain document is not stale, the next hop is reachable
-# and the relay runs. Waits hop_verify_retries x hop_verify_delay seconds for a hop that just joined.
+# and the relay runs with at least one port. Waits hop_verify_retries x hop_verify_delay seconds for a hop
+# that just joined or has yet to poll a new port list.
 - name: Read installed x-ui version
   ansible.builtin.command:
     argv: ["{{ hop_bin }}", "-v"]
@@ -28,7 +29,7 @@
     hop_verify_status.rc == 0
     and hop_verify_status.stdout is search('(?m)^name:\\s+' ~ (hop_name | regex_escape) ~ '\\s')
     and hop_verify_status.stdout is search('(?m)^next hop:.*\\(reachable: true\\)')
-    and hop_verify_status.stdout is search('(?m)^relay:\\s+running=true')
+    and hop_verify_status.stdout is search('(?m)^relay:\\s+running=true ports=\\[\\S')
     and hop_verify_status.stdout is not search('(?m)^revision:.*stale')
   retries: "{{ hop_verify_retries | int }}"
   delay: "{{ hop_verify_delay | int }}"
@@ -55,7 +56,10 @@
       {%-     set _ = problems.append('the next hop is not reachable ('
                                       ~ (out_ | regex_search('(?m)^next hop:\\s+(.*)$', '\\1') | first | default('?')) ~ ')') -%}
       {%-   endif -%}
-      {%-   if out_ is not search('(?m)^relay:\\s+running=true') -%}
+      {%-   if out_ is search('(?m)^relay:.*ports=\\[\\]') -%}
+      {%-     set _ = problems.append('the relay carries no ports (the panel has no enabled inbound to relay: panel_inbounds'
+                                    ~ ' in the inventory, or the hop has not polled the new revision yet)') -%}
+      {%-   elif out_ is not search('(?m)^relay:\\s+running=true') -%}
       {%-     set _ = problems.append('the relay is not running') -%}
       {%-   endif -%}
       {%- endif -%}

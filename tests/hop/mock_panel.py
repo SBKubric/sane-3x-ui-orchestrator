@@ -1,12 +1,14 @@
-"""Test double of the 3ax-ui panel chain registry API (SBKubric/3ax-ui-proxy web/controller/chain_controller.go,
-web/service/chain_service.go), for tests of role hop only.
+"""Test double of the 3ax-ui panel API (SBKubric/3ax-ui-proxy v1.9.0-chain.5), for tests of roles hop and panel:
+the chain registry (web/controller/chain_controller.go, web/service/chain_service.go) and, for role panel's
+inbounds, the inbound API, the AmneziaWG server and the monitoring page data (see Panel below).
 
 It keeps the parts the role depends on: the login cookie, the {success, msg, obj} envelope with refusals as
 HTTP 200 + success false + "<code>: <detail>", strict JSON bodies (unknown fields and wrong types are HTTP 400),
 0-based inner positions compacted after every change, next hops re-chained (inner N -> N-1, edges -> last
 joined inner), pending/joined/legacy/draining, one-time join tokens, setActive and del refusals, draining of a
 hop with live outer neighbours. Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box),
-GET /test/state, POST /test/reset, GET /install.sh (the fake installer).
+GET /test/state, POST /test/reset, GET /install.sh (the fake installer), and for the panel part
+POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
 """
 
 import json
@@ -36,6 +38,7 @@ class Registry:
     def __init__(self):
         self.lock = threading.Lock()
         self.reset([])
+        self.panel = Panel(self)
 
     def reset(self, hops):
         self.hops = []
@@ -219,6 +222,189 @@ class Registry:
                 "portsProblem": None, "draining": []}
 
 
+PROBE_PREFIX = "probe-"
+# model.Inbound as gin binds it (JSON): unknown fields are ignored, a wrong type is a binding error.
+INBOUND_FIELDS = {"id": int, "up": int, "down": int, "total": int, "allTime": int, "remark": str, "enable": bool,
+                  "expiryTime": int, "trafficReset": str, "lastTrafficResetTime": int, "clientStats": list,
+                  "listen": str, "port": int, "protocol": str, "settings": str, "streamSettings": str, "tag": str,
+                  "sniffing": str, "publicPort": int}
+UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "trafficReset", "listen", "port", "protocol",
+                 "settings", "streamSettings", "sniffing")
+AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
+              "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str}
+
+
+def bind(raw, fields):
+    """Decodes a body the way gin's ShouldBind(JSON) does; a mismatch is a Refusal (the panel answers jsonMsg)."""
+    try:
+        body = json.loads(raw or "{}")
+    except ValueError as err:
+        raise Refusal("invalid_request", str(err)) from err
+    if not isinstance(body, dict):
+        raise Refusal("invalid_request", "not an object")
+    for key, value in body.items():
+        kind = fields.get(key)
+        if kind is not None and value is not None and (not isinstance(value, kind)
+                                                       or (kind is int and isinstance(value, bool))):
+            raise Refusal("invalid_request", f"json: cannot unmarshal {type(value).__name__} into field {key}")
+    return body
+
+
+def clients_of(settings):
+    try:
+        return json.loads(settings or "{}").get("clients") or []
+    except ValueError:
+        return []
+
+
+class Panel:
+    """Inbounds, the AmneziaWG server and the monitoring page of the panel, with the behaviour role panel relies
+    on: inbounds/add|update re-serialize settings (indented, client timestamps) when it has clients, refuse a
+    new probe client, a taken port and a second AmneziaWG inbound; an AmneziaWG inbound is a bare record; the
+    AWG server save takes the whole server and moves the AWG inbound to its port; a change of the relayed
+    ports bumps the chain revision when the registry has hops (chainPortsChanged)."""
+
+    def __init__(self, registry):
+        self.registry = registry
+        self.reset({})
+
+    def reset(self, seed):
+        self.inbounds = []
+        self.next_id = 1
+        self.x25519 = []
+        self.targets = seed.get("targets")
+        self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
+                    "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
+                    "h1": "1-100", "endpoint": "10.0.0.1"}
+        self.awg.update(seed.get("awg", {}))
+        for inbound in seed.get("inbounds", []):
+            self._store(dict(inbound))
+
+    def _store(self, inbound):
+        record = {"id": self.next_id, "up": 0, "down": 0, "total": 0, "allTime": 0, "remark": "", "enable": True,
+                  "expiryTime": 0, "trafficReset": "never", "lastTrafficResetTime": 0, "clientStats": [],
+                  "listen": "", "port": 0, "protocol": "", "settings": "", "streamSettings": "", "tag": "",
+                  "sniffing": "", "publicPort": 0}
+        record.update(inbound)
+        record["id"] = self.next_id
+        if not record["tag"]:
+            record["tag"] = f"inbound-{record['port']}"
+        self.next_id += 1
+        self.inbounds.append(record)
+        return record
+
+    def load(self, inbound_id):
+        for inbound in self.inbounds:
+            if inbound["id"] == inbound_id:
+                return inbound
+        raise Refusal("record_not_found", f"inbound {inbound_id}")
+
+    def ports(self):
+        ports = sorted(i["port"] for i in self.inbounds if i["enable"] and i["protocol"] not in ("amneziawg", "nativewg"))
+        if self.awg["enable"]:
+            ports.append(self.awg["listenPort"])
+        return sorted(ports)
+
+    def _ports_changed(self):
+        if self.registry.hops:
+            self.registry.revision += 1
+
+    @staticmethod
+    def _reserialize(settings, old=None):
+        """What InboundService does to settings with clients: MarshalIndent, created_at/updated_at kept or added."""
+        try:
+            parsed = json.loads(settings or "{}")
+        except ValueError:
+            return settings
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("clients"), list) or not parsed["clients"]:
+            return settings
+        known = {c.get("email"): c for c in clients_of(old)} if old is not None else {}
+        for client in parsed["clients"]:
+            before = known.get(client.get("email"), {})
+            client.setdefault("created_at", before.get("created_at", 1790000000000))
+            client.setdefault("updated_at", before.get("updated_at", 1790000000000))
+        return json.dumps(parsed, indent=2)
+
+    def _port_taken(self, port, own_id=0):
+        return any(i["port"] == port and i["id"] != own_id and i["protocol"] != "amneziawg" for i in self.inbounds)
+
+    def add(self, raw):
+        body = bind(raw, INBOUND_FIELDS)
+        body.pop("id", None)
+        if body.get("protocol") == "amneziawg":
+            if any(i["protocol"] == "amneziawg" for i in self.inbounds):
+                raise Refusal("awg_exists", "AmneziaWG inbound already exists. Only one is allowed.")
+            body["settings"] = '{"clients":[]}'
+            body["tag"] = body.get("tag") or "inbound-amneziawg"
+            return self._store(body)
+        if any(c.get("email", "").lower().startswith(PROBE_PREFIX) for c in clients_of(body.get("settings"))):
+            raise Refusal("probe_email", "email is reserved for monitoring probes")
+        if self._port_taken(body.get("port", 0)):
+            raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
+        body["tag"] = f"inbound-{body.get('port', 0)}"
+        body["settings"] = self._reserialize(body.get("settings", ""))
+        record = self._store(body)
+        self._ports_changed()
+        return record
+
+    def update(self, inbound_id, raw):
+        body = bind(raw, INBOUND_FIELDS)
+        old = self.load(inbound_id)
+        if self._port_taken(body.get("port", 0), inbound_id):
+            raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
+        had = {c.get("email") for c in clients_of(old["settings"])}
+        for client in clients_of(body.get("settings")):
+            if client.get("email", "").lower().startswith(PROBE_PREFIX) and client.get("email") not in had:
+                raise Refusal("probe_email", "email is reserved for monitoring probes")
+        body["settings"] = self._reserialize(body.get("settings", ""), old["settings"])
+        for field in UPDATE_COPIED:
+            old[field] = body.get(field, type(old[field])())
+        old["tag"] = f"inbound-{old['port']}"
+        self._ports_changed()
+        return dict(old)
+
+    def set_enable(self, inbound_id, raw):
+        body = bind(raw, {"enable": bool})
+        inbound = self.load(inbound_id)
+        if inbound["enable"] != body.get("enable", False):
+            inbound["enable"] = body.get("enable", False)
+            self._ports_changed()
+
+    def save_awg(self, raw):
+        body = bind(raw, AWG_FIELDS)
+        # SaveServer stores what it is given: a body without the keys would wipe them (a re-key in effect).
+        if body.get("privateKey") != self.awg["privateKey"] or body.get("publicKey") != self.awg["publicKey"]:
+            raise Refusal("awg_keys", "the save would replace the server keys")
+        self.awg.update(body)
+        for inbound in self.inbounds:
+            if inbound["protocol"] == "amneziawg":
+                inbound["port"] = self.awg["listenPort"]
+        self._ports_changed()
+
+    def new_x25519(self):
+        pair = {"privateKey": "x25519-private-" + secrets.token_hex(8), "publicKey": "x25519-public-" + secrets.token_hex(8)}
+        self.x25519.append(pair)
+        return pair
+
+    def ensure(self):
+        """POST /probe/ensure of mon-server: a probe client in every xray inbound, added the way the panel adds a
+        client (settings re-serialized)."""
+        for inbound in self.inbounds:
+            if inbound["protocol"] == "amneziawg":
+                continue
+            settings = json.loads(inbound["settings"] or "{}")
+            email = f"{PROBE_PREFIX}{inbound['id']}"
+            if any(c.get("email") == email for c in settings.get("clients") or []):
+                continue
+            settings.setdefault("clients", []).append({"id": secrets.token_hex(16), "email": email, "enable": True,
+                                                        "flow": "", "subId": "probe-sub", "comment": "monitoring probe"})
+            inbound["settings"] = self._reserialize(json.dumps(settings), inbound["settings"])
+
+    def state(self):
+        return {"inbounds": [dict(i) for i in self.inbounds], "awg": dict(self.awg), "ports": self.ports(),
+                "x25519": list(self.x25519)}
+
+
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int}
 UPDATE_FIELDS = {"name": str, "host": str, "subPort": int, "subScheme": str, "role": str, "position": int,
                  "state": str, "isActive": bool, "nextHopId": int, "id": int}
@@ -281,9 +467,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, None, raw=Path(self.install_script).read_bytes())
             if path == "/test/state":
                 return self._send(200, {"hops": reg.ordered(), "revision": reg.revision, "calls": reg.calls,
-                                        "issued": reg.issued})
+                                        "issued": reg.issued, "panel": reg.panel.state()})
             if path == "/test/reset":
                 reg.reset(json.loads(raw or "[]"))
+                return self._send(200, {"ok": True})
+            if path == "/test/panel/reset":
+                reg.panel.reset(json.loads(raw or "{}"))
+                return self._send(200, {"ok": True})
+            if path == "/test/panel/ensure":
+                reg.panel.ensure()
+                return self._send(200, {"ok": True})
+            if path == "/test/panel/targets":
+                reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
             if path == "/test/join":
                 try:
@@ -298,13 +493,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"success": False, "msg": "wrong username or password", "obj": None})
                 return self._send(200, {"success": True, "msg": "", "obj": None},
                                   headers={"Set-Cookie": COOKIE + "; Path=/base/; HttpOnly"})
-            prefix = BASE + "panel/api/chain/"
+            prefix = BASE + "panel/api/"
             if not path.startswith(prefix) or COOKIE not in (self.headers.get("Cookie") or ""):
                 return self._send(404, None, raw=b"404 page not found")
             route = path[len(prefix):]
+            chain = route.startswith("chain/")
+            if chain:
+                route = route[len("chain/"):]
             reg.calls.append({"method": method, "path": route, "body": raw})
             try:
-                return self._send(200, {"success": True, "msg": "", "obj": self._route(method, route, raw)})
+                obj = self._route(method, route, raw) if chain else self._panel_route(method, route, raw)
+                return self._send(200, {"success": True, "msg": "", "obj": obj})
             except Refusal as err:
                 return self._send(200, {"success": False, "msg": f"Refused ({err})", "obj": None})
             except BadRequest as err:
@@ -331,6 +530,36 @@ class Handler(BaseHTTPRequestHandler):
         if name == "del":
             return reg.delete(hop_id, strict(raw, DEL_FIELDS))
         raise BadRequest(f"no route {route}")
+
+    def _panel_route(self, method, route, raw):
+        panel = self.registry.panel
+        tail = route.rsplit("/", 1)[-1]
+        inbound_id = int(tail) if tail.isdigit() else 0
+        if method == "GET" and route == "inbounds/list":
+            return [dict(i) for i in panel.inbounds]
+        if method == "GET" and route == "server/getNewX25519Cert":
+            return panel.new_x25519()
+        if method == "GET" and route == "awg/server":
+            return dict(panel.awg)
+        if method == "GET" and route == "monitoring/targets":
+            if panel.targets is None:
+                raise Refusal("monitoring_off", "no targets seeded")
+            return panel.targets
+        if method != "POST":
+            return self._not_found()
+        if route == "inbounds/add":
+            return panel.add(raw)
+        if route.startswith("inbounds/update/"):
+            return panel.update(inbound_id, raw)
+        if route.startswith("inbounds/setEnable/"):
+            return panel.set_enable(inbound_id, raw)
+        if route == "awg/server":
+            return panel.save_awg(raw)
+        return self._not_found()
+
+    @staticmethod
+    def _not_found():
+        raise BadRequest("404 page not found")
 
 
 def serve(port, install_script):

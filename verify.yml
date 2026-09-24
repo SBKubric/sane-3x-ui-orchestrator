@@ -7,10 +7,11 @@
 #   panel      version; API login with the vault account; chain/list: every hop of group hops joined,
 #              the active edge = the hop with hop_active
 #   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
-#              relay running), waiting up to 1 minute
+#              relay running), waiting up to 2 minutes (a new port list takes a poll per hop)
 #   monserver  version; admin login; Settings -> Check says "Panel reachable."
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
-#   panel      (with mon-clients) every monitoring target of an enabled inbound UP, waiting up to 3 minutes
+#   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path,
+#              all UP, waiting up to 3 minutes
 
 - name: Verify panel and chain registry
   hosts: panel
