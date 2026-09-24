@@ -22,6 +22,9 @@ all:
     hop_install_script: "{{ hop_test_root }}/{{ inventory_hostname }}/install.sh"
     hop_token_file: "{{ hop_test_root }}/{{ inventory_hostname }}/token"
     hop_le_cert_dir: "{{ hop_test_root }}/{{ inventory_hostname }}/cert"
+    hop_proxy_config: "{{ hop_test_root }}/{{ inventory_hostname }}/proxy.json"
+    # verify.yml's TLS check of an https hop: a local TLS server of test_hop_role.py stands in for every sub port.
+    hop_verify_tls_url: "{{ lookup('ansible.builtin.env', 'HOP_TEST_TLS_URL') }}"
     hop_install_environment:
       FAKE_BOX_DIR: "{{ hop_test_root }}/{{ inventory_hostname }}"
       FAKE_PANEL: "{{ hop_test_panel }}"
@@ -42,7 +45,9 @@ all:
           hop_position: 1
           hop_active: "{{ hop_test_bridge_active | default(false) }}"
           hop_host: 10.0.0.2
-          hop_tls: none
+          hop_tls: "{{ hop_test_bridge_tls | default('none') }}"
+          hop_cert: /root/cert/bridge.pem
+          hop_key: /root/cert/bridge.key
         proxy:
           hop_role: edge
           hop_active: true

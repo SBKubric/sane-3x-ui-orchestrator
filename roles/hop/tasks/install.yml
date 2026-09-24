@@ -92,6 +92,6 @@
 - name: "Check the installed version: {{ hop_item.tag }}"
   ansible.builtin.assert:
     that:
-      - hop_new_version.stdout | trim == hop_item.version
+      - hop_new_version.stdout | trim | regex_replace('^v', '') == hop_item.version | regex_replace('^v', '')
     fail_msg: "install.sh {{ hop_item.tag }} left version {{ hop_new_version.stdout | trim }} on {{ hop_item.inventory_host }}"
     quiet: true

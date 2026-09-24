@@ -93,25 +93,40 @@
     quiet: true
 
 # add: not in the registry. skip: joined, same host/sub port/scheme, `x-ui chain status` answers with
-# this name and the box runs xui_version. rejoin: anything else (update, reissueToken, reinstall).
+# this name and the box runs xui_version (compared without a leading "v": `x-ui -v` prints none). rejoin:
+# anything else (update, reissueToken, reinstall); the plan names why.
 - name: Plan the hops
   ansible.builtin.set_fact:
     hop_plan: >-
       {%- set out = [] -%}
       {%- for hop in hop_order -%}
       {%-   set entry = hop_registry.hops | selectattr('name', 'equalto', hop.name) | first | default({}) -%}
+      {%-   set why = [] -%}
       {%-   if not hop.managed -%}
       {%-     set action = 'untouched' -%}
       {%-   elif not entry -%}
       {%-     set action = 'add' -%}
       {%-   else -%}
       {%-     set box = hostvars[hop.inventory_host].hop_box -%}
-      {%-     set same = entry.state == 'joined' and entry.host == hop.host and entry.subPort | int == hop.sub_port | int
-                         and entry.subScheme == hop.sub_scheme and box.status_ok and box.status_name == hop.name
-                         and box.version == hop.version -%}
-      {%-     set action = 'skip' if same else 'rejoin' -%}
+      {%-     if entry.state != 'joined' -%}{%- set _ = why.append('registry state ' ~ entry.state) -%}{%- endif -%}
+      {%-     if entry.host != hop.host -%}{%- set _ = why.append('host ' ~ entry.host ~ ' -> ' ~ hop.host) -%}{%- endif -%}
+      {%-     if entry.subPort | int != hop.sub_port | int -%}
+      {%-       set _ = why.append('subPort ' ~ entry.subPort ~ ' -> ' ~ hop.sub_port) -%}
+      {%-     endif -%}
+      {%-     if entry.subScheme != hop.sub_scheme -%}
+      {%-       set _ = why.append('subScheme ' ~ entry.subScheme ~ ' -> ' ~ hop.sub_scheme) -%}
+      {%-     endif -%}
+      {%-     if not box.status_ok | bool -%}
+      {%-       set _ = why.append('chain status fails') -%}
+      {%-     elif box.status_name != hop.name -%}
+      {%-       set _ = why.append('box answers as ' ~ box.status_name) -%}
+      {%-     endif -%}
+      {%-     if box.version | regex_replace('^v', '') != hop.version | regex_replace('^v', '') -%}
+      {%-       set _ = why.append('version ' ~ (box.version or 'none') ~ ' -> ' ~ hop.version) -%}
+      {%-     endif -%}
+      {%-     set action = 'rejoin' if why else 'skip' -%}
       {%-   endif -%}
-      {%-   set _ = out.append(hop | combine({'action': action})) -%}
+      {%-   set _ = out.append(hop | combine({'action': action, 'why': why})) -%}
       {%- endfor -%}
       {{ out }}
     hop_extra: "{{ hop_registry.hops | rejectattr('name', 'in', hop_names) | map(attribute='name') | list }}"
@@ -119,7 +134,8 @@
 - name: Show the plan
   ansible.builtin.debug:
     msg: >-
-      hops: {{ hop_plan | map(attribute='name') | zip(hop_plan | map(attribute='action')) | map('join', '=') | join(', ') }};
+      hops: {% for hop in hop_plan %}{{ hop.name }}={{ hop.action }}{{ (' (' ~ hop.why | join('; ') ~ ')') if hop.why else '' }}{{
+      '' if loop.last else ', ' }}{% endfor %};
       active edge: {{ hop_active_edge if hop_active_edge | length > 0 else '(none)' }};
       delete: {{ (hop_extra | join(', ')) if hop_extra | length > 0 and hop_prune | bool else '(nothing)' }}{{
       '' if hop_prune | bool or hop_extra | length == 0 else ' (hop_prune=false, not in the inventory: ' ~ hop_extra | join(', ') ~ ')' }}

@@ -269,8 +269,10 @@ Per hop, against `GET panel/api/chain/list`:
 | Registry / box | Action |
 |---|---|
 | no hop of that name | `add {name, host, role, subPort, subScheme, position}` → install with the join token |
-| `joined`, same host / sub port / scheme, `x-ui chain status` answers with this name, `x-ui -v` = `xui_version` | nothing |
+| `joined`, same host / sub port / scheme, `x-ui chain status` answers with this name, `x-ui -v` = `xui_version` (a leading `v` on either side is ignored) | nothing |
 | anything else (pending, broken box, other version, new host) | `update` of what changed → `reissueToken` → install |
+
+The plan line names why a hop re-joins, e.g. `proxy=rejoin (subScheme http -> https)`.
 
 Install = `install.sh <xui_version>` from the same tag with `XUI_PROXY_MODE=1`, `PROXY_NEXT_HOP`,
 `PROXY_NEXT_HOP_SUB_PORT`/`_SCHEME`, `PROXY_SUB_PORT`, `PROXY_TLS`, `PROXY_JOIN_TOKEN`; without a TTY and
@@ -455,7 +457,7 @@ to look; the first group that fails ends the run.
 | Play | Checks |
 |---|---|
 | panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
-| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`) |
+| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`) |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (the probe configs are readable too) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each of its `mon_paths`, and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |

@@ -73,3 +73,62 @@
       hop {{ hop_name }} ({{ inventory_hostname }}) after {{ hop_verify_retries | int * hop_verify_delay | int }}s:
       {{ hop_verify_problems | join('; ') }}. See `x-ui chain status` and `journalctl -u {{ hop_service }}` on the box.
     success_msg: "hop {{ hop_name }}: {{ hop_verify_status.stdout_lines | default([]) | map('regex_replace', '\\s+', ' ') | join('; ') }}"
+
+# hop_sub_scheme https: the box must still hold a certificate (a manual-TLS reinstall used to leave
+# proxy.json with "cert": "", SBKubric/3ax-ui-proxy#124) and its sub port must answer TLS where the chain
+# reaches it: from the next-outer hop, or from the controller for an edge. -k: this checks the scheme,
+# not the certificate (inner hops often run self-signed or IP certificates).
+- name: Check that the hop still serves TLS
+  when: hop_sub_scheme == 'https'
+  block:
+    - name: Read proxy.json
+      ansible.builtin.slurp:
+        src: "{{ hop_proxy_config }}"
+      register: hop_verify_proxy_json
+      failed_when: false
+
+    - name: Choose where the sub port is probed from
+      ansible.builtin.set_fact:
+        hop_verify_tls_from: >-
+          {%- set hops = groups['hops'] | map('extract', hostvars) | list -%}
+          {%- set outer_inners = hops | selectattr('hop_role', 'defined') | selectattr('hop_role', 'equalto', 'inner')
+                                   | selectattr('hop_position', 'defined')
+                                   | selectattr('hop_position', 'gt', hop_position | default(0) | int) | sort(attribute='hop_position') | list -%}
+          {%- set edges = hops | selectattr('hop_role', 'defined') | selectattr('hop_role', 'equalto', 'edge')
+                            | sort(attribute='inventory_hostname') | list -%}
+          {%- set edges = (edges | selectattr('hop_active', 'defined') | selectattr('hop_active') | list) + edges -%}
+          {%- if hop_verify_tls_probe_host | length > 0 -%}{{ hop_verify_tls_probe_host }}
+          {%- elif hop_role == 'edge' -%}localhost
+          {%- elif outer_inners | length > 0 -%}{{ (outer_inners | first).inventory_hostname }}
+          {%- elif edges | length > 0 -%}{{ (edges | first).inventory_hostname }}
+          {%- else -%}localhost{%- endif -%}
+
+    - name: Probe the sub port over https
+      ansible.builtin.uri:
+        url: "{{ hop_verify_tls_url }}"
+        validate_certs: false
+        follow_redirects: none
+        timeout: 10
+      # delegate_to is templated before the block's `when`: an http hop skips with its own name.
+      delegate_to: "{{ hop_verify_tls_from | default(inventory_hostname) }}"
+      register: hop_verify_tls
+      failed_when: false
+
+    - name: Require a certificate and a TLS answer on the sub port
+      ansible.builtin.assert:
+        that:
+          - hop_verify_proxy_json.content is defined
+          - (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length > 0
+          - hop_verify_tls.status | default(-1) | int > 0
+        fail_msg: >-
+          hop {{ hop_name }} ({{ inventory_hostname }}) has hop_sub_scheme https but
+          {{ ('cannot read ' ~ hop_proxy_config ~ ': ' ~ hop_verify_proxy_json.msg | default('?'))
+             if hop_verify_proxy_json.content is not defined else
+             (hop_proxy_config ~ ' has an empty cert')
+             if (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length == 0 else '' }}{{
+          '; ' if hop_verify_proxy_json.content is not defined
+                  or (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length == 0 else '' }}{{
+          ('GET ' ~ hop_verify_tls_url ~ ' from ' ~ hop_verify_tls_from ~ ' got no TLS answer: ' ~ hop_verify_tls.msg | default('?'))
+          if hop_verify_tls.status | default(-1) | int <= 0 else 'its sub port answers TLS' }}. The next-outer hop
+          cannot poll it; reinstall it (site.yml) and see SBKubric/3ax-ui-proxy#124.
+        success_msg: "hop {{ hop_name }}: TLS on {{ hop_verify_tls_url }} (from {{ hop_verify_tls_from }}), cert in proxy.json"

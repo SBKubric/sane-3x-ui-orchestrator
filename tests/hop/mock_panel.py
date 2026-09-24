@@ -206,12 +206,16 @@ class Registry:
         self.revision += 1
         return {"hop": hop["name"], "state": "deleted"}
 
-    def join(self, token):
+    def join(self, token, reported=None):
         hop_id = self.tokens.pop(token, None)
         if hop_id is None:
             raise Refusal("unknown_token", "unknown, expired or spent")
         hop = self.load(hop_id)
         hop["state"], hop["joinTokenExpires"] = "joined", 0
+        # applyReportedAddress: what the box reports about itself wins over what was typed.
+        for field in ("host", "subPort", "subScheme"):
+            if (reported or {}).get(field):
+                hop[field] = reported[field]
         self._reconcile()
         self.revision += 1
         return {"name": hop["name"], "role": hop["role"]}
@@ -481,8 +485,9 @@ class Handler(BaseHTTPRequestHandler):
                 reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
             if path == "/test/join":
+                body = json.loads(raw)
                 try:
-                    return self._send(200, {"success": True, "obj": reg.join(json.loads(raw)["token"])})
+                    return self._send(200, {"success": True, "obj": reg.join(body["token"], reported=body)})
                 except Refusal as err:
                     return self._send(404, {"success": False, "msg": str(err)})
             if path == BASE + "login" and method == "POST":

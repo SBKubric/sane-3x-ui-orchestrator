@@ -18,6 +18,12 @@ echo "$tag" >>"$box/installs"
     echo "TOKEN_GIVEN=$([[ -n "${PROXY_JOIN_TOKEN:-}" ]] && echo yes || echo no)"
 } >"$box/install.env"
 echo "${tag#v}" >"$box/version"
+# proxy.json as install.sh writes it: a cert unless PROXY_TLS=none; a "lose_cert" file in the box
+# reproduces SBKubric/3ax-ui-proxy#124 (a reinstall that leaves "cert": "" and serves plain HTTP).
+cert=""
+[[ "${PROXY_TLS:-none}" != none && ! -e "$box/lose_cert" ]] && cert="${PROXY_CERT:-/root/cert/ip/fullchain.pem}"
+printf '{"domain": "%s", "subPort": %s, "cert": "%s"}\n' "${PROXY_DOMAIN:-}" "${PROXY_SUB_PORT:-2096}" "$cert" >"$box/proxy.json"
+scheme=$([[ -n "$cert" ]] && echo https || echo http)
 cat >"$box/x-ui" <<'XUI'
 #!/usr/bin/env bash
 dir="$(dirname "$0")"
@@ -42,9 +48,11 @@ XUI
 chmod 700 "$box/x-ui"
 rm -f "$box/joined"
 if [[ -n "${PROXY_JOIN_TOKEN:-}" ]]; then
-    python3 - "$FAKE_PANEL/test/join" "$PROXY_JOIN_TOKEN" >"$box/joined" <<'PY'
+    # Like proxy.Join: the box reports the scheme its sub server came up with.
+    python3 - "$FAKE_PANEL/test/join" "$PROXY_JOIN_TOKEN" "$scheme" >"$box/joined" <<'PY'
 import json, sys, urllib.request
-req = urllib.request.Request(sys.argv[1], data=json.dumps({"token": sys.argv[2]}).encode(), method="POST")
+body = {"token": sys.argv[2], "subScheme": sys.argv[3]}
+req = urllib.request.Request(sys.argv[1], data=json.dumps(body).encode(), method="POST")
 obj = json.load(urllib.request.urlopen(req))["obj"]
 print(obj["name"], obj["role"])
 PY

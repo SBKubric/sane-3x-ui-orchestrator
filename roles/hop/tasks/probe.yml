@@ -25,7 +25,9 @@
   check_mode: false
   when: hop_bin_stat.stat.exists
 
-# Valid for at least another day and issued for hop_host; openssl comes from role common.
+# Valid for at least another day and issued for hop_host; openssl comes from role common. It prints the
+# SAN lines first and "Certificate will not expire" last. The pattern below sits in a folded scalar, where
+# YAML keeps backslashes: one backslash there is one in the regex.
 - name: Check the Let's Encrypt IP certificate already on the box
   ansible.builtin.command:
     argv:
@@ -60,5 +62,5 @@
       le_cert_reusable: >-
         {{ hop_tls == 'letsencrypt-ip' and hop_tls_reuse | bool
            and (hop_le_cert.rc | default(1)) == 0
-           and (hop_le_cert.stdout | default('')) is search('IP Address:' ~ (hop_host | regex_escape) ~ '(,|\\s|$)')
+           and (hop_le_cert.stdout | default('')) is search('IP Address:' ~ (hop_host | regex_escape) ~ '(,|\s|$)', multiline=true)
            and (hop_le_key.stat.exists | default(false)) }}
