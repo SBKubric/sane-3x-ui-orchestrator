@@ -1,8 +1,8 @@
 ---
 # Release tag of SBKubric/3ax-ui-proxy for the panel and every hop (install.sh <xui_version>).
-xui_version: v1.9.0-chain.4
+xui_version: v1.9.0-chain.5
 # Release tag of SBKubric/3ax-ui-monitoring for mon-server and mon-client.
-mon_version: v0.1.0-stand.2
+mon_version: v0.1.0-stand.3
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.
 # Hops always use production LE (hop_tls); the panel uses a self-signed certificate.
 acme_production: false
