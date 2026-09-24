@@ -1,0 +1,6 @@
+---
+# Edge hop, active; hop_next is derived (outermost inner hop = bridge).
+hop_name: proxy
+hop_role: edge
+hop_active: true
+hop_tls: letsencrypt-ip

@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: SBKubric
+  description: "3ax-ui mon-client: release binary and xray, unit, pairing auto-approval"
+  license: GPL-3.0-only
+  min_ansible_version: "2.17"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+        - trixie
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+dependencies: []

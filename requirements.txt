@@ -1,0 +1,3 @@
+# Python tooling for the controller and CI (pip install -r requirements.txt).
+ansible-core==2.21.4
+ansible-lint==26.9.0

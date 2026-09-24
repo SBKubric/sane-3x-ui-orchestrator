@@ -1,0 +1,7 @@
+---
+# Placeholder: the role is implemented in SBKubric/3ax-ui-orchestrator#2.
+# Until then it is a no-op so that site.yml and both profiles already run end to end.
+- name: Role panel is not implemented yet
+  ansible.builtin.debug:
+    msg: "role panel: no-op stub, see SBKubric/3ax-ui-orchestrator#2"
+    verbosity: 1

@@ -1,0 +1,24 @@
+---
+# Supported operating systems (decision SBKubric/3ax-ui-monitoring#55).
+# Debian is matched by major version, Ubuntu by full release version.
+common_supported_os:
+  Debian: ["12", "13"]
+  Ubuntu: ["22.04", "24.04"]
+
+# Base packages the later roles rely on (install.sh, release downloads, TLS).
+common_packages:
+  - ca-certificates
+  - curl
+  - gzip
+  - jq
+  - openssl
+  - tar
+  - unzip
+
+# Extra NTP servers for systemd-timesyncd; empty keeps the distribution defaults.
+# Ignored when the host already runs chrony or ntpsec (that daemon is kept) or is a container.
+common_ntp_servers: []
+
+# Container virtualization types (facts virtualization_type) whose clock is owned by the host:
+# time sync is skipped there (systemd-timesyncd refuses to run in containers anyway).
+common_container_virtualization: [lxc, openvz, docker, podman, container, systemd-nspawn]

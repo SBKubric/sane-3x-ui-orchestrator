@@ -1,0 +1,26 @@
+---
+# Role panel (SBKubric/3ax-ui-orchestrator#2). Runs on the single host of group `panel`.
+#
+# Inputs from the inventory (group_vars/all):
+#   xui_version        release tag passed to install.sh, e.g. v1.9.0-chain.3
+# Inputs from the vault (group_vars/all/vault.yml):
+#   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
+#   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...`
+# Monitoring is switched on only when group `monserver` is not empty.
+#
+# Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
+#   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver)
+#   panel_ca_pem       PEM of the self-signed panel certificate       (role monserver: panelCa)
+#   panel_url          https://<panel_public_ip>:<panel_port><panel_base_path>  (roles hop, monserver, verify)
+
+# Repository whose install.sh and releases are used.
+panel_repo: SBKubric/3ax-ui-proxy
+
+# Address put into the IP SAN of the self-signed certificate and into panel_url.
+panel_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+
+# Where the self-signed certificate is placed; the paths are given to install.sh (SSL option 3).
+panel_tls_dir: /etc/x-ui/tls
+panel_cert_file: "{{ panel_tls_dir }}/panel.crt"
+panel_key_file: "{{ panel_tls_dir }}/panel.key"
+panel_cert_valid_days: 3650

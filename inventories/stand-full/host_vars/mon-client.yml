@@ -1,0 +1,5 @@
+---
+# Approval payload for this mon-client's pairing request.
+mon_name: monclient
+mon_region: stand
+mon_paths: [direct, proxy]
