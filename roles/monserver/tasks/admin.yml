@@ -1,0 +1,83 @@
+---
+# `mon-server admin set` runs as the service user (runuser: no sudo needed, the nologin shell is not
+# used) with umask 077, so the database it may create is owned by mon-server and private, as under the
+# unit's UMask=0077. On a fresh box it runs before the first start; afterwards the vault account is
+# checked by logging in and set again only when that fails.
+- name: Check for an existing database
+  ansible.builtin.stat:
+    path: "{{ monserver_data_dir }}/mon-server.db"
+  register: monserver_db
+
+- name: Set the admin account before the first start
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ monserver_user }}"
+      - --
+      - sh
+      - -c
+      - umask 077 && exec "$0" "$@"
+      - "{{ monserver_bin_path }}"
+      - admin
+      - set
+      - -config
+      - "{{ monserver_config_path }}"
+      - "{{ monserver_admin_user }}"
+  environment:
+    MON_ADMIN_PASSWORD: "{{ monserver_admin_password }}"
+  when: not monserver_db.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Apply pending mon-server restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start mon-server
+  ansible.builtin.systemd_service:
+    name: "{{ monserver_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# The first start in acme-ip mode answers only once the certificate is issued.
+- name: Wait for mon-server /healthz
+  ansible.builtin.uri:
+    url: "https://127.0.0.1:{{ monserver_port }}/healthz"
+    validate_certs: false
+  register: monserver_health
+  until: monserver_health.status | default(0) == 200
+  retries: "{{ (monserver_start_timeout | int / 3) | round(0, 'ceil') | int }}"
+  delay: 3
+
+- name: Try the vault account
+  ansible.builtin.include_tasks: api_login.yml
+  vars:
+    monserver_api_login_required: false
+
+# The login fails: the user or the password in the vault changed (or was changed on the box).
+- name: Reset the admin account to the vault values
+  ansible.builtin.command:
+    argv:
+      - runuser
+      - -u
+      - "{{ monserver_user }}"
+      - --
+      - sh
+      - -c
+      - umask 077 && exec "$0" "$@"
+      - "{{ monserver_bin_path }}"
+      - admin
+      - set
+      - -config
+      - "{{ monserver_config_path }}"
+      - "{{ monserver_admin_user }}"
+  environment:
+    MON_ADMIN_PASSWORD: "{{ monserver_admin_password }}"
+  when: not monserver_api_logged_in | bool
+  changed_when: true
+  no_log: true
+
+- name: Log in with the reset account
+  ansible.builtin.include_tasks: api_login.yml
+  when: not monserver_api_logged_in | bool

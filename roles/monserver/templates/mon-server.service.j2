@@ -1,0 +1,27 @@
+# {{ ansible_managed }} (3ax-ui-orchestrator, role monserver)
+[Unit]
+Description=3ax-ui mon-server
+Documentation=https://github.com/{{ monserver_repo }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={{ monserver_bin_path }} run -config {{ monserver_config_path }}
+Restart=on-failure
+RestartSec=5
+User={{ monserver_user }}
+Group={{ monserver_user }}
+# Bind :{{ monserver_port }} without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+# The database holds the panel's monToken and the Telegram token: owner-only.
+StateDirectory={{ monserver_data_dir | basename }}
+StateDirectoryMode=0700
+UMask=0077
+{% if monserver_tls_mode == 'acme-ip' %}
+Environment=MON_TLS_ACME_CA={{ monserver_acme_ca }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

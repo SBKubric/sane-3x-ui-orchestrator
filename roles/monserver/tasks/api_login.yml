@@ -1,0 +1,62 @@
+---
+# Logs in to the mon-server admin API (POST /admin/login, JSON) and keeps the session on the calling
+# host. Usable from any play once role monserver has run (vault vars mon_admin_user/mon_admin_password
+# are in group_vars/all):
+#
+#   - name: Log in to mon-server
+#     ansible.builtin.include_role:
+#       name: monserver
+#       tasks_from: api_login
+#   - name: List mon-clients
+#     ansible.builtin.uri:
+#       url: "{{ monserver_api_url }}api/clients"
+#       headers:
+#         Cookie: "{{ monserver_api_cookie }}"
+#         X-Requested-With: XMLHttpRequest     # required on every POST under /admin/api/
+#       validate_certs: false
+#       return_content: true
+#     delegate_to: "{{ monserver_api_host }}"
+#
+# Facts set on the calling host:
+#   monserver_api_cookie     Cookie header value with the session cookie (`mon_session=...`)
+#   monserver_api_url        https://127.0.0.1:<port>/admin/; append the API path
+#   monserver_api_host       inventory host of mon-server: delegate_to it, the URL is local to it
+#   monserver_api_logged_in  true when the login succeeded
+# A failed login fails the task unless monserver_api_login_required is false. Five failed logins from
+# one address lock it out for 15 minutes (HTTP 429).
+- name: Log in to the mon-server admin API
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ monserver_admin_user }}"
+      password: "{{ monserver_admin_password }}"
+    # Loopback call; the certificate is for publicIp (see monserver_api_url in defaults).
+    validate_certs: false
+    status_code: [200, 401, 429]
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  register: monserver_api_login
+  no_log: true
+
+- name: Keep the mon-server admin API session
+  ansible.builtin.set_fact:
+    monserver_api_cookie: "{{ monserver_api_login.cookies_string | default('') }}"
+    monserver_api_logged_in: >-
+      {{ monserver_api_login.status == 200
+         and (monserver_api_login.json.success | default(false) | bool)
+         and (monserver_api_login.cookies_string | default('') | length > 0) }}
+    monserver_api_url: "{{ monserver_api_url }}"
+    monserver_api_host: "{{ monserver_api_host }}"
+  no_log: true
+
+- name: Require a successful mon-server login
+  ansible.builtin.assert:
+    that:
+      - monserver_api_logged_in | bool
+    fail_msg: >-
+      login to {{ monserver_api_url }} as the vault user failed (HTTP {{ monserver_api_login.status | default('?') }}:
+      {{ monserver_api_login.json.msg | default('') }})
+    quiet: true
+  when: monserver_api_login_required | bool

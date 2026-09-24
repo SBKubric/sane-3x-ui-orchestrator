@@ -1,0 +1,115 @@
+---
+# Pairing (decision SBKubric/3ax-ui-monitoring#55, item 6). mon-client logs
+# `registration request sent, pairing code <X>` and waits for an administrator; the role reads the code
+# from the journal of the unit's current run, finds the request with that pairingCode in
+# GET /admin/api/requests and approves it:
+#   - a mon-client with this name already exists (suggestReplacement names it, or it is in the
+#     registry) -> mode replace: keeps its id and history, the old token is revoked;
+#   - otherwise -> mode new with name/region/paths from the inventory.
+# A mon-client already ONLINE under this name, or a box holding a token the registry still knows, is
+# left alone. mon_auto_approve=false only prints the code.
+- name: Log in to the mon-server admin API
+  ansible.builtin.include_role:
+    name: monserver
+    tasks_from: api_login
+  vars:
+    monserver_api_host: "{{ monclient_server_host }}"
+
+- name: List mon-clients
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/clients"
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+    validate_certs: false
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  register: monclient_registry
+
+- name: Find this mon-client in the registry
+  ansible.builtin.set_fact:
+    monclient_known: >-
+      {{ monclient_registry.json.obj.clients | selectattr('name', 'equalto', monclient_name)
+         | rejectattr('tokenRevoked') | list }}
+
+- name: Report a mon-client that is already ONLINE
+  ansible.builtin.debug:
+    msg: "mon-client {{ monclient_name }} ({{ (monclient_known | selectattr('state', 'equalto', 'ONLINE') | first).id }}) is ONLINE; nothing to approve"
+  when: monclient_known | selectattr('state', 'equalto', 'ONLINE') | list | length > 0
+
+- name: Pair with mon-server
+  when: monclient_known | selectattr('state', 'equalto', 'ONLINE') | list | length == 0
+  block:
+    # Either a pairing code shows up in this run of the unit, or the box already holds a token
+    # (state.json) that the registry knows. A token the registry does not know (a wiped mon-server)
+    # is refused on the first heartbeat; mon-client then clears state.json and asks again.
+    - name: Wait for the pairing code in the mon-client journal
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          inv=$(systemctl show -p InvocationID --value {{ monclient_service | quote }})
+          log=""
+          if [ -n "$inv" ]; then
+            log=$(journalctl --no-pager -o cat _SYSTEMD_INVOCATION_ID="$inv" || true)
+          fi
+          # Only a code after the last "registered as" is still waiting for a decision.
+          last=$(printf '%s\n' "$log" | grep -E 'pairing code [A-Z2-9]{6}|registered as ' | tail -n 1 || true)
+          code=$(printf '%s\n' "$last" | sed -n 's/.*pairing code \([A-Z2-9]\{6\}\).*/\1/p')
+          warn=$(printf '%s\n' "$log" | grep -E 'level=(WARN|ERROR)' | tail -n 1 || true)
+          registered=false
+          if [ -s {{ (monclient_state_dir ~ '/state.json') | quote }} ]; then registered=true; fi
+          jq -cn --arg code "$code" --argjson registered "$registered" --arg warn "$warn" \
+            '{code: $code, registered: $registered, lastWarning: $warn}'
+        executable: /bin/bash
+      register: monclient_pairing
+      until: >-
+        ((monclient_pairing.stdout | default('', true) or '{}') | from_json).code | default('') | length > 0
+        or (((monclient_pairing.stdout | default('', true) or '{}') | from_json).registered | default(false)
+            and monclient_known | length > 0)
+      retries: "{{ monclient_pairing_retries }}"
+      delay: "{{ monclient_pairing_delay }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Read the pairing state
+      ansible.builtin.set_fact:
+        monclient_pairing_state: "{{ (monclient_pairing.stdout | default('', true) or '{}') | from_json }}"
+        monclient_already_registered: >-
+          {{ ((monclient_pairing.stdout | default('', true) or '{}') | from_json).registered | default(false)
+             and monclient_known | length > 0 }}
+
+    - name: Require a pairing code or a registration
+      ansible.builtin.assert:
+        that:
+          - monclient_already_registered | bool or monclient_pairing_state.code | default('') | length > 0
+        fail_msg: >-
+          mon-client printed no pairing code within {{ monclient_pairing_retries * monclient_pairing_delay }}s
+          (rc {{ monclient_pairing.rc | default('?') }}); last warning in its journal:
+          {{ monclient_pairing_state.lastWarning | default('') or '(none)' }}. Check MON_SERVER_URL
+          {{ monclient_server_url_effective }} and TLS trust.
+        quiet: true
+
+    - name: Report a registered mon-client
+      ansible.builtin.debug:
+        msg: >-
+          mon-client {{ monclient_name }} ({{ monclient_known[0].id }}) holds its token, state {{ monclient_known[0].state }};
+          it turns ONLINE with its next heartbeat
+      when: monclient_already_registered | bool
+
+    - name: Print the pairing code for manual approval
+      ansible.builtin.debug:
+        msg: >-
+          mon_auto_approve is off: approve pairing code {{ monclient_pairing_state.code }} in mon-server's admin UI
+          ({{ monclient_server_url_effective }}/admin/requests) as {{ monclient_name }}
+      when:
+        - not monclient_already_registered | bool
+        - not monclient_auto_approve | bool
+
+    - name: Approve the pairing request
+      ansible.builtin.include_tasks: approve_request.yml
+      when:
+        - not monclient_already_registered | bool
+        - monclient_auto_approve | bool
+
+- name: Keep region and paths as in the inventory
+  ansible.builtin.include_tasks: converge_record.yml
+  when: monclient_auto_approve | bool

@@ -1,0 +1,73 @@
+---
+- name: Find the request with pairing code {{ monclient_pairing_state.code }}
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/requests"
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+    validate_certs: false
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  register: monclient_requests
+  until: >-
+    monclient_requests.json.obj.pending | default([])
+    | selectattr('pairingCode', 'equalto', monclient_pairing_state.code) | list | length > 0
+  retries: 12
+  delay: 5
+  failed_when: false
+
+- name: Require the pending request
+  ansible.builtin.assert:
+    that:
+      - monclient_requests.json.obj.pending | default([]) | selectattr('pairingCode', 'equalto', monclient_pairing_state.code) | list | length > 0
+    fail_msg: >-
+      no pending request with pairing code {{ monclient_pairing_state.code }} on mon-server (expired or already
+      decided); mon-client sends a new one with a new code, rerun the monclient play
+    quiet: true
+
+- name: Choose the approval mode
+  ansible.builtin.set_fact:
+    monclient_request: "{{ monclient_request_found }}"
+    monclient_replace: >-
+      {{ [monclient_request_found.suggestReplacement]
+         if monclient_request_found.suggestReplacement and monclient_request_found.suggestReplacement.name == monclient_name
+         else monclient_requests.json.obj.clients | default([]) | selectattr('name', 'equalto', monclient_name) | list }}
+  vars:
+    monclient_request_found: >-
+      {{ monclient_requests.json.obj.pending | selectattr('pairingCode', 'equalto', monclient_pairing_state.code) | first }}
+
+- name: Approve request {{ monclient_request.requestId }}
+  ansible.builtin.uri:
+    url: "{{ monserver_api_url }}api/requests/{{ monclient_request.requestId }}/approve"
+    method: POST
+    headers:
+      Cookie: "{{ monserver_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body: >-
+      {{ {'mode': 'replace', 'existingId': monclient_replace[0].monClientId} if monclient_replace | length > 0
+         else {'mode': 'new', 'name': monclient_name, 'region': monclient_region, 'paths': monclient_paths} }}
+    validate_certs: false
+    status_code: [200, 400, 404, 409, 500]
+    return_content: true
+  delegate_to: "{{ monserver_api_host }}"
+  register: monclient_approved
+  changed_when: monclient_approved.json.success | default(false) | bool
+
+- name: Check the approval
+  ansible.builtin.assert:
+    that:
+      - monclient_approved.json.success | default(false) | bool
+    fail_msg: "approve {{ monclient_request.requestId }} failed (HTTP {{ monclient_approved.status }}): {{ monclient_approved.json.msg | default('') }}"
+    success_msg: >-
+      {{ 'replaced ' ~ monclient_replace[0].monClientId if monclient_replace | length > 0 else 'new mon-client' }}
+      for pairing code {{ monclient_pairing_state.code }} (hostname {{ monclient_request.hostname }},
+      public IP {{ monclient_request.publicIp }}): {{ monclient_approved.json.msg }}
+
+# mon-client polls for the decision every 10 seconds and saves its token to state.json.
+- name: Wait for mon-client to collect its token
+  ansible.builtin.stat:
+    path: "{{ monclient_state_dir }}/state.json"
+  register: monclient_state_file
+  until: monclient_state_file.stat.exists and monclient_state_file.stat.size > 0
+  retries: "{{ monclient_pairing_retries }}"
+  delay: "{{ monclient_pairing_delay }}"

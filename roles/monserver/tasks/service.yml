@@ -1,0 +1,60 @@
+---
+- name: Create service group
+  ansible.builtin.group:
+    name: "{{ monserver_user }}"
+    system: true
+
+- name: Create service user
+  ansible.builtin.user:
+    name: "{{ monserver_user }}"
+    group: "{{ monserver_user }}"
+    system: true
+    home: "{{ monserver_data_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+
+# The unit's StateDirectory= would create it on start; it is made here so that `admin set` can run
+# (as the service user) before the very first start.
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ monserver_data_dir }}"
+    state: directory
+    owner: "{{ monserver_user }}"
+    group: "{{ monserver_user }}"
+    mode: "0700"
+
+- name: Create config directory
+  ansible.builtin.file:
+    path: "{{ monserver_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ monserver_user }}"
+    mode: "0750"
+
+# No secrets in the bootstrap config: panel token, Telegram and the admin hash live in the database.
+# The ACME CA (staging/production) is MON_TLS_ACME_CA in the unit.
+- name: Write bootstrap config
+  ansible.builtin.copy:
+    dest: "{{ monserver_config_path }}"
+    content: "{{ monserver_config | to_nice_json(indent=2) }}\n"
+    owner: root
+    group: "{{ monserver_user }}"
+    mode: "0640"
+  vars:
+    monserver_config:
+      listen: ":{{ monserver_port }}"
+      publicIp: "{{ monserver_public_ip }}"
+      dataDir: "{{ monserver_data_dir }}"
+      tls: >-
+        {{ {'mode': 'acme-ip'} if monserver_tls_mode == 'acme-ip'
+           else {'mode': 'files', 'cert': monserver_tls_cert, 'key': monserver_tls_key} }}
+  notify: monserver restart
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: mon-server.service.j2
+    dest: "/etc/systemd/system/{{ monserver_service }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: monserver restart

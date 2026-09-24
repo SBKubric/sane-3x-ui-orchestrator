@@ -1,0 +1,7 @@
+---
+- name: Restart mon-server
+  ansible.builtin.systemd_service:
+    name: "{{ monserver_service }}"
+    state: restarted
+    daemon_reload: true
+  listen: monserver restart

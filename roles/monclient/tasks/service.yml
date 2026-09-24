@@ -1,0 +1,60 @@
+---
+- name: Create service group
+  ansible.builtin.group:
+    name: "{{ monclient_user }}"
+    system: true
+
+- name: Create service user
+  ansible.builtin.user:
+    name: "{{ monclient_user }}"
+    group: "{{ monclient_user }}"
+    system: true
+    home: "{{ monclient_state_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Create config directory
+  ansible.builtin.file:
+    path: "{{ monclient_le_staging_roots | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The four Let's Encrypt staging roots (Pretend Pear X1, Bogus Broccoli X2, Yearning Yucca YE,
+# Yonder Yam YR), vendored from letsencrypt.org/docs/staging-environment.
+- name: Install Let's Encrypt staging roots
+  ansible.builtin.copy:
+    src: le-staging-roots.pem
+    dest: "{{ monclient_le_staging_roots }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: monclient_staging_roots | bool
+  notify: monclient restart
+
+- name: Remove Let's Encrypt staging roots
+  ansible.builtin.file:
+    path: "{{ monclient_le_staging_roots }}"
+    state: absent
+  when: not monclient_staging_roots | bool
+  notify: monclient restart
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: mon-client.service.j2
+    dest: "/etc/systemd/system/{{ monclient_service }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: monclient restart
+
+- name: Apply pending mon-client restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start mon-client
+  ansible.builtin.systemd_service:
+    name: "{{ monclient_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,49 @@
+---
+# Release archive by tag with the published sha256; the binary is replaced (and the service restarted)
+# only when it differs from the installed one.
+- name: Create release cache directory
+  ansible.builtin.file:
+    path: "{{ monserver_cache_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download {{ monserver_asset }}
+  ansible.builtin.get_url:
+    url: "{{ monserver_release_url }}/{{ monserver_asset }}"
+    checksum: "sha256:{{ monserver_release_url }}/{{ monserver_asset }}.sha256"
+    dest: "{{ monserver_cache_dir }}/{{ monserver_asset }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Unpack mon-server
+  ansible.builtin.unarchive:
+    src: "{{ monserver_cache_dir }}/{{ monserver_asset }}"
+    dest: "{{ monserver_cache_dir }}"
+    remote_src: true
+    creates: "{{ monserver_cache_dir }}/mon-server"
+
+- name: Install mon-server binary
+  ansible.builtin.copy:
+    src: "{{ monserver_cache_dir }}/mon-server"
+    dest: "{{ monserver_bin_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: monserver restart
+
+- name: Read mon-server version
+  ansible.builtin.command:
+    argv: ["{{ monserver_bin_path }}", version]
+  register: monserver_bin_version
+  changed_when: false
+
+- name: Check the installed version
+  ansible.builtin.assert:
+    that:
+      - monserver_bin_version.stdout | trim == 'mon-server ' ~ monserver_version
+    fail_msg: "{{ monserver_bin_path }} reports '{{ monserver_bin_version.stdout | trim }}', expected mon-server {{ monserver_version }}"
+    quiet: true

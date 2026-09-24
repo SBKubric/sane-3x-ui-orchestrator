@@ -1,0 +1,103 @@
+---
+# Release archives by tag, checked against the published sha256; a binary is replaced (and mon-client
+# restarted) only when it differs from the installed one.
+- name: Create release cache directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}"
+    - "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}"
+
+- name: Download {{ monclient_asset }}
+  ansible.builtin.get_url:
+    url: "{{ monclient_release_url }}/{{ monclient_asset }}"
+    checksum: "sha256:{{ monclient_release_url }}/{{ monclient_asset }}.sha256"
+    dest: "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}/{{ monclient_asset }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Unpack mon-client
+  ansible.builtin.unarchive:
+    src: "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}/{{ monclient_asset }}"
+    dest: "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}"
+    remote_src: true
+    creates: "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}/mon-client"
+
+- name: Install mon-client binary
+  ansible.builtin.copy:
+    src: "{{ monclient_cache_dir }}/mon-client/{{ monclient_version }}/mon-client"
+    dest: "{{ monclient_bin_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: monclient restart
+
+- name: Read mon-client version
+  ansible.builtin.command:
+    argv: ["{{ monclient_bin_path }}", version]
+  register: monclient_bin_version
+  changed_when: false
+
+- name: Check the installed mon-client version
+  ansible.builtin.assert:
+    that:
+      - monclient_bin_version.stdout | trim == 'mon-client ' ~ monclient_version
+    fail_msg: "{{ monclient_bin_path }} reports '{{ monclient_bin_version.stdout | trim }}', expected mon-client {{ monclient_version }}"
+    quiet: true
+
+# The xray release publishes <asset>.dgst with MD5/SHA1/SHA2-256/SHA2-512 lines, not sha256sum format.
+- name: Read the xray release digest
+  ansible.builtin.uri:
+    url: "{{ monclient_xray_release_url }}/{{ monclient_xray_asset }}.dgst"
+    return_content: true
+  register: monclient_xray_dgst
+
+- name: Download {{ monclient_xray_asset }}
+  ansible.builtin.get_url:
+    url: "{{ monclient_xray_release_url }}/{{ monclient_xray_asset }}"
+    checksum: "sha256:{{ monclient_xray_dgst.content | regex_search('(?m)^SHA2-256= *([0-9a-f]{64})', '\\1') | first }}"
+    dest: "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}/{{ monclient_xray_asset }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Unpack xray
+  ansible.builtin.unarchive:
+    src: "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}/{{ monclient_xray_asset }}"
+    dest: "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}"
+    remote_src: true
+    include: [xray]
+    creates: "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}/xray"
+
+- name: Install xray binary
+  ansible.builtin.copy:
+    src: "{{ monclient_cache_dir }}/xray/{{ monclient_xray_version }}/xray"
+    dest: "{{ monclient_xray_bin_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: monclient restart
+
+- name: Read xray version
+  ansible.builtin.command:
+    argv: ["{{ monclient_xray_bin_path }}", version]
+  register: monclient_xray_bin_version
+  changed_when: false
+
+- name: Check the installed xray version
+  ansible.builtin.assert:
+    that:
+      - >-
+        monclient_xray_bin_version.stdout_lines[0] | default('')
+        is match('Xray ' ~ (monclient_xray_version | regex_replace('^v', '') | regex_escape) ~ ' ')
+    fail_msg: >-
+      {{ monclient_xray_bin_path }} reports '{{ monclient_xray_bin_version.stdout_lines[0] | default('') }}',
+      expected Xray {{ monclient_xray_version }}
+    quiet: true

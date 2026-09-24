@@ -8,13 +8,47 @@
 #   mon_auto_approve   true = approve the pairing request through the mon-server admin API
 #   mon_name, mon_region, mon_paths   approval payload             (host_vars, optional)
 # Inputs from the vault: mon_admin_user, mon_admin_password (admin API of mon-server).
+# Input from role monserver: fact monserver_url on hostvars[groups['monserver'][0]] (MON_SERVER_URL).
 
 monclient_repo: SBKubric/3ax-ui-monitoring
 monclient_version: "{{ mon_version }}"
+monclient_release_url: "https://github.com/{{ monclient_repo }}/releases/download/{{ monclient_version }}"
+monclient_asset: mon-client-linux-amd64.tar.gz
+monclient_cache_dir: /var/cache/3ax-ui-orchestrator
+monclient_bin_path: /usr/local/bin/mon-client
+
+# Official xray release (XTLS/Xray-core), checked against the release's .dgst (SHA2-256).
 monclient_xray_version: "{{ mon_xray_version }}"
+monclient_xray_release_url: "https://github.com/XTLS/Xray-core/releases/download/{{ monclient_xray_version }}"
+monclient_xray_asset: Xray-linux-64.zip
+# mon-client's default --xray-bin.
+monclient_xray_bin_path: /usr/local/bin/xray
+
+monclient_user: mon-client
+monclient_service: mon-client
+# Must stay /var/lib/<monclient_service>: the unit's StateDirectory= owns it (mon-client's default
+# --state-dir); state.json there means "registered".
+monclient_state_dir: "/var/lib/{{ monclient_service }}"
+monclient_log_level: info
+
+# mon-server's base URL. Default: the fact monserver_url left by role monserver, or else
+# https://<default IPv4 of the monserver host>:443 (gathered on demand).
+monclient_server_host: "{{ (groups['monserver'] | default([]) + [''])[0] }}"
+monclient_server_url: ""
+
+# Let's Encrypt staging roots for a mon-server on tls.acmeCa=staging (acme_production=false).
+# Go reads SSL_CERT_FILE instead of the system bundle file but still reads /etc/ssl/certs, so public
+# CAs keep working.
+monclient_staging_roots: "{{ not acme_production | default(false) | bool }}"
+monclient_le_staging_roots: /etc/mon-client/le-staging-roots.pem
+
+# Approval payload (spec §6 of mon-server): name, region, paths.
 monclient_name: "{{ mon_name | default(inventory_hostname) }}"
 monclient_region: "{{ mon_region | default('') }}"
 monclient_paths: "{{ mon_paths | default(['direct', 'proxy']) }}"
 monclient_auto_approve: "{{ mon_auto_approve | default(true) | bool }}"
-monclient_bin_path: /usr/local/bin/mon-client
-monclient_le_staging_roots: /etc/mon-client/le-staging-roots.pem
+# How long to wait for the pairing code in `journalctl -u mon-client` (a mon-client whose old token
+# is refused re-registers after its first heartbeat, up to a minute after start) and for the approved
+# box to collect its token. A pending request lives 5 minutes.
+monclient_pairing_retries: 36
+monclient_pairing_delay: 5
