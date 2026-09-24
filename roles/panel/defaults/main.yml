@@ -32,13 +32,18 @@ panel_install_timeout: 1800
 # Panel binary, installed by install.sh, and its service.
 panel_bin: /usr/local/x-ui/x-ui
 panel_service: x-ui
+# The panel's config dir: database (x-ui.db), and here also the self-signed certificate (panel_tls_dir).
+panel_etc_dir: /etc/x-ui
+# The `x-ui` management wrapper and the log dir install.sh creates.
+panel_cli: /usr/bin/x-ui
+panel_log_dir: /var/log/x-ui
 
 # Address put into the IP SAN of the self-signed certificate and into panel_url.
 panel_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
 
 # Where the self-signed certificate is placed; the paths are given to install.sh (SSL option 3)
 # and kept in the panel settings with `x-ui cert -webCert/-webCertKey`.
-panel_tls_dir: /etc/x-ui/tls
+panel_tls_dir: "{{ panel_etc_dir }}/tls"
 panel_cert_file: "{{ panel_tls_dir }}/panel.crt"
 panel_key_file: "{{ panel_tls_dir }}/panel.key"
 panel_csr_file: "{{ panel_tls_dir }}/panel.csr"
@@ -65,3 +70,37 @@ panel_api_url: "https://127.0.0.1:{{ panel_port }}{{ panel_web_base_path }}"
 panel_api_ca_path: "{{ panel_cert_file }}"
 # false = api_login.yml reports a failed login in panel_api_logged_in instead of failing.
 panel_api_login_required: true
+
+# wipe.yml (tasks/wipe.yml): what install.sh and the panel leave on the box: config dir with the database
+# and the certificate, install dir, `x-ui` wrapper, log dir, install.sh itself.
+panel_wipe_paths:
+  - "{{ panel_etc_dir }}"
+  - "{{ panel_bin | dirname }}"
+  - "{{ panel_cli }}"
+  - "{{ panel_log_dir }}"
+  - "{{ panel_install_script }}"
+# Tunnel interfaces the panel brings up from its database (AmneziaWG, WireGuard): every <iface>.conf in
+# these directories is taken down with its quick tool and deleted, as `x-ui uninstall` does. The
+# packages stay installed (a fresh install.sh finds them).
+panel_wipe_tunnel_dirs:
+  - {dir: /etc/amnezia/amneziawg, quick: awg-quick}
+  - {dir: /etc/wireguard, quick: wg-quick}
+# nginx front the panel generates for port 443: its own files and the marked stream block it adds to
+# nginx.conf (everything outside the markers stays).
+panel_wipe_nginx_files:
+  - /etc/nginx/stream-enabled/3ax-ui.conf
+  - /etc/nginx/conf.d/3ax-ui.conf
+  - /etc/nginx/http.d/3ax-ui.conf
+panel_wipe_nginx_conf: /etc/nginx/nginx.conf
+# iptables/ip6tables chain of the panel's firewall, jumped to from INPUT.
+panel_wipe_firewall_chain: THREEAX-IN
+# TPROXY wiring of tunnels routed through Xray (the panel's tunnel kinds: AmneziaWG 0x1/100, WireGuard
+# 0x2/101): mangle PREROUTING rules with this mark, the fwmark policy rule and the routing table.
+panel_wipe_tproxy:
+  - {fwmark: "0x1", table: "100"}
+  - {fwmark: "0x2", table: "101"}
+
+# verify.yml (tasks/verify.yml, tasks/verify_targets.yml): how long the monitoring targets may take to
+# come UP after a converge (retries x delay seconds, 3 minutes by default).
+panel_verify_targets_retries: 18
+panel_verify_targets_delay: 10

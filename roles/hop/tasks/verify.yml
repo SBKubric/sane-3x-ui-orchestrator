@@ -1,0 +1,71 @@
+---
+# verify.yml on a hop box: x-ui runs xui_version, and `x-ui chain status` (the running hop, asked with its
+# own secret) is fresh: it answers as hop_name, its chain document is not stale, the next hop is reachable
+# and the relay runs. Waits hop_verify_retries x hop_verify_delay seconds for a hop that just joined.
+- name: Read installed x-ui version
+  ansible.builtin.command:
+    argv: ["{{ hop_bin }}", "-v"]
+  register: hop_verify_version
+  changed_when: false
+  failed_when: false
+
+- name: Check the x-ui version
+  ansible.builtin.assert:
+    that:
+      - hop_verify_version.rc == 0
+      - hop_verify_version.stdout | trim == hop_version | regex_replace('^v', '')
+    fail_msg: >-
+      hop {{ hop_name }} ({{ inventory_hostname }}) is not {{ hop_version }}:
+      `{{ hop_bin }} -v` says '{{ (hop_verify_version.stdout | default('') ~ ' ' ~ hop_verify_version.msg | default('')) | trim }}'
+      (rc {{ hop_verify_version.rc | default('?') }}); run site.yml
+    success_msg: "hop {{ hop_name }}: x-ui {{ hop_version }}"
+
+- name: Wait for a fresh chain status
+  ansible.builtin.command:
+    argv: ["{{ hop_bin }}", chain, status, -c, "{{ hop_proxy_config }}"]
+  register: hop_verify_status
+  until: >-
+    hop_verify_status.rc == 0
+    and hop_verify_status.stdout is search('(?m)^name:\\s+' ~ (hop_name | regex_escape) ~ '\\s')
+    and hop_verify_status.stdout is search('(?m)^next hop:.*\\(reachable: true\\)')
+    and hop_verify_status.stdout is search('(?m)^relay:\\s+running=true')
+    and hop_verify_status.stdout is not search('(?m)^revision:.*stale')
+  retries: "{{ hop_verify_retries | int }}"
+  delay: "{{ hop_verify_delay | int }}"
+  changed_when: false
+  failed_when: false
+
+- name: Explain what is wrong with the chain status
+  ansible.builtin.set_fact:
+    hop_verify_problems: >-
+      {%- set out_ = hop_verify_status.stdout | default('') -%}
+      {%- set problems = [] -%}
+      {%- if hop_verify_status.rc | default(1) != 0 -%}
+      {%-   set _ = problems.append('`x-ui chain status` failed (rc ' ~ hop_verify_status.rc | default('?') ~ '): '
+                                    ~ ((out_ ~ ' ' ~ hop_verify_status.stderr | default('') ~ ' ' ~ hop_verify_status.msg | default('')) | trim)) -%}
+      {%- else -%}
+      {%-   if out_ is not search('(?m)^name:\\s+' ~ (hop_name | regex_escape) ~ '\\s') -%}
+      {%-     set _ = problems.append('the box answers as ' ~ (out_ | regex_search('(?m)^name:\\s+(\\S+)', '\\1') | first | default('?'))
+                                      ~ ', not ' ~ hop_name) -%}
+      {%-   endif -%}
+      {%-   if out_ is search('(?m)^revision:.*stale') -%}
+      {%-     set _ = problems.append('its chain document is stale (no successful wave from the next hop for a while)') -%}
+      {%-   endif -%}
+      {%-   if out_ is not search('(?m)^next hop:.*\\(reachable: true\\)') -%}
+      {%-     set _ = problems.append('the next hop is not reachable ('
+                                      ~ (out_ | regex_search('(?m)^next hop:\\s+(.*)$', '\\1') | first | default('?')) ~ ')') -%}
+      {%-   endif -%}
+      {%-   if out_ is not search('(?m)^relay:\\s+running=true') -%}
+      {%-     set _ = problems.append('the relay is not running') -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ problems }}
+
+- name: Require a fresh chain status
+  ansible.builtin.assert:
+    that:
+      - hop_verify_problems | length == 0
+    fail_msg: >-
+      hop {{ hop_name }} ({{ inventory_hostname }}) after {{ hop_verify_retries | int * hop_verify_delay | int }}s:
+      {{ hop_verify_problems | join('; ') }}. See `x-ui chain status` and `journalctl -u {{ hop_service }}` on the box.
+    success_msg: "hop {{ hop_name }}: {{ hop_verify_status.stdout_lines | default([]) | map('regex_replace', '\\s+', ' ') | join('; ') }}"

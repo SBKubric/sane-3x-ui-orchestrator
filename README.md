@@ -5,8 +5,8 @@ Ansible that deploys a whole 3ax-ui installation from an inventory: the panel
 monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring): mon-server and
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
-> Status: roles `common`, `panel`, `hop`, `monserver` and `monclient` are real; `wipe.yml` and
-> `verify.yml` are no-op stubs, implemented in #5.
+> Status: roles `common`, `panel`, `hop`, `monserver` and `monclient`, `wipe.yml` and `verify.yml` are real;
+> the first full stand run (`wipe.yml` + `site.yml` of `stand-full` to a green `verify.yml`) is #5.
 
 ## Layout
 
@@ -16,7 +16,9 @@ requirements.txt       ansible-core + ansible-lint (pinned)
 requirements.yml       collections (pinned)
 site.yml               converge: common -> panel -> hops -> monserver -> monclient -> verify.yml
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
+                       (steps: roles/<role>/tasks/wipe.yml)
 verify.yml             non-destructive checks; also imported last by site.yml (tag verify)
+                       (steps: roles/<role>/tasks/verify.yml)
 group_vars/all/        vault.yml (git-ignored, yours) and vault.yml.example (template)
 inventories/
   stand-chain/         panel + hops; monserver/monclient empty
@@ -29,7 +31,8 @@ roles/
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
                        tasks/api_login.yml is the mon-server admin API login helper for other roles
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
-tests/hop/             role hop against a mock of the panel chain API (CI)
+tests/hop/             role hop and the chain part of verify.yml against a mock of the panel chain API (CI)
+tests/wipe/            wipe.yml on local stand-in boxes (CI)
 ```
 
 ## Profiles
@@ -193,8 +196,9 @@ shown with the token masked.
 **Let's Encrypt on hops.** `hop_tls: letsencrypt-ip` (default) gets a production LE certificate for the
 box IP (short-lived, renewed by acme.sh from cron; port 80 must stay free). A converged hop is skipped, so
 the certificate is issued once per box; a reinstall of a box that still holds a valid certificate for its
-`hop_host` hands it to install.sh as `PROXY_TLS=manual` instead of issuing a new one (`hop_tls_reuse`).
-Every wipe of a hop box costs a new certificate: **wiping a hop more than 4 times a week is not
+`hop_host` hands it to install.sh as `PROXY_TLS=manual` instead of issuing a new one (`hop_tls_reuse`), and
+`wipe.yml` keeps that certificate unless `hop_wipe_le_cert=true`. A new box, a new address or a wipe with
+`hop_wipe_le_cert=true` costs a new certificate: **issuing for one hop more than 4 times a week is not
 supported** (LE limits on duplicate certificates). `hop_tls: none` (plain HTTP sub port) and `manual`
 (`hop_cert`/`hop_key` on the box) avoid LE.
 
@@ -311,6 +315,43 @@ Runs on every host of group `monclient` (decision #55, item 6).
 Knobs in `roles/monclient/defaults/main.yml`: `monclient_server_url`, `monclient_log_level`,
 `monclient_pairing_retries`/`monclient_pairing_delay`, `monclient_release_url`.
 
+## wipe.yml
+
+Stops and deletes what `site.yml` and install.sh put on the boxes, so that the next `site.yml` starts from
+scratch (decision #55, item 4). One play per group, outside in: monclient → monserver → hops → panel;
+an empty group is skipped, a box with nothing installed reports `ok`, and a second wipe reports
+`changed=0`. It refuses to start without `-e wipe_confirm=yes`. Tags `monclient`, `monserver`, `hops`,
+`panel` wipe some groups only.
+
+Every unit is stopped, disabled and removed with its drop-ins (`/etc/systemd/system/<unit>.service[.d]`),
+then:
+
+| Group | Deleted | Kept |
+|---|---|---|
+| panel | unit `x-ui`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3), the rest of nginx.conf |
+| hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`) |
+| monserver | unit `mon-server`; `/usr/local/bin/mon-server`, `/etc/mon-server`, `/var/cache/3ax-ui-orchestrator/mon-server`, everything in `/var/lib/mon-server` (database: admin account, Settings, mon-client registry) | `/var/lib/mon-server/certs` (certmagic's ACME account and certificates) and the `mon-server` user that owns it; `-e monserver_wipe_certs=true` deletes the whole data dir and the user |
+| monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`; user and group `mon-client` | nothing |
+
+The panel's chain registry is not touched on its own: a wiped panel forgets its hops, and a kept panel
+(`--tags hops`) sees the wiped boxes as broken and re-joins them on the next `site.yml`. The paths are
+role defaults (`*_wipe_paths` and friends in `roles/<role>/defaults/main.yml`).
+
+## verify.yml
+
+Read-only checks, imported last by `site.yml` (tag `verify`) and runnable on its own (decision #55,
+item 8). Plays of empty groups are skipped, so `stand-chain` checks the panel and the chain only. The
+plays run for real under `--check` too (nothing in them writes). A failure says what is wrong and where
+to look; the first group that fails ends the run.
+
+| Play | Checks |
+|---|---|
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
+| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` (up to 1 minute: `hop_verify_retries` x `hop_verify_delay`) |
+| monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (the probe configs are readable too) |
+| monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
+| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, there are targets, every mon-client has targets, and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+
 ## Prerequisites
 
 - Python 3.12+ on the controller; `pip install -r requirements.txt` and
@@ -348,7 +389,7 @@ ansible-playbook -i inventories/stand-chain site.yml --ask-vault-pass
 ansible-playbook -i inventories/stand-full site.yml --tags panel,hops --ask-vault-pass
 ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass
 
-# From scratch: wipe, then converge.
+# From scratch: wipe, then converge (see the runbook below).
 ansible-playbook -i inventories/stand-full wipe.yml -e wipe_confirm=yes --ask-vault-pass
 ansible-playbook -i inventories/stand-full site.yml --ask-vault-pass
 ```
@@ -356,15 +397,68 @@ ansible-playbook -i inventories/stand-full site.yml --ask-vault-pass
 Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify`.
 `site.yml` only converges and never deletes state; a fresh start is always the explicit `wipe.yml`.
 
+## Runbook: stand from scratch
+
+1. **Controller.** Python 3.12+, then in the repo:
+   ```sh
+   pip install -r requirements.txt                          # ansible-core, ansible-lint
+   ansible-galaxy collection install -r requirements.yml    # community.crypto, community.general
+   ```
+2. **ssh.** Root access by key to every host of the profile, through the aliases in the inventory
+   (`real`, `bridge`, `proxy`, and for `stand-full` also `monserver`, `monclient`) in `~/.ssh/config`:
+   ```
+   Host bridge
+       HostName 203.0.113.10
+       User root
+       IdentityFile ~/.ssh/stand
+   ```
+   Check with `ansible -i inventories/stand-full all -m ansible.builtin.ping`.
+3. **Vault.** `group_vars/all/vault.yml` (see [Vault](#vault)) and its password, as
+   `--ask-vault-pass` or `--vault-password-file ~/.3ax-ui-vault-pass`. The examples below use
+   `--ask-vault-pass`.
+4. **Profile.** `inventories/stand-chain` (panel + hops) or `inventories/stand-full` (+ mon-server and
+   mon-client); versions in `inventories/<profile>/group_vars/all/main.yml`.
+5. **Wipe**, then **converge**; `site.yml` ends with `verify.yml`:
+   ```sh
+   ansible-playbook -i inventories/stand-full wipe.yml -e wipe_confirm=yes --ask-vault-pass
+   ansible-playbook -i inventories/stand-full site.yml --ask-vault-pass
+   ```
+   A fresh panel gets new inbounds and a new chain registry, so clients' subscriptions from before the
+   wipe are dead. Keep the output of both runs if the run is the resolution of a ticket.
+6. **Verify alone**, any time later (read-only):
+   ```sh
+   ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass
+   ```
+
+**Version upgrade** (no wipe): bump `xui_version` and/or `mon_version` (and `mon_xray_version` in
+`group_vars/monclient.yml`) in the profile, then rerun `site.yml`. The panel is reinstalled on the new tag
+with its database kept, every hop re-joins with the new version (keeping its LE certificate), mon-server
+and mon-client binaries are replaced, and `verify.yml` checks the versions at the end.
+
+**Let's Encrypt limits.** Production LE issues at most 5 certificates for the same identifier (here: the
+IP address) in 7 days.
+- Hops always use production LE (staging would break trust in the sub port). `wipe.yml` keeps a hop's
+  certificate and `site.yml` reuses it (`hop_tls_reuse`), so a wipe + converge costs nothing while the
+  box keeps its address; `-e hop_wipe_le_cert=true`, a new box or a new address issues again. More than 4
+  issuances per hop a week are not supported; `hop_tls: none|manual` avoids LE.
+- mon-server uses LE staging by default (`acme_production: false`; the mon-client trusts the staging
+  roots). With `acme_production: true` it counts against the same 5-per-7-days limit, which is why
+  `wipe.yml` keeps mon-server's certificates unless `-e monserver_wipe_certs=true`.
+- The panel uses its own self-signed certificate: no LE.
+
 ## Development
 
 CI (`.github/workflows/ci.yml`) runs `ansible-lint` with the `production` profile (`.ansible-lint`),
-`ansible-playbook --syntax-check` of every playbook against every inventory, and
+`ansible-playbook --syntax-check` of every playbook against every inventory,
 `tests/hop/test_hop_role.py`: role hop on local stand-in hosts against `tests/hop/mock_panel.py` (the panel
 chain API: login, list/add/update/reissueToken/setActive/del with the panel's refusals) and a fake
 install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
-certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output. No
-Molecule. Locally without an ansible install:
+certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
+panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
+wrong; `tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
+the certificate flags, a repeated wipe and a bare box with `changed=0`, one group by tag; and checks that
+`wipe.yml` refuses without confirmation. The mon-server/mon-client plays of `verify.yml` have no mock and
+are exercised on the stand. No Molecule. Locally without an ansible install:
 
 ```sh
 docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
@@ -373,7 +467,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   ansible-lint &&
   for inv in inventories/*/; do for pb in site.yml wipe.yml verify.yml; do
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
-  python3 tests/hop/test_hop_role.py'
+  python3 tests/hop/test_hop_role.py && python3 tests/wipe/test_wipe.py'
 ```
 
 ## License

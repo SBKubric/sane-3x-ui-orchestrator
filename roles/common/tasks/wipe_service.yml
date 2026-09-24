@@ -1,0 +1,32 @@
+---
+# Stops, disables and removes one systemd unit (and its drop-ins) for wipe.yml:
+#
+#   - name: Remove the x-ui service
+#     ansible.builtin.include_role:
+#       name: common
+#       tasks_from: wipe_service
+#     vars:
+#       common_wipe_unit: x-ui
+#
+# Every unit of this project is a file in common_systemd_dir (the roles' templates, install.sh), so its
+# file decides whether there is anything to stop; a box without it is left alone and reports ok.
+- name: "Look for the unit file: {{ common_wipe_unit }}"
+  ansible.builtin.stat:
+    path: "{{ common_systemd_dir }}/{{ common_wipe_unit }}.service"
+  register: common_wipe_unit_file
+
+- name: "Stop and disable {{ common_wipe_unit }}"
+  ansible.builtin.systemd_service:
+    name: "{{ common_wipe_unit }}"
+    state: stopped
+    enabled: false
+  when: common_wipe_unit_file.stat.exists
+
+- name: "Remove the unit file and its drop-ins: {{ common_wipe_unit }}"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ common_systemd_dir }}/{{ common_wipe_unit }}.service"
+    - "{{ common_systemd_dir }}/{{ common_wipe_unit }}.service.d"
+  notify: common systemd reload

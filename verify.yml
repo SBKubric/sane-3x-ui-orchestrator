@@ -1,13 +1,64 @@
 ---
 # Post-deploy checks; imported last by site.yml (tag verify) and runnable on its own:
 #   ansible-playbook -i inventories/<profile> verify.yml
-# Non-destructive only. Implemented in SBKubric/3ax-ui-orchestrator#5.
+# Read-only: logins, GET requests, mon-server's Settings -> Check (which saves nothing) and `x-ui chain
+# status`. The plays run for real under --check too. An empty group is skipped (stand-chain has no
+# monitoring). Checks, in order:
+#   panel      version; API login with the vault account; chain/list: every hop of group hops joined,
+#              the active edge = the hop with hop_active
+#   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
+#              relay running), waiting up to 1 minute
+#   monserver  version; admin login; Settings -> Check says "Panel reachable."
+#   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
+#   panel      (with mon-clients) every monitoring target of an enabled inbound UP, waiting up to 3 minutes
 
-- name: Verify deployment
-  hosts: all
+- name: Verify panel and chain registry
+  hosts: panel
   gather_facts: false
+  check_mode: false
   tasks:
-    - name: Verification is not implemented yet
-      ansible.builtin.debug:
-        msg: "verify.yml: no-op stub, see SBKubric/3ax-ui-orchestrator#5"
-        verbosity: 1
+    - name: Verify the panel
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: verify
+
+- name: Verify chain hops
+  hosts: hops
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify the hop box
+      ansible.builtin.include_role:
+        name: hop
+        tasks_from: verify
+
+- name: Verify monitoring server
+  hosts: monserver
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify mon-server
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: verify
+
+- name: Verify monitoring clients
+  hosts: monclient
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify mon-client
+      ansible.builtin.include_role:
+        name: monclient
+        tasks_from: verify
+
+- name: Verify monitoring targets
+  hosts: panel
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify that every target is UP
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: verify_targets
+      when: groups['monclient'] | default([]) | length > 0

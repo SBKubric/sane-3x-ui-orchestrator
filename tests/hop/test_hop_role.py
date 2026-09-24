@@ -1,4 +1,4 @@
-"""Role hop against a mock of the panel chain API; no real host is touched.
+"""Role hop and the chain part of verify.yml against a mock of the panel chain API; no real host is touched.
 
     HOP_TEST_PORT=18080 python3 tests/hop/test_hop_role.py      # needs ansible-playbook on PATH
 
@@ -42,8 +42,11 @@ class HopRoleTest(unittest.TestCase):
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="hoptest-"))
-        for box in ("bridge", "proxy"):
+        for box in ("bridge", "proxy", "real"):
             (self.root / box).mkdir()
+        panel = self.root / "real" / "x-ui"
+        panel.write_text("#!/bin/sh\necho 1.9.0-chain.4\n")
+        panel.chmod(0o755)
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -56,12 +59,12 @@ class HopRoleTest(unittest.TestCase):
     def state(self):
         return json.load(urllib.request.urlopen(URL + "/test/state"))
 
-    def play(self, *extra, expect_rc=0):
+    def play(self, *extra, expect_rc=0, playbook=HERE / "site.yml"):
         env = dict(os.environ, HOP_TEST_ROOT=str(self.root), HOP_TEST_PORT=str(PORT),
                    ANSIBLE_CONFIG=str(REPO / "ansible.cfg"), ANSIBLE_ROLES_PATH=str(REPO / "roles"),
                    ANSIBLE_NOCOLOR="1", ANSIBLE_STDOUT_CALLBACK="default")
         before = len(self.state()["calls"])
-        run = subprocess.run(["ansible-playbook", "-vvv", "-i", str(HERE / "inventory.yml"), str(HERE / "site.yml"),
+        run = subprocess.run(["ansible-playbook", "-vvv", "-i", str(HERE / "inventory.yml"), str(playbook),
                               *extra], env=env, capture_output=True, text=True, check=False)
         out = run.stdout + run.stderr
         self.assertEqual(run.returncode, expect_rc, out[-6000:])
@@ -71,6 +74,9 @@ class HopRoleTest(unittest.TestCase):
         self.assertNotIn("mock-session", out, "the session cookie reached the ansible output")
         self.calls = [c for c in state["calls"][before:] if c["path"] not in ("list", "login")]
         return out
+
+    def verify(self, *extra, expect_rc=0):
+        return self.play(*extra, expect_rc=expect_rc, playbook=REPO / "verify.yml")
 
     def hops(self):
         return {h["name"]: h for h in self.state()["hops"]}
@@ -212,6 +218,34 @@ class HopRoleTest(unittest.TestCase):
         self.play("--limit", "proxy")
         self.assertEqual(self.calls, [])
         self.assertEqual(sorted(self.hops()), ["bridge", "proxy"])
+
+    # --- verify.yml ----------------------------------------------------------------------------------
+    def test_verify_passes_on_a_converged_chain(self):
+        self.converge_fresh()
+        out = self.verify()
+        self.assertEqual(self.calls, [], "verify.yml wrote to the registry")
+        self.assertIn("chain registry: bridge, proxy joined; active edge proxy", out)
+        self.assertIn("hop proxy: name: proxy (edge)", out)
+
+    def test_verify_names_registry_problems(self):
+        self.converge_fresh()
+        self.seed([{"name": "bridge", "host": "10.0.0.2", "role": "inner", "subScheme": "http"},
+                   {"name": "proxy", "host": "10.0.0.3", "role": "edge", "state": "pending"}])
+        out = self.verify(expect_rc=2)
+        self.assertIn("proxy is pending in the chain registry, not joined", out)
+        self.assertIn("the active edge is none, but the inventory marks proxy with hop_active", out)
+
+    def test_verify_names_a_stale_hop(self):
+        self.converge_fresh()
+        (self.root / "bridge" / "stale").write_text("")
+        out = self.verify(expect_rc=2)
+        self.assertIn("its chain document is stale", out)
+        self.assertIn("the next hop is not reachable (10.0.0.1:2096 (reachable: false))", out)
+
+    def test_verify_names_a_box_on_another_version(self):
+        self.converge_fresh()
+        out = self.verify("-e", "hop_test_version=v1.9.1", expect_rc=2)
+        self.assertIn("is not v1.9.1", out)
 
 
 if __name__ == "__main__":

@@ -27,8 +27,14 @@ chain)
     [[ "${2:-}" == status ]] || exit 2
     [[ -s "$dir/joined" ]] || { echo "this box has not joined the chain yet"; exit 1; }
     read -r name role <"$dir/joined"
+    # Same lines as proxy.PrintStatus; a "stale" file in the box makes the hop lose its next hop.
+    reachable=true stale=""
+    [[ -e "$dir/stale" ]] && reachable=false stale=" (stale — still relaying)"
     echo "name:      $name ($role)"
-    echo "revision:  1"
+    echo "next hop:  $(sed -n "s/^PROXY_NEXT_HOP=//p" "$dir/install.env"):2096 (reachable: $reachable)"
+    echo "revision:  1$stale"
+    echo "relay:     running=true ports=[443]"
+    echo "last wave: 2026-09-24T10:00:00Z"
     ;;
 *) exit 2 ;;
 esac

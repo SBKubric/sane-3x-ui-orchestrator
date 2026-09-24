@@ -1,0 +1,103 @@
+---
+# verify.yml on the panel host: version, API login with the vault account, and the chain registry against
+# group hops (every hop joined, the active edge is the one with hop_active). Read-only.
+- name: Read the panel version
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", "-v"]
+  register: panel_verify_version
+  changed_when: false
+  failed_when: false
+
+- name: Check the panel version
+  ansible.builtin.assert:
+    that:
+      - panel_verify_version.rc == 0
+      - panel_verify_version.stdout | trim == panel_version | regex_replace('^v', '')
+    fail_msg: >-
+      the panel on {{ inventory_hostname }} is not {{ panel_version }}:
+      `{{ panel_bin }} -v` says '{{ (panel_verify_version.stdout | default('') ~ ' ' ~ panel_verify_version.msg | default('')) | trim }}'
+      (rc {{ panel_verify_version.rc | default('?') }}); run site.yml
+    success_msg: "panel {{ panel_version }}"
+
+- name: Log in to the panel
+  ansible.builtin.include_tasks: api_login.yml
+
+- name: Check the chain registry
+  when: groups['hops'] | default([]) | length > 0
+  block:
+    - name: Read the chain registry
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/api/chain/list"
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+        status_code: [200]
+      delegate_to: "{{ panel_api_host }}"
+      register: panel_verify_chain
+      failed_when: false
+      no_log: true
+
+    - name: Require an answer from the chain registry
+      ansible.builtin.assert:
+        that:
+          - panel_verify_chain.status | default(0) == 200
+          - panel_verify_chain.json.success | default(false) | bool
+        fail_msg: >-
+          GET chain/list on the panel failed: HTTP {{ panel_verify_chain.status | default('?') }}
+          {{ panel_verify_chain.json.msg | default(panel_verify_chain.msg | default('')) }}
+        quiet: true
+
+    # Inventory side, as role hop reads it: hop_name (default: inventory hostname) and hop_active.
+    - name: Read the chain from group hops
+      ansible.builtin.set_fact:
+        panel_verify_chain_expected: >-
+          {%- set hops = [] -%}
+          {%- set active = [] -%}
+          {%- for h in groups['hops'] -%}
+          {%-   set name = hostvars[h].hop_name | default(h) -%}
+          {%-   set _ = hops.append(name) -%}
+          {%-   if hostvars[h].hop_active | default(false) | bool -%}
+          {%-     set _ = active.append(name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ {'hops': hops, 'active': active | first | default('')} }}
+
+    - name: Compare the chain registry with group hops
+      ansible.builtin.set_fact:
+        panel_verify_chain_problems: >-
+          {%- set registry = panel_verify_chain.json.obj.hops | default([], true) -%}
+          {%- set out = [] -%}
+          {%- for hop in panel_verify_chain_expected.hops -%}
+          {%-   set entry = registry | selectattr('name', 'equalto', hop) | first | default({}) -%}
+          {%-   if not entry -%}
+          {%-     set _ = out.append(hop ~ ' is not in the chain registry') -%}
+          {%-   elif entry.state != 'joined' -%}
+          {%-     set _ = out.append(hop ~ ' is ' ~ entry.state ~ ' in the chain registry, not joined') -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {%- set active = panel_verify_chain.json.obj.activeEdge | default('', true) -%}
+          {%- if panel_verify_chain_expected.active and active != panel_verify_chain_expected.active -%}
+          {%-   set _ = out.append('the active edge is ' ~ (active or 'none') ~ ', but the inventory marks '
+                                   ~ panel_verify_chain_expected.active ~ ' with hop_active') -%}
+          {%- endif -%}
+          {{ out }}
+        panel_verify_chain_extra: >-
+          {{ panel_verify_chain.json.obj.hops | default([], true) | map(attribute='name')
+             | reject('in', panel_verify_chain_expected.hops) | list }}
+
+    - name: Require every hop joined and the right active edge
+      ansible.builtin.assert:
+        that:
+          - panel_verify_chain_problems | length == 0
+        fail_msg: "chain registry: {{ panel_verify_chain_problems | join('; ') }}"
+        success_msg: >-
+          chain registry: {{ panel_verify_chain_expected.hops | join(', ') }} joined; active edge
+          {{ panel_verify_chain.json.obj.activeEdge | default('', true) or 'none' }}
+
+    - name: Report registry hops that the inventory does not list
+      ansible.builtin.debug:
+        msg: >-
+          the chain registry also has {{ panel_verify_chain_extra | join(', ') }}, which group hops does not list
+          (role hop deletes them unless hop_prune is false)
+      when: panel_verify_chain_extra | length > 0

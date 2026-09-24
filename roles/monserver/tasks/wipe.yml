@@ -1,0 +1,59 @@
+---
+# wipe.yml on the mon-server host: service, binary, config, release cache and the data dir. Unless
+# monserver_wipe_certs is true, <data dir>/certs (certmagic's ACME account and certificates) and the
+# service user owning it are kept; everything else in the data dir goes.
+- name: Remove the mon-server service
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: wipe_service
+  vars:
+    common_wipe_unit: "{{ monserver_service }}"
+
+- name: Remove mon-server binary, config and release cache
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ monserver_wipe_paths }}"
+
+- name: Look for kept certificates
+  ansible.builtin.stat:
+    path: "{{ monserver_certs_dir }}"
+  register: monserver_wipe_certs_dir
+
+- name: Remove the whole data dir
+  ansible.builtin.file:
+    path: "{{ monserver_data_dir }}"
+    state: absent
+  when: monserver_wipe_certs | bool or not monserver_wipe_certs_dir.stat.exists
+
+- name: Remove the data dir except the certificates
+  when: not monserver_wipe_certs | bool and monserver_wipe_certs_dir.stat.exists
+  block:
+    - name: List the data dir
+      ansible.builtin.find:
+        paths: "{{ monserver_data_dir }}"
+        file_type: any
+        hidden: true
+        excludes: ["{{ monserver_certs_dir | basename }}"]
+      register: monserver_wipe_data
+
+    - name: Remove database and state, keep the certificates
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ monserver_wipe_data.files | map(attribute='path') | list }}"
+
+# The certificates are owned by the service user: it stays with them, so that the next site.yml finds
+# the same uid.
+- name: Remove the service user and group
+  when: monserver_wipe_certs | bool or not monserver_wipe_certs_dir.stat.exists
+  block:
+    - name: Remove the service user
+      ansible.builtin.user:
+        name: "{{ monserver_user }}"
+        state: absent
+
+    - name: Remove the service group
+      ansible.builtin.group:
+        name: "{{ monserver_user }}"
+        state: absent

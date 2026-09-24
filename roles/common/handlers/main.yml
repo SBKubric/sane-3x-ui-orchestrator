@@ -3,3 +3,8 @@
   ansible.builtin.systemd_service:
     name: "{{ common_time_service }}"
     state: restarted
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: common systemd reload

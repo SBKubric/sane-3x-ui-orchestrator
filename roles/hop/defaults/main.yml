@@ -61,6 +61,9 @@ hop_token_file: /root/.3ax-ui-join-token
 
 hop_bin: /usr/local/x-ui/x-ui
 hop_proxy_config: /etc/x-ui/proxy.json
+# The `x-ui` management wrapper and the log dir install.sh creates.
+hop_cli: /usr/bin/x-ui
+hop_log_dir: /var/log/x-ui
 
 # After an install, wait for the registry to report the hop joined.
 hop_join_retries: 12
@@ -68,3 +71,24 @@ hop_join_delay: 5
 
 # Delete registry hops that are not in group `hops` (legacy included). false = report them only.
 hop_prune: true
+
+# wipe.yml (tasks/wipe.yml). The x-ui service install.sh made, and the box's files: /etc/x-ui (proxy.json,
+# chain/ with the hop secret and the chain document, chain-join.url), the install dir, the `x-ui` wrapper,
+# the log dir, install.sh itself and a join token file left by an interrupted run.
+hop_service: x-ui
+hop_wipe_paths:
+  - "{{ hop_proxy_config | dirname }}"
+  - "{{ hop_bin | dirname }}"
+  - "{{ hop_cli }}"
+  - "{{ hop_log_dir }}"
+  - "{{ hop_install_script }}"
+  - "{{ hop_token_file }}"
+# The Let's Encrypt IP certificate (hop_le_cert_dir) and acme.sh's renewal of it are kept by default: the
+# next site.yml hands it to install.sh (hop_tls_reuse) instead of spending an LE issuance. true = delete
+# it too, and the certificates acme.sh keeps for IP addresses in hop_acme_home.
+hop_wipe_le_cert: false
+hop_acme_home: /root/.acme.sh
+
+# verify.yml (tasks/verify.yml): `x-ui chain status` must be fresh within retries x delay seconds.
+hop_verify_retries: 6
+hop_verify_delay: 10

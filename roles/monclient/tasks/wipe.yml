@@ -1,0 +1,26 @@
+---
+# wipe.yml on a mon-client box: service, binaries, config, state (the token) and the service user. Its
+# record on mon-server goes with mon-server's database; with a kept mon-server the next site.yml approves
+# the new pairing request as a replacement of the same name.
+- name: Remove the mon-client service
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: wipe_service
+  vars:
+    common_wipe_unit: "{{ monclient_service }}"
+
+- name: Remove mon-client binaries, config, state and release cache
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ monclient_wipe_paths }}"
+
+- name: Remove the service user
+  ansible.builtin.user:
+    name: "{{ monclient_user }}"
+    state: absent
+
+- name: Remove the service group
+  ansible.builtin.group:
+    name: "{{ monclient_user }}"
+    state: absent
