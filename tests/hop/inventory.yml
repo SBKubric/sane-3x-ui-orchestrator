@@ -1,5 +1,5 @@
 ---
-# Test inventory for role hop against mock_panel.py: every host is local, each hop box is a directory
+# Test inventory for role hop (and the chain part of verify.yml) against mock_panel.py: every host is local, each hop box is a directory
 # under HOP_TEST_ROOT, install.sh is fake_install.sh served by the mock. Driven by test_hop_role.py.
 all:
   vars:
@@ -27,10 +27,14 @@ all:
       FAKE_PANEL: "{{ hop_test_panel }}"
     hop_join_retries: 2
     hop_join_delay: 1
+    # verify.yml: one retry, and a fake panel binary for the panel's version check.
+    hop_verify_retries: 1
+    hop_verify_delay: 1
   children:
     panel:
       hosts:
         real:
+          panel_bin: "{{ hop_test_root }}/real/x-ui"
     hops:
       hosts:
         bridge:

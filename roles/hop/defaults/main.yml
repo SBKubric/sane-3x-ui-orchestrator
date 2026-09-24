@@ -89,3 +89,6 @@ hop_wipe_paths:
 hop_wipe_le_cert: false
 hop_acme_home: /root/.acme.sh
 
+# verify.yml (tasks/verify.yml): `x-ui chain status` must be fresh within retries x delay seconds.
+hop_verify_retries: 6
+hop_verify_delay: 10

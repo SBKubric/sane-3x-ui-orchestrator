@@ -1,0 +1,89 @@
+---
+# verify.yml, last step (only with a mon-client in the inventory): the panel's Monitoring page data
+# (GET panel/api/monitoring/targets) must show every target of an enabled inbound UP, each mon-client of
+# group monclient with targets, and a live contact with mon-server. Waits up to
+# panel_verify_targets_retries x panel_verify_targets_delay seconds (3 minutes) for that.
+- name: Log in to the panel
+  ansible.builtin.include_tasks: api_login.yml
+
+# mon_name as role monclient reads it (default: inventory hostname).
+- name: Read the mon-client names of group monclient
+  ansible.builtin.set_fact:
+    panel_verify_mon_clients: >-
+      {%- set out = [] -%}
+      {%- for h in groups['monclient'] | default([]) -%}
+      {%-   set _ = out.append(hostvars[h].mon_name | default(h)) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Wait for every monitoring target to be UP
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/monitoring/targets"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_verify_targets
+  # Targets of disabled inbounds are PAUSED by design; retired ones belong to a mon-client that is gone.
+  until: >-
+    (panel_verify_targets.json.success | default(false) | bool)
+    and not (panel_verify_targets.json.obj.stale | default(true) | bool)
+    and (panel_verify_targets.json.obj.inbounds | default([], true) | selectattr('enable') | map(attribute='targets')
+         | flatten | rejectattr('retired') | list | length) > 0
+    and (panel_verify_targets.json.obj.inbounds | default([], true) | selectattr('enable') | map(attribute='targets')
+         | flatten | rejectattr('retired') | rejectattr('state', 'equalto', 'UP') | list | length) == 0
+    and (panel_verify_mon_clients | reject('in', panel_verify_targets.json.obj.inbounds | default([], true)
+         | selectattr('enable') | map(attribute='targets') | flatten | rejectattr('retired')
+         | map(attribute='monClientName') | list) | list | length) == 0
+  retries: "{{ panel_verify_targets_retries | int }}"
+  delay: "{{ panel_verify_targets_delay | int }}"
+  failed_when: false
+  no_log: true
+
+- name: Explain what is not UP
+  ansible.builtin.set_fact:
+    panel_verify_targets_problems: >-
+      {%- set obj = panel_verify_targets.json.obj | default({}, true) -%}
+      {%- set out = [] -%}
+      {%- if not (panel_verify_targets.json.success | default(false) | bool) -%}
+      {%-   set _ = out.append('GET monitoring/targets failed: HTTP ' ~ panel_verify_targets.status | default('?') ~ ' '
+                               ~ panel_verify_targets.json.msg | default(panel_verify_targets.msg | default(''))) -%}
+      {%- else -%}
+      {%-   if obj.stale | default(false) -%}
+      {%-     set _ = out.append('the panel has no fresh contact with mon-server (stale since '
+                                 ~ ('%Y-%m-%d %H:%M:%S UTC' | strftime((obj.staleSince | int) // 1000, utc=true)) ~ ')') -%}
+      {%-   endif -%}
+      {%-   set live = [] -%}
+      {%-   for ib in obj.inbounds | default([], true) | selectattr('enable') -%}
+      {%-     for t in ib.targets | rejectattr('retired') -%}
+      {%-       set _ = live.append(t) -%}
+      {%-       if t.state != 'UP' -%}
+      {%-         set _ = out.append(t.monClientName ~ '/' ~ t.path ~ ' -> ' ~ (ib.remark or ib.tag) ~ ' (' ~ ib.kind ~ ' '
+                                     ~ ib.inboundId ~ ', port ' ~ ib.port ~ '): ' ~ t.state ~ ((' - ' ~ t.reason) if t.reason else '')) -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   if live | length == 0 -%}
+      {%-     set _ = out.append('no monitoring targets on any enabled inbound (is there an enabled inbound, and did mon-server'
+                               ~ ' fetch the probe configs?)') -%}
+      {%-   endif -%}
+      {%-   for mon in panel_verify_mon_clients -%}
+      {%-     if live and mon not in live | map(attribute='monClientName') | list -%}
+      {%-       set _ = out.append('mon-client ' ~ mon ~ ' has no targets') -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Require every monitoring target UP
+  ansible.builtin.assert:
+    that:
+      - panel_verify_targets_problems | length == 0
+    fail_msg: >-
+      monitoring targets not UP after {{ panel_verify_targets_retries | int * panel_verify_targets_delay | int }}s:
+      {{ panel_verify_targets_problems | join('; ') }}
+    success_msg: >-
+      monitoring: {{ panel_verify_targets.json.obj.inbounds | selectattr('enable') | map(attribute='targets') | flatten
+                     | rejectattr('retired') | list | length }} targets UP

@@ -1,0 +1,71 @@
+---
+# verify.yml on a mon-client box: versions, and its record in mon-server's registry (GET
+# /admin/api/clients, matched by mon_name) enabled, with a live token and ONLINE within
+# monclient_verify_retries x monclient_verify_delay seconds.
+- name: Read mon-client version
+  ansible.builtin.command:
+    argv: ["{{ monclient_bin_path }}", version]
+  register: monclient_verify_version
+  changed_when: false
+  failed_when: false
+
+- name: Check the mon-client version
+  ansible.builtin.assert:
+    that:
+      - monclient_verify_version.rc == 0
+      - monclient_verify_version.stdout | trim == 'mon-client ' ~ monclient_version
+    fail_msg: >-
+      mon-client on {{ inventory_hostname }} is not {{ monclient_version }}:
+      `{{ monclient_bin_path }} version` says
+      '{{ (monclient_verify_version.stdout | default('') ~ ' ' ~ monclient_verify_version.msg | default('')) | trim }}'; run site.yml
+    success_msg: "{{ monclient_verify_version.stdout | trim }}"
+
+- name: Check the registry of mon-server
+  when: monclient_server_host | length > 0
+  block:
+    - name: Log in to the mon-server admin API
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: api_login
+      vars:
+        monserver_api_host: "{{ monclient_server_host }}"
+
+    - name: "Wait for the mon-client to be ONLINE: {{ monclient_name }}"
+      ansible.builtin.uri:
+        url: "{{ monserver_api_url }}api/clients"
+        headers:
+          Cookie: "{{ monserver_api_cookie }}"
+        validate_certs: false
+        return_content: true
+      delegate_to: "{{ monserver_api_host }}"
+      register: monclient_verify_registry
+      until: >-
+        monclient_verify_registry.json.obj.clients | default([], true) | selectattr('name', 'equalto', monclient_name)
+        | rejectattr('tokenRevoked') | selectattr('enabled') | selectattr('state', 'equalto', 'ONLINE') | list | length > 0
+      retries: "{{ monclient_verify_retries | int }}"
+      delay: "{{ monclient_verify_delay | int }}"
+      failed_when: false
+      no_log: true
+
+    - name: "Require the mon-client ONLINE: {{ monclient_name }}"
+      ansible.builtin.assert:
+        that:
+          - monclient_verify_record.state | default('') == 'ONLINE'
+          - monclient_verify_record.enabled | default(false) | bool
+        fail_msg: >-
+          mon-client {{ monclient_name }} ({{ inventory_hostname }}) is not ONLINE on mon-server after
+          {{ monclient_verify_retries | int * monclient_verify_delay | int }}s:
+          {{ 'no such mon-client in the registry (not approved? run site.yml, or approve it in the admin UI)'
+             if monclient_verify_record | length == 0 else
+             'state ' ~ monclient_verify_record.state ~ ('' if monclient_verify_record.enabled else ', disabled')
+             ~ ', last heartbeat ' ~ (('%Y-%m-%d %H:%M:%S UTC' | strftime((monclient_verify_record.lastHeartbeat | int) // 1000, utc=true))
+                                      if monclient_verify_record.lastHeartbeat else 'never')
+             ~ (', config error: ' ~ monclient_verify_record.configError if monclient_verify_record.configError | default('') else '') }}.
+          See `journalctl -u {{ monclient_service }}` on the box.
+        success_msg: >-
+          mon-client {{ monclient_name }} ({{ monclient_verify_record.id | default('?') }}) ONLINE,
+          version {{ monclient_verify_record.version | default('?') }}, xray {{ monclient_verify_record.xrayVersion | default('?') }}
+      vars:
+        monclient_verify_record: >-
+          {{ monclient_verify_registry.json.obj.clients | default([], true) | selectattr('name', 'equalto', monclient_name)
+             | rejectattr('tokenRevoked') | first | default({}) }}

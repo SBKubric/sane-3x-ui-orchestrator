@@ -63,3 +63,6 @@ monclient_wipe_paths:
   - "{{ monclient_cache_dir }}/mon-client"
   - "{{ monclient_cache_dir }}/xray"
 
+# verify.yml (tasks/verify.yml): how long the mon-client may take to be ONLINE (retries x delay seconds).
+monclient_verify_retries: 18
+monclient_verify_delay: 10

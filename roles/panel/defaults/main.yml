@@ -95,3 +95,7 @@ panel_wipe_nginx_conf: /etc/nginx/nginx.conf
 # iptables/ip6tables chain of the panel's firewall, jumped to from INPUT.
 panel_wipe_firewall_chain: THREEAX-IN
 
+# verify.yml (tasks/verify.yml, tasks/verify_targets.yml): how long the monitoring targets may take to
+# come UP after a converge (retries x delay seconds, 3 minutes by default).
+panel_verify_targets_retries: 18
+panel_verify_targets_delay: 10
