@@ -1,0 +1,7 @@
+---
+# Role hop alone, against mock_panel.py (see test_hop_role.py).
+- name: Proxy chain hops
+  hosts: hops
+  gather_facts: false
+  roles:
+    - role: hop

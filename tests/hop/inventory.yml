@@ -1,0 +1,49 @@
+---
+# Test inventory for role hop against mock_panel.py: every host is local, each hop box is a directory
+# under HOP_TEST_ROOT, install.sh is fake_install.sh served by the mock. Driven by test_hop_role.py.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    hop_test_root: "{{ lookup('ansible.builtin.env', 'HOP_TEST_ROOT') }}"
+    hop_test_panel: "http://127.0.0.1:{{ lookup('ansible.builtin.env', 'HOP_TEST_PORT') }}"
+    xui_version: "{{ hop_test_version | default('v1.9.0-chain.4') }}"
+    # Vault values and the API endpoint of role panel's api_login, pointed at the mock.
+    panel_user: admin
+    panel_password: secret-pass
+    panel_port: 2053
+    panel_base_path: /base/
+    panel_api_url: "{{ hop_test_panel }}/base/"
+    # uri loads ca_path even for http; any CA bundle will do.
+    panel_api_ca_path: /etc/ssl/certs/ca-certificates.crt
+    hop_panel_host: 10.0.0.1
+    hop_install_url: "{{ hop_test_panel }}/install.sh"
+    hop_bin: "{{ hop_test_root }}/{{ inventory_hostname }}/x-ui"
+    hop_install_script: "{{ hop_test_root }}/{{ inventory_hostname }}/install.sh"
+    hop_token_file: "{{ hop_test_root }}/{{ inventory_hostname }}/token"
+    hop_le_cert_dir: "{{ hop_test_root }}/{{ inventory_hostname }}/cert"
+    hop_install_environment:
+      FAKE_BOX_DIR: "{{ hop_test_root }}/{{ inventory_hostname }}"
+      FAKE_PANEL: "{{ hop_test_panel }}"
+    hop_join_retries: 2
+    hop_join_delay: 1
+  children:
+    panel:
+      hosts:
+        real:
+    hops:
+      hosts:
+        bridge:
+          hop_role: inner
+          hop_position: 1
+          hop_active: "{{ hop_test_bridge_active | default(false) }}"
+          hop_host: 10.0.0.2
+          hop_tls: none
+        proxy:
+          hop_role: edge
+          hop_active: true
+          hop_host: "{{ hop_test_proxy_host | default('10.0.0.3') }}"
+    monserver:
+      hosts: {}
+    monclient:
+      hosts: {}
