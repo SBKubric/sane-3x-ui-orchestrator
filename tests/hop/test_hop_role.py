@@ -11,10 +11,13 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 from pathlib import Path
 
@@ -27,6 +30,8 @@ import mock_panel  # noqa: E402
 
 PORT = int(os.environ.get("HOP_TEST_PORT", "18080"))
 URL = f"http://127.0.0.1:{PORT}"
+# Stands in for the sub port of every https hop in verify.yml's TLS check (a self-signed certificate).
+TLS_URL = f"https://127.0.0.1:{PORT + 1}/"
 
 LEGACY = [{"name": "legacy", "host": "10.0.0.3", "role": "edge", "state": "legacy", "isActive": True}]
 
@@ -35,10 +40,12 @@ class HopRoleTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = mock_panel.serve(PORT, str(HERE / "fake_install.sh"))
+        cls.tls_server = serve_tls(PORT + 1)
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.tls_server.shutdown()
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="hoptest-"))
@@ -60,7 +67,7 @@ class HopRoleTest(unittest.TestCase):
         return json.load(urllib.request.urlopen(URL + "/test/state"))
 
     def play(self, *extra, expect_rc=0, playbook=HERE / "site.yml"):
-        env = dict(os.environ, HOP_TEST_ROOT=str(self.root), HOP_TEST_PORT=str(PORT),
+        env = dict(os.environ, HOP_TEST_ROOT=str(self.root), HOP_TEST_PORT=str(PORT), HOP_TEST_TLS_URL=TLS_URL,
                    ANSIBLE_CONFIG=str(REPO / "ansible.cfg"), ANSIBLE_ROLES_PATH=str(REPO / "roles"),
                    ANSIBLE_NOCOLOR="1", ANSIBLE_STDOUT_CALLBACK="default")
         before = len(self.state()["calls"])
@@ -132,6 +139,30 @@ class HopRoleTest(unittest.TestCase):
 
         self.assert_idempotent()
 
+    def test_v_prefixed_version_on_a_converged_hop_is_skipped(self):
+        # orchestrator#15: xui_version carries the tag's "v", `x-ui -v` prints none; neither may cause a rejoin.
+        self.seed(LEGACY)
+        self.play("-e", "hop_test_version=v1.9.0-chain.6")
+        self.assertEqual((self.root / "bridge" / "version").read_text().strip(), "1.9.0-chain.6")
+        out = self.play("-e", "hop_test_version=v1.9.0-chain.6")
+        self.assertIn("hops: bridge=skip, proxy=skip;", out)
+        self.assertEqual(self.calls, [], "a converged chain wrote to the registry")
+        self.assertRegex(out, r"bridge\s+: ok=\d+\s+changed=0 ")
+        self.assertRegex(out, r"proxy\s+: ok=\d+\s+changed=0 ")
+        # A box that prints the "v" too is the same version.
+        (self.root / "proxy" / "version").write_text("v1.9.0-chain.6\n")
+        out = self.play("-e", "hop_test_version=v1.9.0-chain.6")
+        self.assertIn("hops: bridge=skip, proxy=skip;", out)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.box("bridge")[1], ["v1.9.0-chain.6"], "install.sh ran again on bridge")
+        self.assertEqual(self.box("proxy")[1], ["v1.9.0-chain.6"], "install.sh ran again on proxy")
+
+    def test_plan_names_why_a_hop_rejoins(self):
+        self.converge_fresh()
+        out = flat(self.play("-e", "hop_test_version=v1.9.1", "-e", "hop_test_proxy_host=10.0.0.33"))
+        self.assertIn("hops: bridge=rejoin (version 1.9.0-chain.4 -> 1.9.1), "
+                      "proxy=rejoin (host 10.0.0.3 -> 10.0.0.33; version 1.9.0-chain.4 -> 1.9.1);", out)
+
     def test_new_version_rejoins_every_hop(self):
         self.converge_fresh()
         self.play("-e", "hop_test_version=v1.9.1")
@@ -166,8 +197,9 @@ class HopRoleTest(unittest.TestCase):
         fake_bin = self.root / "bin"
         fake_bin.mkdir()
         openssl = fake_bin / "openssl"
-        openssl.write_text("#!/bin/sh\necho 'Certificate will not expire'\n"
-                           "echo 'X509v3 Subject Alternative Name: '\necho '    IP Address:10.0.0.3'\n")
+        # Real openssl order: the SAN lines, then the -checkend verdict (the address is not the last line).
+        openssl.write_text("#!/bin/sh\necho 'X509v3 Subject Alternative Name: critical'\n"
+                           "echo '    IP Address:10.0.0.3'\necho 'Certificate will not expire'\n")
         openssl.chmod(0o755)
         os.environ["PATH"] = f"{fake_bin}:{os.environ['PATH']}"
         try:
@@ -242,10 +274,70 @@ class HopRoleTest(unittest.TestCase):
         self.assertIn("its chain document is stale", out)
         self.assertIn("the next hop is not reachable (10.0.0.1:2096 (reachable: false))", out)
 
+    def test_verify_checks_tls_of_an_https_hop(self):
+        self.seed(LEGACY)
+        self.play("-e", "hop_test_bridge_tls=manual")
+        out = flat(self.verify("-e", "hop_test_bridge_tls=manual"))
+        self.assertIn(f"hop bridge: TLS on {TLS_URL} (from proxy), cert in proxy.json", out)
+        self.assertIn(f"hop proxy: TLS on {TLS_URL} (from localhost), cert in proxy.json", out)
+
+    def test_verify_names_a_sub_port_without_tls(self):
+        self.converge_fresh()
+        plain = f"https://127.0.0.1:{PORT}/"  # the mock panel speaks plain HTTP
+        out = flat(self.verify("-e", f"hop_verify_tls_url={plain}", expect_rc=2))
+        self.assertIn(f"GET {plain} from localhost got no TLS answer", out)
+        self.assertNotIn("has an empty cert", out)
+
+    def test_lost_certificate_rejoins_and_fails_verify(self):
+        # SBKubric/3ax-ui-proxy#124: a reinstall left proxy.json without a cert, the box joined as http.
+        self.converge_fresh()
+        (self.root / "proxy" / "lose_cert").write_text("")
+        (self.root / "proxy" / "joined").unlink()  # a broken box: the next run reinstalls it
+        self.play()
+        self.assertEqual(self.hops()["proxy"]["subScheme"], "http")
+        out = flat(self.verify(expect_rc=2))
+        self.assertIn("hop proxy (proxy) has hop_sub_scheme https but", out)
+        self.assertIn("proxy.json has an empty cert", out)
+        (self.root / "proxy" / "lose_cert").unlink()
+        out = flat(self.play())
+        self.assertIn("bridge=skip, proxy=rejoin (subScheme http -> https);", out)
+        self.assertEqual(self.writes(), [("POST", "update", {"subScheme": "https"}), ("POST", "reissueToken", {})])
+        self.assertEqual(self.hops()["proxy"]["subScheme"], "https")
+        self.verify()
+
     def test_verify_names_a_box_on_another_version(self):
         self.converge_fresh()
         out = self.verify("-e", "hop_test_version=v1.9.1", expect_rc=2)
         self.assertIn("is not v1.9.1", out)
+
+
+def flat(out):
+    """The output with the YAML callback's line folding undone."""
+    return re.sub(r"\s+", " ", out)
+
+
+def serve_tls(port):
+    """An https server with a throwaway self-signed certificate (openssl on PATH)."""
+    tmp = Path(tempfile.mkdtemp(prefix="hoptls-"))
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=hop",
+                    "-keyout", str(tmp / "key.pem"), "-out", str(tmp / "cert.pem")], check=True, capture_output=True)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp / "cert.pem", tmp / "key.pem")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (http.server naming)
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 if __name__ == "__main__":

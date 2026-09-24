@@ -7,7 +7,9 @@
 #   panel      version; API login with the vault account; chain/list: every hop of group hops joined,
 #              the active edge = the hop with hop_active
 #   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
-#              relay running), waiting up to 2 minutes (a new port list takes a poll per hop)
+#              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
+#              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port, fetched
+#              from the next-outer hop (the controller for an edge)
 #   monserver  version; admin login; Settings -> Check says "Panel reachable."
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
 #   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path,

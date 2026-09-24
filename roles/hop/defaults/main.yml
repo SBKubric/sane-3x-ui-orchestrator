@@ -94,3 +94,8 @@ hop_acme_home: /root/.acme.sh
 # 30 s, +-20 % jitter) and each hop further out within one more, and the relay restarts on the new ports.
 hop_verify_retries: 12
 hop_verify_delay: 10
+# With hop_sub_scheme https, verify.yml also requires a non-empty cert in proxy.json and a TLS answer on
+# this URL, fetched from the next-outer hop (an inner hop) or the controller (an edge);
+# hop_verify_tls_probe_host overrides where it is fetched from (an inventory host or localhost).
+hop_verify_tls_url: "https://{{ hop_host }}:{{ hop_sub_port }}/"
+hop_verify_tls_probe_host: ""
