@@ -87,8 +87,18 @@
       register: hop_verify_proxy_json
       failed_when: false
 
+    # verify.yml gathers no facts; hop_host defaults to this one.
+    - name: Gather the hop's default address
+      ansible.builtin.setup:
+        gather_subset: ['!all', 'network']
+        filter: ['ansible_default_ipv4']
+      when: ansible_facts['default_ipv4'] is not defined
+
+    # Resolved here, on the hop: under delegate_to, hop_host's default (ansible_facts) would be read from
+    # the delegate, which is localhost for an edge and has no default_ipv4.
     - name: Choose where the sub port is probed from
       ansible.builtin.set_fact:
+        hop_verify_tls_target: "{{ hop_verify_tls_url }}"
         hop_verify_tls_from: >-
           {%- set hops = groups['hops'] | map('extract', hostvars) | list -%}
           {%- set outer_inners = hops | selectattr('hop_role', 'defined') | selectattr('hop_role', 'equalto', 'inner')
@@ -105,7 +115,7 @@
 
     - name: Probe the sub port over https
       ansible.builtin.uri:
-        url: "{{ hop_verify_tls_url }}"
+        url: "{{ hop_verify_tls_target }}"
         validate_certs: false
         follow_redirects: none
         timeout: 10
@@ -128,7 +138,7 @@
              if (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length == 0 else '' }}{{
           '; ' if hop_verify_proxy_json.content is not defined
                   or (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length == 0 else '' }}{{
-          ('GET ' ~ hop_verify_tls_url ~ ' from ' ~ hop_verify_tls_from ~ ' got no TLS answer: ' ~ hop_verify_tls.msg | default('?'))
+          ('GET ' ~ hop_verify_tls_target ~ ' from ' ~ hop_verify_tls_from ~ ' got no TLS answer: ' ~ hop_verify_tls.msg | default('?'))
           if hop_verify_tls.status | default(-1) | int <= 0 else 'its sub port answers TLS' }}. The next-outer hop
           cannot poll it; reinstall it (site.yml) and see SBKubric/sane-3x-ui#124.
-        success_msg: "hop {{ hop_name }}: TLS on {{ hop_verify_tls_url }} (from {{ hop_verify_tls_from }}), cert in proxy.json"
+        success_msg: "hop {{ hop_name }}: TLS on {{ hop_verify_tls_target }} (from {{ hop_verify_tls_from }}), cert in proxy.json"
