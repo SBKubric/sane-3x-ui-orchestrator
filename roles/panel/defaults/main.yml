@@ -23,7 +23,7 @@
 panel_version: "{{ xui_version }}"
 
 # Repository whose install.sh and releases are used (install.sh reads XUI_REPO).
-panel_repo: SBKubric/3ax-ui-proxy
+panel_repo: SBKubric/sane-3x-ui
 # Git ref install.sh is taken from; the tag keeps the prompt sequence in step with the release.
 panel_install_ref: "{{ panel_version }}"
 panel_install_url: "https://raw.githubusercontent.com/{{ panel_repo }}/{{ panel_install_ref }}/install.sh"

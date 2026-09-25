@@ -131,7 +131,7 @@ class HopRoleTest(unittest.TestCase):
                           bridge_env["PROXY_NEXT_HOP_SCHEME"]), ("10.0.0.1", "2096", "https"))
         self.assertEqual(bridge_env["PROXY_TLS"], "none")
         self.assertEqual(bridge_env["TOKEN_GIVEN"], "yes")
-        self.assertEqual(bridge_env["XUI_REPO"], "SBKubric/3ax-ui-proxy")
+        self.assertEqual(bridge_env["XUI_REPO"], "SBKubric/sane-3x-ui")
         proxy_env, _ = self.box("proxy")
         self.assertEqual((proxy_env["PROXY_NEXT_HOP"], proxy_env["PROXY_NEXT_HOP_SCHEME"]), ("10.0.0.2", "http"))
         self.assertEqual(proxy_env["PROXY_TLS"], "letsencrypt-ip")
@@ -289,7 +289,7 @@ class HopRoleTest(unittest.TestCase):
         self.assertNotIn("has an empty cert", out)
 
     def test_lost_certificate_rejoins_and_fails_verify(self):
-        # SBKubric/3ax-ui-proxy#124: a reinstall left proxy.json without a cert, the box joined as http.
+        # SBKubric/sane-3x-ui#124: a reinstall left proxy.json without a cert, the box joined as http.
         self.converge_fresh()
         (self.root / "proxy" / "lose_cert").write_text("")
         (self.root / "proxy" / "joined").unlink()  # a broken box: the next run reinstalls it

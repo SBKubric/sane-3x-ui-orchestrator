@@ -19,7 +19,7 @@ echo "$tag" >>"$box/installs"
 } >"$box/install.env"
 echo "${tag#v}" >"$box/version"
 # proxy.json as install.sh writes it: a cert unless PROXY_TLS=none; a "lose_cert" file in the box
-# reproduces SBKubric/3ax-ui-proxy#124 (a reinstall that leaves "cert": "" and serves plain HTTP).
+# reproduces SBKubric/sane-3x-ui#124 (a reinstall that leaves "cert": "" and serves plain HTTP).
 cert=""
 [[ "${PROXY_TLS:-none}" != none && ! -e "$box/lose_cert" ]] && cert="${PROXY_CERT:-/root/cert/ip/fullchain.pem}"
 printf '{"domain": "%s", "subPort": %s, "cert": "%s"}\n' "${PROXY_DOMAIN:-}" "${PROXY_SUB_PORT:-2096}" "$cert" >"$box/proxy.json"
