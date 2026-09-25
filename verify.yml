@@ -10,10 +10,11 @@
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port, fetched
 #              from the next-outer hop (the controller for an edge)
-#   monserver  version; admin login; Settings -> Check says "Panel reachable."
+#   monserver  version; admin login; Settings -> Check says "Panel reachable." (so the panel speaks mon-server's
+#              contract) and counts probe links on direct and on every hop of group hops
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
-#   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path,
-#              all UP, waiting up to 3 minutes
+#   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path
+#              (mon_paths expanded over group hops: hops -> edge:/inner:<hop_name>), all UP, waiting up to 3 minutes
 
 - name: Verify panel and chain registry
   hosts: panel

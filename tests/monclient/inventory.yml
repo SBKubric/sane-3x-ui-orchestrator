@@ -1,0 +1,17 @@
+---
+# Test inventory for role monclient's input checks and unit template (test_monclient_inputs.py): the mon-client
+# host is local, the mon-server is given by URL so nothing is gathered.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    mon_version: v0.1.0-stand.5
+    mon_xray_version: v26.3.27
+    monclient_server_url: https://192.0.2.10:443
+  children:
+    monserver:
+      hosts: {}
+    monclient:
+      hosts:
+        mon-client:
+          mon_name: monclient

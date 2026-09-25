@@ -1,0 +1,19 @@
+---
+# Role monserver's verify_paths.yml alone, with Settings -> Check's answer (probeItems) passed as -e probe_items.
+- name: Verify probe links per path
+  hosts: monserver
+  gather_facts: false
+  tasks:
+    - name: Stand in for Settings -> Check
+      ansible.builtin.set_fact:
+        monserver_verify_check:
+          json:
+            success: true
+            msg: Panel reachable.
+            obj:
+              probeItems: "{{ probe_items }}"
+
+    - name: Check the probe links per path
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: verify_paths

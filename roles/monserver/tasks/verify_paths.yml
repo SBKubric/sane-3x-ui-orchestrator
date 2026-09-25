@@ -1,0 +1,38 @@
+---
+# verify.yml on the mon-server host, after Settings -> Check answered "Panel reachable." (monserver_verify_check):
+# the probe links it counted per path (probeItems, monitoring contract 3) must cover the inventory's chain.
+# With hops: every hop of group hops as <hop_role>:<hop_name> with at least one link, no path the inventory
+# does not list, and no proxy path (the panel serves proxy only while no hop is probed). Without hops: direct.
+- name: Compare the probe links per path with the inventory's chain
+  ansible.builtin.set_fact:
+    monserver_verify_path_problems: >-
+      {%- set items = monserver_verify_check.json.obj.probeItems | default({}, true) -%}
+      {%- set hop_paths = [] -%}
+      {%- for h in groups['hops'] | default([]) -%}
+      {%-   set _ = hop_paths.append(hostvars[h].hop_role ~ ':' ~ hostvars[h].hop_name | default(h)) -%}
+      {%- endfor -%}
+      {%- set out = [] -%}
+      {%- for path in ['direct'] + hop_paths -%}
+      {%-   if path not in items -%}
+      {%-     set _ = out.append(path ~ ': not served by the panel' ~ (' (hop not joined?)' if path != 'direct' else '')) -%}
+      {%-   elif items[path] | int == 0 -%}
+      {%-     set _ = out.append(path ~ ': no probe links') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if hop_paths -%}
+      {%-   for path in items | reject('in', ['direct'] + hop_paths) -%}
+      {%-     set _ = out.append(path ~ ': served by the panel, not in the inventory') -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Require probe links on every path of the chain
+  ansible.builtin.assert:
+    that:
+      - monserver_verify_path_problems | length == 0
+    fail_msg: >-
+      mon-server Settings -> Check, probe links per path {{ monserver_verify_check.json.obj.probeItems | default({}, true) | to_json }}:
+      {{ monserver_verify_path_problems | join('; ') }}
+    success_msg: >-
+      probe links per path: {{ monserver_verify_check.json.obj.probeItems | default({}, true) | dictsort
+                               | map('join', '=') | join(', ') }}

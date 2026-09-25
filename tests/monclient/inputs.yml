@@ -1,0 +1,23 @@
+---
+# Role monclient's input checks (tasks/inputs.yml) and its systemd unit rendered to unit_dest.
+- name: Check inputs and render the unit
+  hosts: monclient
+  gather_facts: false
+  tasks:
+    - name: Check role inputs
+      ansible.builtin.include_role:
+        name: monclient
+        tasks_from: inputs
+        public: true
+
+    - name: Show the effective paths
+      ansible.builtin.debug:
+        msg: "paths {{ monclient_paths | to_json }}"
+
+    - name: Render the unit
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../roles/monclient/templates/mon-client.service.j2"
+        dest: "{{ unit_dest }}"
+        mode: "0644"
+      vars:
+        monclient_server_url_effective: "{{ monclient_server_url }}"

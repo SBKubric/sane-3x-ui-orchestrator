@@ -1,0 +1,15 @@
+---
+# Extra inventory (-i tests/panel/hops.yml on top of a test inventory): the stand's chain, bridge (inner) and
+# proxy (active edge), for the per-hop path expansion of verify.yml (monitoring contract 3). The hosts are never
+# contacted: the plays under test run on the panel or the mon-server host.
+all:
+  children:
+    hops:
+      hosts:
+        bridge:
+          hop_name: bridge
+          hop_role: inner
+          hop_position: 1
+        proxy:
+          hop_role: edge
+          hop_active: true

@@ -270,6 +270,46 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertIn("monclient/direct -> awg (awg 0, port 51820): DOWN", out)
         self.assertIn("awg (awg 0, port 51820) has no target for monclient/proxy", out)
 
+    # --- per-hop paths (monitoring contract 3) --------------------------------------------------------
+    CHAIN = ("-i", str(HERE / "hops.yml"))
+
+    def seed_paths(self, paths, down=()):
+        """Both inbounds with a target per path, UP unless the path is listed in down."""
+        def targets(kind, inbound_id):
+            return [target(kind, inbound_id, p, state="DOWN" if p in down else "UP") for p in paths]
+        vless = {"kind": "xray", "inboundId": 1, "tag": "inbound-8443", "remark": "vless-reality", "protocol": "vless",
+                 "port": 8443, "enable": True, "worst": "UP", "targets": targets("xray", 1)}
+        awg = {"kind": "awg", "inboundId": 0, "tag": "inbound-amneziawg", "remark": "awg", "protocol": "amneziawg",
+               "port": 51820, "enable": True, "worst": "UP", "targets": targets("awg", 0)}
+        post("/test/panel/targets", monitoring([vless, awg]))
+
+    def test_verify_targets_expands_hops_over_the_chain(self):
+        self.seed_paths(["direct", "inner:bridge", "edge:proxy"])
+        out = self.play(*self.CHAIN, playbook=HERE / "verify_targets.yml")
+        self.assertRegex(out, r"monitoring: 6 targets UP on\s+vless-reality, awg")
+
+    def test_verify_targets_names_a_missing_hop_path_and_no_proxy_with_a_chain(self):
+        self.seed_paths(["direct", "edge:proxy"])
+        out = self.play(*self.CHAIN, playbook=HERE / "verify_targets.yml", expect_rc=2)
+        self.assertIn("awg (awg 0, port 51820) has no target for monclient/inner:bridge", out)
+        self.assertNotIn("monclient/proxy", out)
+
+    def test_verify_targets_names_a_down_hop_target(self):
+        self.seed_paths(["direct", "inner:bridge", "edge:proxy"], down=["inner:bridge"])
+        out = self.play(*self.CHAIN, playbook=HERE / "verify_targets.yml", expect_rc=2)
+        self.assertIn("monclient/inner:bridge -> awg (awg 0, port 51820): DOWN", out)
+
+    def test_verify_targets_keeps_named_hops_of_the_chain_only(self):
+        self.seed_paths(["direct", "edge:proxy"])
+        out = self.play(*self.CHAIN, "-e", '{"mon_paths": ["direct", "edge:proxy", "edge:gone"]}',
+                        playbook=HERE / "verify_targets.yml")
+        self.assertRegex(out, r"monitoring: 4 targets UP")
+
+    def test_verify_targets_hops_without_a_chain_means_proxy(self):
+        self.seed_paths(["direct", "proxy"])
+        out = self.play("-e", '{"mon_paths": ["hops", "direct"]}', playbook=HERE / "verify_targets.yml")
+        self.assertRegex(out, r"monitoring: 4 targets UP")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

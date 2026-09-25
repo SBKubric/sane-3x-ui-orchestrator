@@ -1,7 +1,8 @@
 ---
 # verify.yml on the mon-server host: version, admin login with the vault account, and Settings -> Check
 # (POST /admin/api/settings/check with the saved panelUrl, monToken, panelCa, realHost): the panel must be
-# reachable and its probe configs readable. Check saves nothing.
+# reachable and its probe configs readable, with links on direct and on every hop of group hops
+# (verify_paths.yml). Check saves nothing.
 - name: Read mon-server version
   ansible.builtin.command:
     argv: ["{{ monserver_bin_path }}", version]
@@ -76,3 +77,6 @@
       mon-server Settings -> Check: {{ monserver_verify_check.json.msg | default('') }}
       (panel {{ monserver_verify_check.json.obj.panelVersion | default('?') }}, revision
       {{ monserver_verify_check.json.obj.revision | default('?') }}, {{ monserver_verify_check.json.obj.inbounds | default('?') }} inbounds)
+
+- name: Check the probe links per path
+  ansible.builtin.include_tasks: verify_paths.yml

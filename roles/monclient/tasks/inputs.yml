@@ -1,0 +1,19 @@
+---
+# Inputs of role monclient, checked before anything is touched (also driven alone by tests/monclient).
+- name: Check role inputs
+  ansible.builtin.assert:
+    that:
+      - mon_version is defined and mon_version | string | length > 0
+      - mon_xray_version is defined and mon_xray_version | string | length > 0
+      - monclient_name | string | length > 0
+      - monclient_paths is sequence and monclient_paths is not string
+      - monclient_paths | length > 0
+      - monclient_paths | reject('match', monclient_path_pattern) | list | length == 0
+      - monclient_gomemlimit | string is match('^([0-9]+(B|KiB|MiB|GiB|TiB)?)?$')
+      - monclient_server_url | length > 0 or monclient_server_host | length > 0
+    fail_msg: >-
+      role monclient needs mon_version (group_vars/all), mon_xray_version (group_vars/monclient), a non-empty
+      mon_name, a non-empty mon_paths list of direct, hops, edge:<hop_name> or inner:<hop_name> (not proxy:
+      contract 3 calls it hops; got {{ monclient_paths }}), mon_gomemlimit as <n>[B|KiB|MiB|GiB|TiB] or empty,
+      and a mon-server: a host in group monserver or monclient_server_url.
+    quiet: true
