@@ -75,7 +75,7 @@
     success_msg: "hop {{ hop_name }}: {{ hop_verify_status.stdout_lines | default([]) | map('regex_replace', '\\s+', ' ') | join('; ') }}"
 
 # hop_sub_scheme https: the box must still hold a certificate (a manual-TLS reinstall used to leave
-# proxy.json with "cert": "", SBKubric/3ax-ui-proxy#124) and its sub port must answer TLS where the chain
+# proxy.json with "cert": "", SBKubric/sane-3x-ui#124) and its sub port must answer TLS where the chain
 # reaches it: from the next-outer hop, or from the controller for an edge. -k: this checks the scheme,
 # not the certificate (inner hops often run self-signed or IP certificates).
 - name: Check that the hop still serves TLS
@@ -130,5 +130,5 @@
                   or (hop_verify_proxy_json.content | b64decode | from_json).cert | default('') | length == 0 else '' }}{{
           ('GET ' ~ hop_verify_tls_url ~ ' from ' ~ hop_verify_tls_from ~ ' got no TLS answer: ' ~ hop_verify_tls.msg | default('?'))
           if hop_verify_tls.status | default(-1) | int <= 0 else 'its sub port answers TLS' }}. The next-outer hop
-          cannot poll it; reinstall it (site.yml) and see SBKubric/3ax-ui-proxy#124.
+          cannot poll it; reinstall it (site.yml) and see SBKubric/sane-3x-ui#124.
         success_msg: "hop {{ hop_name }}: TLS on {{ hop_verify_tls_url }} (from {{ hop_verify_tls_from }}), cert in proxy.json"

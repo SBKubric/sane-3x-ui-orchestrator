@@ -1,7 +1,7 @@
 # 3ax-ui-orchestrator
 
 Ansible that deploys a whole 3ax-ui installation from an inventory: the panel
-([SBKubric/3ax-ui-proxy](https://github.com/SBKubric/3ax-ui-proxy)), its proxy chain hops, and
+([SBKubric/sane-3x-ui](https://github.com/SBKubric/sane-3x-ui)), its proxy chain hops, and
 monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring): mon-server and
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
@@ -57,7 +57,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 
 | Variable | Meaning |
 |---|---|
-| `xui_version` | release tag of 3ax-ui-proxy for the panel and every hop (`install.sh <xui_version>`) |
+| `xui_version` | release tag of sane-3x-ui for the panel and every hop (`install.sh <xui_version>`) |
 | `mon_version` | release tag of 3ax-ui-monitoring for mon-server and mon-client |
 | `acme_production` | `false` = Let's Encrypt staging for mon-server (default); hops always use production LE |
 | `mon_auto_approve` | approve mon-client pairing requests through the mon-server admin API |
@@ -93,7 +93,7 @@ skipped when the host already matches, so a second run reports `changed=0`.
    created once; a new public IP (the SAN changes) re-issues the certificate and restarts the panel.
    `x-ui setting -getCert` must point at these files, otherwise `x-ui cert -webCert -webCertKey` fixes it.
 2. **Install / update.** `x-ui -v` equal to `xui_version` (without the `v`) → nothing to do. Otherwise
-   `install.sh <xui_version>` (taken from the same tag of `SBKubric/3ax-ui-proxy`, `XUI_REPO` set) runs with
+   `install.sh <xui_version>` (taken from the same tag of `SBKubric/sane-3x-ui`, `XUI_REPO` set) runs with
    its answers on stdin: debug mode `N`, custom port `n`, SSL option `3`, empty domain, certificate path,
    key path. On an existing panel install.sh (no TTY + explicit tag) reinstalls that tag and keeps the
    database; the certificate is written into the settings first, so it asks nothing but the debug

@@ -1,4 +1,4 @@
-"""Test double of the 3ax-ui panel API (SBKubric/3ax-ui-proxy v1.9.0-chain.5), for tests of roles hop and panel:
+"""Test double of the 3ax-ui panel API (SBKubric/sane-3x-ui v1.9.0-chain.5), for tests of roles hop and panel:
 the chain registry (web/controller/chain_controller.go, web/service/chain_service.go) and, for role panel's
 inbounds, the inbound API, the AmneziaWG server and the monitoring page data (see Panel below).
 

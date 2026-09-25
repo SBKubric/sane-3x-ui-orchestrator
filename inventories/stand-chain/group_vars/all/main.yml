@@ -1,6 +1,6 @@
 ---
-# Release tag of SBKubric/3ax-ui-proxy for the panel and every hop (install.sh <xui_version>).
-xui_version: v1.9.0-chain.6
+# Release tag of SBKubric/sane-3x-ui for the panel and every hop (install.sh <xui_version>).
+xui_version: v1.9.0-chain.7
 # Release tag of SBKubric/3ax-ui-monitoring for mon-server and mon-client.
 mon_version: v0.1.0-stand.4
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.

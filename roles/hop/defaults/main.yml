@@ -48,7 +48,7 @@ hop_panel_sub_scheme: https
 
 # Release tag; `x-ui -v` prints it without the leading "v".
 hop_version: "{{ xui_version }}"
-hop_repo: SBKubric/3ax-ui-proxy
+hop_repo: SBKubric/sane-3x-ui
 hop_install_ref: "{{ hop_version }}"
 hop_install_url: "https://raw.githubusercontent.com/{{ hop_repo }}/{{ hop_install_ref }}/install.sh"
 hop_install_script: /root/3ax-ui-install.sh

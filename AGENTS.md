@@ -8,4 +8,4 @@ Legacy code stays untested; a fix in it ships with a unit test reproducing the b
 
 ## Related repos
 
-Panel and proxy front: [SBKubric/3ax-ui-proxy](https://github.com/SBKubric/3ax-ui-proxy) (glossary `CONTEXT.md`, ADRs, issue tracker conventions in `docs/agents/`). Monitoring: [SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring). Branches are named `<issue number>-<name>`.
+Panel and proxy front: [SBKubric/sane-3x-ui](https://github.com/SBKubric/sane-3x-ui) (glossary `CONTEXT.md`, ADRs, issue tracker conventions in `docs/agents/`). Monitoring: [SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring). Branches are named `<issue number>-<name>`.
