@@ -28,6 +28,10 @@ all:
     hop_install_environment:
       FAKE_BOX_DIR: "{{ hop_test_root }}/{{ inventory_hostname }}"
       FAKE_PANEL: "{{ hop_test_panel }}"
+    # Neighbour target (tasks/neighbour.yml): off unless a test passes hop_test_neighbour=true; fake_neighbour.py stands
+    # in for neighbour.py (no scanner, no xray, no network).
+    hop_neighbour_enabled: "{{ hop_test_neighbour | default(false) }}"
+    hop_neighbour_script: "{{ inventory_dir }}/fake_neighbour.py"
     hop_join_retries: 2
     hop_join_delay: 1
     # verify.yml: one retry, and a fake panel binary for the panel's version check.
@@ -48,10 +52,13 @@ all:
           hop_tls: "{{ hop_test_bridge_tls | default('none') }}"
           hop_cert: /root/cert/bridge.pem
           hop_key: /root/cert/bridge.key
+          hop_reality_target: "{{ hop_test_bridge_reality_target | default('') }}"
         proxy:
           hop_role: edge
           hop_active: true
           hop_host: "{{ hop_test_proxy_host | default('10.0.0.3') }}"
+          hop_reality_target: "{{ hop_test_reality_target | default('') }}"
+          hop_reality_server_name: "{{ hop_test_reality_server_name | default('') }}"
     monserver:
       hosts: {}
     monclient:

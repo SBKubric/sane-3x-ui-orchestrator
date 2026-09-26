@@ -1,0 +1,111 @@
+---
+# Neighbour target of one edge (loop var hop_edge, a managed edge of the plan), kept in the chain registry as
+# realityTarget/realityServerName (SBKubric/sane-3x-ui ADR 0005). Needs hop_registry fresh. The scan and the checks
+# run on the controller (delegate_to localhost), never on a box: a VPS that scans its neighbours gets flagged.
+#   hop_reality_target set      write it as given; a failed handshake check only warns
+#   stored target in the /24    keep it while it passes the handshake check (no scan, no write)
+#   otherwise                   scan the /24 (neighbour.py find: filters, ranking, handshake of the best few);
+#                               nothing found -> hop_reality_fallback_target and a warning
+# A stored target outside the edge's /24 (the fallback, a former override, an old address) is scanned again.
+- name: "Read the edge's network: {{ hop_edge.name }}"
+  ansible.builtin.command:
+    argv: "{{ hop_neighbour_command + ['net', '--host', hop_edge.host] }}"
+  delegate_to: localhost
+  register: hop_nb_net_raw
+  changed_when: false
+
+- name: "Compare the stored neighbour target with the inventory: {{ hop_edge.name }}"
+  ansible.builtin.set_fact:
+    hop_nb_entry: "{{ hop_nb_entry_ }}"
+    hop_nb_net: "{{ hop_nb_net_ }}"
+    hop_nb_stored: "{{ hop_nb_stored_ }}"
+    hop_nb_override: >-
+      {{ {'target': hop_edge.reality_target,
+          'server_name': hop_edge.reality_server_name or hop_edge.reality_target | regex_replace(':[0-9]+$', '')}
+         if hop_edge.reality_target | length > 0 else {} }}
+    hop_nb_stored_is_neighbour: >-
+      {{ hop_nb_stored_.target | length > 0
+         and hop_nb_stored_.target | regex_replace(':[0-9]+$', '') is match('^' ~ (hop_nb_prefix_ | regex_escape) ~ '[0-9]{1,3}$')
+         and hop_nb_stored_.target | regex_replace(':[0-9]+$', '') != hop_nb_net_.address }}
+  vars:
+    hop_nb_entry_: "{{ hop_registry.hops | selectattr('name', 'equalto', hop_edge.name) | first }}"
+    hop_nb_net_: "{{ hop_nb_net_raw.stdout | from_json }}"
+    hop_nb_prefix_: "{{ (hop_nb_net_.network.split('/')[0].split('.')[:3] | join('.')) ~ '.' }}"
+    hop_nb_stored_:
+      target: "{{ hop_nb_entry_.realityTarget | default('', true) }}"
+      server_name: >-
+        {{ hop_nb_entry_.realityServerName | default('', true)
+           or hop_nb_entry_.realityTarget | default('', true) | regex_replace(':[0-9]+$', '') }}
+
+- name: "Check with a Reality handshake: {{ hop_edge.name }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ hop_neighbour_command + ['check', '--target', hop_nb_pair.target, '--server-name', hop_nb_pair.server_name]
+         + hop_neighbour_check_args }}
+  vars:
+    hop_nb_pair: "{{ hop_nb_override if hop_nb_override | length > 0 else hop_nb_stored }}"
+  delegate_to: localhost
+  register: hop_nb_check_raw
+  changed_when: false
+  when: hop_nb_override | length > 0 or hop_nb_stored_is_neighbour | bool
+
+- name: "Keep the handshake result: {{ hop_edge.name }}"
+  ansible.builtin.set_fact:
+    hop_nb_check: "{{ hop_nb_check_raw.stdout | from_json if hop_nb_check_raw.stdout is defined else {} }}"
+
+- name: "Scan the edge's /24 for a neighbour: {{ hop_edge.name }}"
+  ansible.builtin.command:
+    argv: "{{ hop_neighbour_command + ['find', '--address', hop_nb_net.address] + hop_neighbour_find_args }}"
+  delegate_to: localhost
+  register: hop_nb_find_raw
+  changed_when: false
+  when:
+    - hop_nb_override | length == 0
+    - not (hop_nb_check.ok | default(false) | bool)
+
+- name: "Choose the neighbour target: {{ hop_edge.name }}"
+  ansible.builtin.set_fact:
+    hop_nb_find: "{{ hop_nb_find_ }}"
+    hop_nb_choice: >-
+      {{ hop_nb_override | combine({'source': 'hop_reality_target'}) if hop_nb_override | length > 0 else
+         hop_nb_stored | combine({'source': 'stored'}) if hop_nb_check.ok | default(false) | bool else
+         {'target': hop_nb_find_.found.target, 'server_name': hop_nb_find_.found.serverName, 'source': 'scan'}
+         if hop_nb_find_.found | default(none) else
+         {'target': hop_edge.reality_fallback_target,
+          'server_name': hop_edge.reality_fallback_server_name
+                         or hop_edge.reality_fallback_target | regex_replace(':[0-9]+$', ''),
+          'source': 'fallback'} }}
+  vars:
+    hop_nb_find_: "{{ hop_nb_find_raw.stdout | from_json if hop_nb_find_raw.stdout is defined else {} }}"
+
+- name: "Show the neighbour target: {{ hop_edge.name }}"
+  ansible.builtin.debug:
+    msg: >-
+      neighbour target of {{ hop_edge.name }} ({{ hop_nb_net.network }}): {{ hop_nb_choice.target }}
+      ({{ hop_nb_choice.server_name }}) from {{ hop_nb_choice.source }}{{
+      '; handshake ' ~ hop_nb_check.detail if hop_nb_check | length > 0 else '' }}{{
+      ('; scanned ' ~ hop_nb_find.scanned ~ ' addresses, ' ~ hop_nb_find.candidates | length ~ ' candidates, handshakes: '
+       ~ (hop_nb_find.confirmed | map(attribute='target') | zip(hop_nb_find.confirmed | map(attribute='detail'))
+          | map('join', ' ') | join(', ') or 'none')) if hop_nb_find | length > 0 else '' }}
+
+- name: "Warn about the neighbour target: {{ hop_edge.name }}"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ ('no neighbour target found in ' ~ hop_nb_net.network ~ ' for edge ' ~ hop_edge.name ~ '; using the shared fallback '
+                  ~ hop_nb_choice.target ~ ', which does not sit next to the edge (set hop_reality_target to pick one)')
+                 if hop_nb_choice.source == 'fallback' else
+                 ('hop_reality_target ' ~ hop_nb_choice.target ~ ' of edge ' ~ hop_edge.name ~ ' fails the Reality handshake check ('
+                  ~ hop_nb_check.detail | default('?') ~ '); written as given') }}
+  when: >-
+    hop_nb_choice.source == 'fallback'
+    or (hop_nb_choice.source == 'hop_reality_target' and not hop_nb_check.ok | default(false) | bool)
+
+- name: "Write the neighbour target to the registry: {{ hop_edge.name }}"
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    hop_api_path: "update/{{ hop_nb_entry.id }}"
+    hop_api_method: POST
+    hop_api_body:
+      realityTarget: "{{ hop_nb_choice.target }}"
+      realityServerName: "{{ hop_nb_choice.server_name }}"
+  when: hop_nb_choice.target != hop_nb_stored.target or hop_nb_choice.server_name != hop_nb_stored.server_name

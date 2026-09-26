@@ -74,6 +74,41 @@
       {{ hop_verify_problems | join('; ') }}. See `x-ui chain status` and `journalctl -u {{ hop_service }}` on the box.
     success_msg: "hop {{ hop_name }}: {{ hop_verify_status.stdout_lines | default([]) | map('regex_replace', '\\s+', ' ') | join('; ') }}"
 
+# An edge's neighbour target in the registry (tasks/neighbour.yml): shown, with a warning (not a failure) for the
+# shared fallback or none at all. The handshake check is left to site.yml.
+- name: Read the neighbour target of the edge
+  when:
+    - hop_role == 'edge'
+    - hop_neighbour_enabled | bool
+  block:
+    - name: Log in to the panel
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+
+    - name: Read the chain registry
+      ansible.builtin.include_tasks: list.yml
+
+    - name: Find the edge in the registry
+      ansible.builtin.set_fact:
+        hop_verify_neighbour: >-
+          {{ hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='realityTarget')
+             | first | default('', true) }}
+        hop_verify_neighbour_name: >-
+          {{ hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='realityServerName')
+             | first | default('', true) }}
+
+    - name: Show the neighbour target
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('WARNING: edge ' ~ hop_name ~ ' has no neighbour target in the chain registry; run site.yml (the panel refuses'
+              ~ ' to make it active while inbounds follow the chain)') if hop_verify_neighbour | length == 0 else
+             ('WARNING: edge ' ~ hop_name ~ ' has the shared fallback ' ~ hop_verify_neighbour ~ ' as its neighbour target,'
+              ~ ' not a site next to it: no neighbour in its /24 passed the checks (set hop_reality_target to pick one)')
+             if hop_verify_neighbour == hop_reality_fallback_target and hop_reality_target | length == 0 else
+             ('hop ' ~ hop_name ~ ': neighbour target ' ~ hop_verify_neighbour ~ ' ('
+              ~ (hop_verify_neighbour_name or hop_verify_neighbour | regex_replace(':[0-9]+$', '')) ~ ')') }}
+
 # hop_sub_scheme https: the box must still hold a certificate (a manual-TLS reinstall used to leave
 # proxy.json with "cert": "", SBKubric/sane-3x-ui#124) and its sub port must answer TLS where the chain
 # reaches it: from the next-outer hop, or from the controller for an edge. -k: this checks the scheme,

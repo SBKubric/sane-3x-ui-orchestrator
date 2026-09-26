@@ -22,6 +22,23 @@
       (manual needs hop_cert and hop_key), hop_sub_port 1-65535, hop_sub_scheme http|https.
     quiet: true
 
+# An address as target carries no name for the SNI, so it needs hop_reality_server_name (the panel refuses it
+# otherwise); only an edge has a neighbour target.
+- name: Check the neighbour target override
+  ansible.builtin.assert:
+    that:
+      - hop_reality_target | length == 0 or hop_role == 'edge'
+      - hop_reality_target | length == 0 or hop_reality_target is match('^(\\[[0-9A-Fa-f:.]+\\]|[A-Za-z0-9.-]+):[0-9]{1,5}$')
+      - hop_reality_target | length == 0 or hop_reality_target | regex_replace(':[0-9]+$', '') is not match('^([0-9.]+|\\[.*\\])$')
+        or hop_reality_server_name | length > 0
+      - hop_reality_server_name | length == 0 or (hop_reality_target | length > 0 and hop_reality_server_name is match('^[A-Za-z0-9.-]+$')
+        and hop_reality_server_name is not match('^[0-9.]+$'))
+    fail_msg: >-
+      hop {{ inventory_hostname }}: hop_reality_target '{{ hop_reality_target }}' / hop_reality_server_name
+      '{{ hop_reality_server_name }}': only an edge takes a neighbour target, as host:port; an address as host needs
+      hop_reality_server_name (the name its site answers to), and a server name needs a target.
+    quiet: true
+
 - name: Gather network facts for the hop address
   ansible.builtin.setup:
     gather_subset: ["!all", "!min", network]
@@ -58,6 +75,10 @@
       le_cert_dir: "{{ hop_le_cert_dir }}"
       bin: "{{ hop_bin }}"
       version: "{{ hop_version | regex_replace('^v', '') }}"
+      reality_target: "{{ hop_reality_target }}"
+      reality_server_name: "{{ hop_reality_server_name }}"
+      reality_fallback_target: "{{ hop_reality_fallback_target }}"
+      reality_fallback_server_name: "{{ hop_reality_fallback_server_name }}"
 
 # One registry run for the whole chain: the order between hops matters (an outer hop joins through
 # its inner neighbour), so it is a loop on one host rather than a play over all of them.

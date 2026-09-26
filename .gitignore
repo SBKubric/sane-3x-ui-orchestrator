@@ -4,3 +4,5 @@ vault.yml
 *.retry
 /collections/
 .ansible/
+# Scanner and xray the hop role downloads for the neighbour target (hop_neighbour_cache).
+.cache/
