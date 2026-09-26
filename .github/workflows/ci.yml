@@ -42,6 +42,9 @@ jobs:
             done
           done
 
+      - name: neighbour.py (neighbour target scan and Reality handshake check) against fakes
+        run: python3 tests/hop/test_neighbour_script.py
+
       - name: Role hop and verify.yml against the mock panel chain API
         run: python3 tests/hop/test_hop_role.py
 
