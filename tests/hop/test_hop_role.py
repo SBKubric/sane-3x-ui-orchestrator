@@ -46,8 +46,10 @@ class HopHarness(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.tls_server.shutdown()
+        # server_close too: the next test class binds the same ports.
+        for server in (cls.server, cls.tls_server):
+            server.shutdown()
+            server.server_close()
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="hoptest-"))
