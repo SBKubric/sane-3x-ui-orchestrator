@@ -1,19 +1,37 @@
 ---
 # verify.yml, last step (only with a mon-client in the inventory): the panel's Monitoring page data
 # (GET panel/api/monitoring/targets) must show a live contact with mon-server, and every enabled inbound
-# (xray and the AmneziaWG one alike) with a target for every mon-client of group monclient on each of its
-# mon_paths, all of them UP. Waits up to panel_verify_targets_retries x panel_verify_targets_delay seconds
-# (3 minutes) for that.
+# (xray and the AmneziaWG one alike) with a target for every mon-client of group monclient on each path its
+# mon_paths expands to, all of them UP. Waits up to panel_verify_targets_retries x panel_verify_targets_delay
+# seconds (3 minutes) for that.
+# Expansion (monitoring contract 3): the probed hops are those of group hops (verify's panel step has already
+# required each of them joined), by path <hop_role>:<hop_name>. direct -> direct; hops -> every probed hop, or
+# proxy when group hops is empty; edge:/inner:<name> -> that path while it is a probed hop, else nothing.
+# The AWG probe-peer cap (the panel's monProbePeerLimit, 32) is not modelled: a stand stays far below it.
 - name: Log in to the panel
   ansible.builtin.include_tasks: api_login.yml
 
-# mon_name and mon_paths as role monclient reads them (default: inventory hostname, direct and proxy).
+# mon_name and mon_paths as role monclient reads them (default: inventory hostname, direct and hops).
 - name: Read the mon-client paths of group monclient
   ansible.builtin.set_fact:
     panel_verify_mon_paths: >-
+      {%- set hop_paths = [] -%}
+      {%- for h in groups['hops'] | default([]) -%}
+      {%-   set _ = hop_paths.append(hostvars[h].hop_role ~ ':' ~ hostvars[h].hop_name | default(h)) -%}
+      {%- endfor -%}
       {%- set out = [] -%}
       {%- for h in groups['monclient'] | default([]) -%}
-      {%-   for path in hostvars[h].mon_paths | default(['direct', 'proxy']) -%}
+      {%-   set expanded = [] -%}
+      {%-   for path in hostvars[h].mon_paths | default(['direct', 'hops']) -%}
+      {%-     if path == 'direct' -%}
+      {%-       set _ = expanded.append(path) -%}
+      {%-     elif path == 'hops' -%}
+      {%-       set _ = expanded.extend(hop_paths if hop_paths else ['proxy']) -%}
+      {%-     elif path in hop_paths -%}
+      {%-       set _ = expanded.append(path) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   for path in expanded | unique -%}
       {%-     set _ = out.append((hostvars[h].mon_name | default(h)) ~ '/' ~ path) -%}
       {%-   endfor -%}
       {%- endfor -%}

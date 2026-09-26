@@ -80,8 +80,8 @@ Panel inbounds (`inventories/<profile>/group_vars/panel.yml`), see [Inbounds](#i
 |---|---|
 | `panel_inbounds` | inbounds of the panel, matched by `remark`; missing ones are added, declared fields that differ are updated, others are left alone |
 
-Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`; group `monclient`:
-`mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
+Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`, `mon_gomemlimit`; group
+`monclient`: `mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
 
 ## Role panel
 
@@ -358,6 +358,11 @@ Knobs in `roles/monserver/defaults/main.yml`: `monserver_public_ip`, `monserver_
 environment without ACME), `monserver_start_timeout`, `monserver_require_panel_reachable`,
 `monserver_release_url`.
 
+`mon_version` and `xui_version` must speak the same monitoring contract (mon-server refuses any other,
+older or newer): contract 3 (per-hop, SBKubric/sane-3x-ui-monitoring#61) is `v0.1.0-stand.5` with
+`v1.9.0-chain.8` or later; bump both tags in one change. mon-server's Settings -> Check (verify.yml) names
+the side to update.
+
 `mon_version` needs `v0.1.0-stand.3` or later: it is the first release with `panelCa`/`tls.acmeCa`
 (SBKubric/3ax-ui-monitoring#65), needed to trust the panel's self-signed certificate and to use LE
 staging. With `v0.1.0-stand.2` the role stops at "no panelCa setting", and mon-server ignores
@@ -398,7 +403,8 @@ Runs on every host of group `monclient` (decision #55, item 6).
 2. **Unit.** System user `mon-client`; `mon-client.service` runs `mon-client run` with
    `MON_SERVER_URL` = the `monserver_url` fact (or `https://<IPv4 of the monserver host>:443`, facts
    gathered on demand, or `monclient_server_url`), `StateDirectory=mon-client` (`state.json`, the token),
-   `StateDirectoryMode=0700`, `UMask=0077`, `Restart=always`.
+   `StateDirectoryMode=0700`, `UMask=0077`, `Restart=always`, and `GOMEMLIMIT` = `mon_gomemlimit`
+   (default `128MiB`, empty = none): a guard against swap on a small box (SBKubric/sane-3x-ui-monitoring#85).
 3. **LE staging** (`acme_production: false`). The four Let's Encrypt staging roots (Pretend Pear X1,
    Bogus Broccoli X2, Yearning Yucca YE, Yonder Yam YR) are vendored in
    `roles/monclient/files/le-staging-roots.pem` (from letsencrypt.org/docs/staging-environment, with
@@ -416,7 +422,9 @@ Runs on every host of group `monclient` (decision #55, item 6).
    - a mon-client with that name exists (`suggestReplacement` names it, or the registry has it, e.g.
      after its token was revoked) → `{"mode": "replace", "existingId": <id>}`: keeps id and history;
    - otherwise → `{"mode": "new", "name": mon_name, "region": mon_region, "paths": mon_paths}`
-     (`mon_paths` default `[direct, proxy]`).
+     (`mon_paths` default `[direct, hops]`: direct plus every probed hop of the chain, hops added later
+     included, or the proxy path while there is no chain; one hop by path is `edge:<hop_name>` /
+     `inner:<hop_name>`; the old `proxy` is refused, contract 3 calls it `hops`).
 
    It then waits for the box to collect its token and brings `region`/`paths` of the record back to the
    inventory values (`POST /admin/api/clients/<id>`) when they differ. With `mon_auto_approve: false`
@@ -458,9 +466,9 @@ to look; the first group that fails ends the run.
 |---|---|
 | panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`) |
-| monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (the probe configs are readable too) |
+| monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
-| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each of its `mon_paths`, and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
 
 ## Prerequisites
 

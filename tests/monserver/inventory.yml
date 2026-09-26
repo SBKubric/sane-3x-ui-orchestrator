@@ -1,0 +1,14 @@
+---
+# Test inventory for the probe-links step of role monserver's verify (tasks/verify_paths.yml): the mon-server host
+# is local and no chain is declared; tests add the stand's chain with -i tests/panel/hops.yml.
+# Driven by test_verify_paths.py.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  children:
+    monserver:
+      hosts:
+        mon-server:
+    hops:
+      hosts: {}

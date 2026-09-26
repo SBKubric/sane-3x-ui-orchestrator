@@ -8,6 +8,9 @@ Wants=network-online.target
 [Service]
 ExecStart={{ monclient_bin_path }} run --state-dir {{ monclient_state_dir }} --xray-bin {{ monclient_xray_bin_path }} --log-level {{ monclient_log_level }}
 Environment=MON_SERVER_URL={{ monclient_server_url_effective }}
+{% if monclient_gomemlimit | length > 0 %}
+Environment=GOMEMLIMIT={{ monclient_gomemlimit }}
+{% endif %}
 {% if monclient_staging_roots | bool %}
 # mon-server on Let's Encrypt staging: trust its roots (Go still reads /etc/ssl/certs as well).
 Environment=SSL_CERT_FILE={{ monclient_le_staging_roots }}

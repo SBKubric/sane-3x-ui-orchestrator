@@ -2,4 +2,5 @@
 # Approval payload for this mon-client's pairing request.
 mon_name: monclient
 mon_region: stand
-mon_paths: [direct, proxy]
+# direct + every probed hop of the chain (edge:proxy, inner:bridge); the default, spelled out.
+mon_paths: [direct, hops]

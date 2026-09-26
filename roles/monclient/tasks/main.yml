@@ -3,18 +3,7 @@
 # LE staging roots on a staging mon-server), then the pairing request approved through mon-server's
 # admin API.
 - name: Check role inputs
-  ansible.builtin.assert:
-    that:
-      - mon_version is defined and mon_version | string | length > 0
-      - mon_xray_version is defined and mon_xray_version | string | length > 0
-      - monclient_name | string | length > 0
-      - monclient_paths | length > 0
-      - monclient_paths | difference(['direct', 'proxy']) | length == 0
-      - monclient_server_url | length > 0 or monclient_server_host | length > 0
-    fail_msg: >-
-      role monclient needs mon_version (group_vars/all), mon_xray_version (group_vars/monclient), a non-empty
-      mon_name, mon_paths from [direct, proxy], and a mon-server: a host in group monserver or monclient_server_url.
-    quiet: true
+  ansible.builtin.include_tasks: inputs.yml
 
 - name: Gather facts of the mon-server host for its address
   ansible.builtin.setup:

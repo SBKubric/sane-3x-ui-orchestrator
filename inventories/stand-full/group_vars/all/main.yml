@@ -1,8 +1,9 @@
 ---
 # Release tag of SBKubric/sane-3x-ui for the panel and every hop (install.sh <xui_version>).
-xui_version: v1.9.0-chain.7
+# Monitoring contract 3: the panel and mon-server must speak the same contract, bump both tags together.
+xui_version: v1.9.0-chain.8
 # Release tag of SBKubric/3ax-ui-monitoring for mon-server and mon-client.
-mon_version: v0.1.0-stand.4
+mon_version: v0.1.0-stand.5
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.
 # Hops always use production LE (hop_tls); the panel uses a self-signed certificate.
 acme_production: false
