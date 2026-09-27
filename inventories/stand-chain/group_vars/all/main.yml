@@ -1,11 +1,15 @@
 ---
 # Release tag of SBKubric/sane-3x-ui for the panel and every hop (install.sh <xui_version>).
 # Monitoring contract 3: the panel and mon-server must speak the same contract, bump both tags together.
-xui_version: v1.9.0-chain.8
+# The «only 443» front needs v1.9.0-chain.10 or later (SBKubric/sane-3x-ui#142-#147).
+xui_version: v1.9.0-chain.10
 # Release tag of SBKubric/3ax-ui-monitoring for mon-server and mon-client.
 mon_version: v0.1.0-stand.5
+# The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
+front_mode: only443
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.
-# Hops always use production LE (hop_tls); the panel uses a self-signed certificate.
+# Hops and the panel's front always use production LE IP certificates; the panel's own port (reached on the box
+# and through the SSH tunnel) keeps a self-signed certificate.
 acme_production: false
 # Approve new mon-client pairing requests automatically through the mon-server admin API.
 mon_auto_approve: true

@@ -1,0 +1,10 @@
+---
+# verify.yml's «only 443» step alone (see test_verify_front.py).
+- name: Verify that only 443 answers
+  hosts: panel:hops
+  gather_facts: false
+  tasks:
+    - name: Scan the box and try its front
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: verify_front

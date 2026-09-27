@@ -1,0 +1,127 @@
+---
+# verify.yml, «only 443» on a box of the panel or the chain (front_mode only443): from the controller, a TCP connect
+# scan (files/portscan.py) must find the front port open and the old ports closed (common_front_closed_ports, waiting
+# up to common_front_retries x common_front_delay seconds), with a warning for a closed ACME port 80. On the panel the
+# UI must not be reachable through the front (<base>panel/ gets the cover page, not the panel's redirect to its login)
+# while the API login is. The UDP ports (AmneziaWG, relayed UDP) are not scanned: the monitoring targets cover them.
+# Each run costs the controller one miss in the front's fail2ban probe jail (10 in 10 minutes ban it for an hour).
+- name: Gather the box's default address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when:
+    - hop_host is not defined
+    - panel_public_ip is not defined
+    - ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Scan the box's ports from the controller
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ role_path }}/files/portscan.py"
+      - --host
+      - "{{ common_front_address }}"
+      - --ports
+      - "{{ ([common_front_port | int, common_front_acme_port | int] + common_front_closed_ports) | map('string') | unique | join(',') }}"
+      - --timeout
+      - "{{ common_front_timeout | string }}"
+  delegate_to: localhost
+  register: common_front_scan
+  until: >-
+    common_front_scan.rc == 0
+    and common_front_port | int in (common_front_scan.stdout | from_json).open
+    and (common_front_scan.stdout | from_json).open | intersect(common_front_closed_ports | map('int') | list) | length == 0
+  retries: "{{ common_front_retries | int }}"
+  delay: "{{ common_front_delay | int }}"
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Keep what answers
+  ansible.builtin.set_fact:
+    common_front_open: "{{ (common_front_scan.stdout | from_json).open if common_front_scan.rc == 0 else [] }}"
+
+- name: Require only the front to answer
+  ansible.builtin.assert:
+    that:
+      - common_front_scan.rc == 0
+      - common_front_port | int in common_front_open
+      - common_front_open | intersect(common_front_closed_ports | map('int') | list) | length == 0
+    fail_msg: >-
+      {{ ('the port scan of ' ~ common_front_address ~ ' failed: ' ~ common_front_scan.stderr | default('') | trim)
+         if common_front_scan.rc != 0 else '' }}{{
+      (common_front_address ~ ' does not answer on its front port ' ~ common_front_port ~ '/tcp; ')
+      if common_front_scan.rc == 0 and common_front_port | int not in common_front_open else '' }}{{
+      (common_front_address ~ ' still answers on ' ~ (common_front_open | intersect(common_front_closed_ports | map('int') | list)
+       | map('string') | map('regex_replace', '$', '/tcp') | join(', ')) ~ ' after '
+       ~ common_front_retries | int * common_front_delay | int ~ 's (the front firewall is off, or an inner hop keeps its old sub'
+       ~ ' port for an outer neighbour that has not polled it on 443 yet)')
+      if common_front_open | intersect(common_front_closed_ports | map('int') | list) | length > 0 else '' }}
+    success_msg: >-
+      only {{ common_front_port }}/tcp answers on {{ common_front_address }}{{
+      (' (and ' ~ common_front_acme_port ~ '/tcp for ACME)') if common_front_acme_port | int in common_front_open else '' }};
+      closed: {{ common_front_closed_ports | map('string') | join(', ') }}
+
+- name: Warn about a closed ACME port
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ common_front_address }} does not answer on the ACME port {{ common_front_acme_port }}/tcp: the Let's Encrypt
+      IP certificate renews through nginx's webroot there every 3 days (panel: firewallExtra, hop: the box's firewall).
+  when: common_front_acme_port | int not in common_front_open
+
+- name: Check the panel through its front
+  when: inventory_hostname in groups['panel'] | default([])
+  vars:
+    common_front_url: >-
+      {{ common_front_scheme }}://{{ common_front_address }}{{
+      '' if (common_front_scheme == 'https' and common_front_port | int == 443) else ':' ~ common_front_port }}
+    common_front_base: "/{{ panel_base_path | regex_replace('^/+|/+$', '') }}/"
+  block:
+    # The panel answers <base>panel/ without a session with a redirect to its login page; the front's cover page
+    # answers 200 and knows nothing of the secret base path.
+    - name: Open the panel UI through the front
+      ansible.builtin.uri:
+        url: "{{ common_front_url }}{{ common_front_base }}panel/"
+        follow_redirects: none
+        validate_certs: "{{ common_front_validate_certs | bool }}"
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: common_front_ui
+      failed_when: false
+
+    - name: Require the cover page, not the panel UI
+      ansible.builtin.assert:
+        that:
+          - common_front_ui.status | default(-1) | int == 200
+          - common_front_base not in common_front_ui.content | default('')
+        fail_msg: >-
+          {{ ('the panel UI answers on the front at ' ~ common_front_base ~ 'panel/ (HTTP ' ~ common_front_ui.status ~ '): only'
+              ~ ' <base>login and <base>panel/api/ may be published (Panel behind 443 in only443, SBKubric/sane-3x-ui#141)')
+             if common_front_ui.status | default(-1) | int > 0 else
+             ('GET ' ~ common_front_base ~ 'panel/ on the front got no answer: ' ~ common_front_ui.msg | default('?')) }}
+        success_msg: "the panel UI is not reachable from outside: {{ common_front_base }}panel/ gets the cover page"
+
+    - name: Log in to the panel API through the front
+      ansible.builtin.uri:
+        url: "{{ common_front_url }}{{ common_front_base }}login"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ panel_user }}"
+          password: "{{ panel_password }}"
+        validate_certs: "{{ common_front_validate_certs | bool }}"
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: common_front_login
+      failed_when: false
+      no_log: true
+
+    - name: Require the API login on the front
+      ansible.builtin.assert:
+        that:
+          - common_front_login.json.success | default(false) | bool
+        fail_msg: >-
+          POST {{ common_front_base }}login on the front failed: HTTP {{ common_front_login.status | default('?') }}
+          {{ common_front_login.json.msg | default(common_front_login.msg | default('')) }} (mon-server and API clients use it)
+        success_msg: "the panel API login works on the front ({{ common_front_url }}{{ common_front_base }}login)"

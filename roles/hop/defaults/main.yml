@@ -14,7 +14,8 @@
 #   hop_tls        PROXY_TLS mode for install.sh                  (default below)
 #   hop_host       public address registered in the chain         (default below)
 #   hop_reality_target, hop_reality_server_name   neighbour target of an edge, instead of the scan (see below)
-# Group inputs: xui_version (group_vars/all), panel_* from the vault (API login through role panel).
+# Group inputs: xui_version (group_vars/all), panel_* from the vault (API login through role panel), front_mode
+# (group_vars/all, default only443: the box's front, see hop_front_mode).
 
 hop_name: "{{ inventory_hostname }}"
 hop_active: false
@@ -42,10 +43,21 @@ hop_sub_port: 2096
 hop_sub_scheme: "{{ 'http' if hop_tls == 'none' else 'https' }}"
 
 # Next hop of the innermost hop: the panel. Empty address = host of panel_url (a run with the panel
-# play), else panel_public_ip from the panel's host_vars, else the panel host's default IPv4.
+# play), else panel_public_ip from the panel's host_vars, else the panel host's default IPv4. Behind the panel's
+# only443 front its subscriptions and the chain poll answer on 443 (the firewall closes the sub port).
 hop_panel_host: ""
-hop_panel_sub_port: 2096
+hop_panel_sub_port: "{{ 443 if front_mode | default('only443') == 'only443' else 2096 }}"
 hop_panel_sub_scheme: https
+
+# The box's front (install.sh PROXY_FRONT, proxy.json "front"; SBKubric/sane-3x-ui ADR 0005, #140/#141): only443 = nginx
+# takes 443/tcp and passes it on by SNI (next hop, or the edge's neighbour target), the box's HTTP side (subscriptions,
+# /chain/v1/, /join/) answers requests by address with the Let's Encrypt IP certificate, the firewall leaves 443/tcp,
+# 80/tcp, SSH and the relayed UDP ports open, fail2ban guards it. It needs hop_tls letsencrypt-ip. Once the front is up
+# the box reports it on its polls and the panel moves the hop to 443/https in the registry: the role waits for that
+# (retries x delay seconds) before it converges the next hop outward, which then dials 443. off = no front.
+hop_front_mode: "{{ front_mode | default('only443') }}"
+hop_front_retries: 18
+hop_front_delay: 10
 
 # Release tag; `x-ui -v` prints it without the leading "v".
 hop_version: "{{ xui_version }}"
@@ -98,7 +110,7 @@ hop_verify_delay: 10
 # With hop_sub_scheme https, verify.yml also requires a non-empty cert in proxy.json and a TLS answer on
 # this URL, fetched from the next-outer hop (an inner hop) or the controller (an edge);
 # hop_verify_tls_probe_host overrides where it is fetched from (an inventory host or localhost).
-hop_verify_tls_url: "https://{{ hop_host }}:{{ hop_sub_port }}/"
+hop_verify_tls_url: "https://{{ hop_host }}:{{ 443 if hop_front_mode == 'only443' else hop_sub_port }}/"
 hop_verify_tls_probe_host: ""
 
 # Neighbour target of every edge (tasks/neighbour.yml; SBKubric/sane-3x-ui ADR 0005, orchestrator#20): the site the

@@ -1,0 +1,21 @@
+---
+# Test inventory for role monserver's Settings step (test_settings.py): mon-server's admin API is mock_monserver.py; the
+# panel host carries the facts role panel leaves (panel_url and panel_ca_pem as front_mode makes them, -e per test).
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    mon_admin_user: monadmin
+    mon_admin_password: mon-secret
+    mon_version: v0.1.0-stand.5
+    monserver_api_url: "http://127.0.0.1:{{ lookup('ansible.builtin.env', 'MON_TEST_PORT') }}/admin/"
+  children:
+    panel:
+      hosts:
+        real:
+          panel_url: "{{ mon_test_panel_url }}"
+          panel_mon_token: mon-token-1234
+          panel_ca_pem: "{{ mon_test_panel_ca }}"
+    monserver:
+      hosts:
+        mon-server:

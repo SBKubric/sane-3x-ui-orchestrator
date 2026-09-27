@@ -16,10 +16,22 @@
       - hop_tls != 'manual' or (hop_cert | length > 0 and hop_key | length > 0)
       - hop_sub_port | int >= 1 and hop_sub_port | int <= 65535
       - hop_sub_scheme in ['http', 'https']
+      - hop_front_mode in ['only443', 'off']
     fail_msg: >-
       hop {{ inventory_hostname }}: needs xui_version, hop_role inner|edge, hop_name [a-z0-9-]{1,32},
       hop_position >= 1 on an inner hop, hop_active only on an edge, hop_tls letsencrypt-ip|none|manual
-      (manual needs hop_cert and hop_key), hop_sub_port 1-65535, hop_sub_scheme http|https.
+      (manual needs hop_cert and hop_key), hop_sub_port 1-65535, hop_sub_scheme http|https, front_mode only443|off.
+    quiet: true
+
+# The front answers requests by address with the Let's Encrypt IP certificate in /root/cert/ip; without one it stays
+# down and the box keeps relaying every port (install.sh warns, nothing fails).
+- name: Check that the front can come up
+  ansible.builtin.assert:
+    that:
+      - hop_front_mode == 'off' or hop_tls == 'letsencrypt-ip'
+    fail_msg: >-
+      hop {{ inventory_hostname }}: front_mode only443 needs hop_tls letsencrypt-ip (the front's HTTP side answers with the
+      box's Let's Encrypt IP certificate), not {{ hop_tls }}; set front_mode: off for this hop instead.
     quiet: true
 
 # An address as target carries no name for the SNI, so it needs hop_reality_server_name (the panel refuses it
@@ -62,6 +74,7 @@
       next_sub_port: "{{ hop_next_sub_port | int }}"
       next_sub_scheme: "{{ hop_next_sub_scheme }}"
       tls: "{{ hop_tls }}"
+      front_mode: "{{ hop_front_mode }}"
       cert: "{{ hop_cert }}"
       key: "{{ hop_key }}"
       domain: "{{ hop_domain }}"

@@ -1,6 +1,7 @@
 ---
 # verify.yml on the panel host: version, API login with the vault account, and the chain registry against
-# group hops (every hop joined, the active edge is the one with hop_active). Read-only.
+# group hops (every hop joined, behind its front on 443/https when its front_mode is only443, the active edge
+# is the one with hop_active). Read-only.
 - name: Read the panel version
   ansible.builtin.command:
     argv: ["{{ panel_bin }}", "-v"]
@@ -48,20 +49,25 @@
           {{ panel_verify_chain.json.msg | default(panel_verify_chain.msg | default('')) }}
         quiet: true
 
-    # Inventory side, as role hop reads it: hop_name (default: inventory hostname) and hop_active.
+    # Inventory side, as role hop reads it: hop_name (default: inventory hostname), hop_active and the front
+    # (hop_front_mode, default front_mode, default only443).
     - name: Read the chain from group hops
       ansible.builtin.set_fact:
         panel_verify_chain_expected: >-
           {%- set hops = [] -%}
           {%- set active = [] -%}
+          {%- set fronts = [] -%}
           {%- for h in groups['hops'] -%}
           {%-   set name = hostvars[h].hop_name | default(h) -%}
           {%-   set _ = hops.append(name) -%}
           {%-   if hostvars[h].hop_active | default(false) | bool -%}
           {%-     set _ = active.append(name) -%}
           {%-   endif -%}
+          {%-   if hostvars[h].hop_front_mode | default(hostvars[h].front_mode | default('only443')) == 'only443' -%}
+          {%-     set _ = fronts.append(name) -%}
+          {%-   endif -%}
           {%- endfor -%}
-          {{ {'hops': hops, 'active': active | first | default('')} }}
+          {{ {'hops': hops, 'active': active | first | default(''), 'fronts': fronts} }}
 
     - name: Compare the chain registry with group hops
       ansible.builtin.set_fact:
@@ -74,6 +80,9 @@
           {%-     set _ = out.append(hop ~ ' is not in the chain registry') -%}
           {%-   elif entry.state != 'joined' -%}
           {%-     set _ = out.append(hop ~ ' is ' ~ entry.state ~ ' in the chain registry, not joined') -%}
+          {%-   elif hop in panel_verify_chain_expected.fronts and (entry.subPort | int != 443 or entry.subScheme != 'https') -%}
+          {%-     set _ = out.append(hop ~ ' is on ' ~ entry.subPort ~ '/' ~ entry.subScheme ~ ' in the chain registry, not behind its'
+                                     ~ ' front (443/https): its front is down or has not reported yet') -%}
           {%-   endif -%}
           {%- endfor -%}
           {%- set active = panel_verify_chain.json.obj.activeEdge | default('', true) -%}

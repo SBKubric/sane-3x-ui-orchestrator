@@ -3,17 +3,22 @@
 # remark. The Reality keys (the panel's generator) and shortId (made once by the role) are created with the
 # inbound, the AWG server's keys by the panel itself; afterwards they are only read back from the panel.
 # Nothing secret lives here or in the vault.
-# The chain relays both ports on every hop (8443/tcp, 51820/udp).
+# With front_mode only443 every hop passes 443/tcp on by SNI and relays 51820/udp.
 panel_inbounds:
   - remark: vless-reality
     protocol: vless
+    # The panel's front relocates it to 127.0.0.1:8443 and publishes it on 443 (clients connect to 443).
     port: 8443
+    # Follows the chain: the panel sets target and serverNames to the active edge's neighbour target.
+    followChain: true
     settings:
       decryption: none
       fallbacks: []
     streamSettings:
-      network: tcp
+      # XHTTP, not TCP + Vision: the flow of a Vision client is TCP only and is cleared on migration.
+      network: xhttp
       security: reality
+      # target/serverNames apply until an edge is active; then the chain owns them (followChain).
       realitySettings:
         show: false
         xver: 0
@@ -23,10 +28,11 @@ panel_inbounds:
           fingerprint: chrome
           serverName: ""
           spiderX: /
-      tcpSettings:
-        acceptProxyProtocol: false
-        header:
-          type: none
+      xhttpSettings:
+        path: /
+        host: ""
+        # auto: the server takes every mode; xray-core clients pick stream-one with Reality.
+        mode: auto
     sniffing:
       enabled: true
       destOverride: [http, tls, quic]

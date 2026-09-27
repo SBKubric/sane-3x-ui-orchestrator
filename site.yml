@@ -1,7 +1,9 @@
 ---
 # Converges the whole installation described by the inventory profile:
 #   ansible-playbook -i inventories/<profile> site.yml
-# One play per group, in order panel -> hops -> monserver -> monclient.
+# One play per group, in order panel -> hops -> (panel inbounds again) -> monserver -> monclient.
+# front_mode only443 (default) converges from the inside out: the panel behind its front, then each hop from the
+# panel outward, each waiting for its front report (443/https in the registry) before the next (README "Front").
 # An empty group (e.g. monserver/monclient in stand-chain) matches no hosts and is skipped.
 # site.yml never wipes anything; a fresh start is wipe.yml followed by site.yml.
 
@@ -24,6 +26,20 @@
   tags: [hops]
   roles:
     - role: hop
+
+# A second pass over panel_inbounds once the hops play has written the active edge's neighbour target: an inbound
+# with followChain whose flag had to wait for it (an existing chain moving to «only 443») is flagged now, and the
+# panel gives it the neighbour's cover. On a converged panel it reads and writes nothing.
+- name: Chain-following inbounds
+  hosts: panel
+  gather_facts: false
+  tags: [panel, hops]
+  tasks:
+    - name: Converge the inbounds that follow the chain
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: inbounds
+      when: panel_inbounds | default([]) | selectattr('followChain', 'defined') | selectattr('followChain') | list | length > 0
 
 - name: Monitoring server
   hosts: monserver

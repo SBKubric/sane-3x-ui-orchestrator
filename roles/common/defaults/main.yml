@@ -25,3 +25,28 @@ common_container_virtualization: [lxc, openvz, docker, podman, container, system
 
 # Where the roles and install.sh put their systemd units; wipe_service.yml removes them from here.
 common_systemd_dir: /etc/systemd/system
+
+# verify.yml, «only 443» (tasks/verify_front.yml, front_mode only443; SBKubric/sane-3x-ui ADR 0005): from the controller,
+# the box answers TCP on its front port and not on the ports it used to publish; the panel's UI is not reachable
+# through the front while its login and API are. The box's public address: hop_host / panel_public_ip from host_vars,
+# else its default IPv4.
+common_front_address: "{{ hop_host | default(panel_public_ip | default(ansible_facts['default_ipv4']['address'])) }}"
+common_front_port: 443
+common_front_scheme: https
+# The front's HTTP side answers requests by address with a Let's Encrypt IP certificate: it is verified.
+common_front_validate_certs: true
+# 80/tcp belongs to nginx for the ACME webroot the IP certificates renew through: closed is a warning.
+common_front_acme_port: 80
+# Must not answer: the sub port every box used to publish (2096), the inbounds' ports of panel_inbounds (8443 on the
+# stand) and, on the panel, its own port. SSH is not scanned (verify.yml reached the box through it).
+common_front_closed_ports: >-
+  {{ ([2096, hop_sub_port | default(2096) | int]
+      + (hostvars[groups['panel'][0]].panel_inbounds | default([]) | rejectattr('protocol', 'equalto', 'amneziawg')
+         | selectattr('port', 'defined') | map(attribute='port') | list if groups['panel'] | default([]) | length > 0 else [])
+      + ([panel_port | int] if inventory_hostname in groups['panel'] | default([]) and panel_port is defined else []))
+     | map('int') | unique | list }}
+# One connection attempt per port (all in parallel), repeated up to retries x delay seconds: an inner hop closes its
+# old sub port only once its outer neighbours poll it on 443.
+common_front_timeout: 3
+common_front_retries: 12
+common_front_delay: 10

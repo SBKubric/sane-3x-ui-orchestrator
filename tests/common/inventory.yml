@@ -1,0 +1,24 @@
+---
+# Test inventory for verify.yml's «only 443» step (roles/common/tasks/verify_front.yml, portscan.py) on local listeners:
+# the box is 127.0.0.1, its "443" and "80" are ports test_verify_front.py opens, and its front is a plain-HTTP stand-in.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    panel_user: admin
+    panel_password: secret-pass
+    panel_port: 2053
+    panel_base_path: /base/
+    common_front_address: 127.0.0.1
+    common_front_scheme: http
+    common_front_port: "{{ lookup('ansible.builtin.env', 'FRONT_TEST_PORT') | int }}"
+    common_front_acme_port: "{{ lookup('ansible.builtin.env', 'ACME_TEST_PORT') | int }}"
+    common_front_timeout: 1
+    common_front_retries: 1
+    common_front_delay: 1
+  children:
+    panel:
+      hosts:
+        real:
+    hops:
+      hosts: {}

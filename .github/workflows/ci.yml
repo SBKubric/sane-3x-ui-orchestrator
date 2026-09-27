@@ -51,8 +51,17 @@ jobs:
       - name: Role panel inbounds and the targets check of verify.yml against the mock panel API
         run: python3 tests/panel/test_panel_inbounds.py
 
+      - name: Role panel's «only 443» front (nginx settings, settings form, IP certificate, facts) against the mock panel API
+        run: python3 tests/panel/test_panel_front.py
+
       - name: Probe links per path in verify.yml (mon-server)
         run: python3 tests/monserver/test_verify_paths.py
+
+      - name: Role monserver's Settings (panelUrl on 443 without panelCa) against a mock admin API
+        run: python3 tests/monserver/test_settings.py
+
+      - name: verify.yml's «only 443» check (port scan, cover page, API login) on local listeners
+        run: python3 tests/common/test_verify_front.py
 
       - name: Role monclient inputs and unit
         run: python3 tests/monclient/test_monclient_inputs.py

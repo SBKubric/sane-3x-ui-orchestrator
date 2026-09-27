@@ -1,0 +1,137 @@
+---
+# The Let's Encrypt IP certificate the front's HTTP side answers requests by address with (/root/cert/ip, what the panel
+# reads, SBKubric/sane-3x-ui#142): subscriptions, the chain poll, /mon/v1 (mon-server trusts it without panelCa),
+# login and API on 443. Issued the way install.sh issues it (acme_issue_webroot): nginx takes port 80 for the ACME
+# webroot (`x-ui nginx acme-front`), acme.sh issues through it with the shortlived profile, renews every 3 days from
+# its cron and reloads nginx and the panel. A certificate for panel_public_ip that is valid for at least another day is
+# kept: nothing is asked of Let's Encrypt (5 certificates per address a week). The files belong to root, who runs
+# this (and acme.sh, nginx, x-ui) on the box. The panel's own port keeps the
+# self-signed certificate (tls.yml): the role's API calls verify it on 127.0.0.1.
+- name: Check the IP certificate already on the box
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ panel_ip_cert_dir }}/fullchain.pem", -noout, -checkend, "86400", -ext, subjectAltName]
+  register: panel_ip_cert_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check the IP certificate's key
+  ansible.builtin.stat:
+    path: "{{ panel_ip_cert_dir }}/privkey.pem"
+  register: panel_ip_cert_key
+
+# The pattern sits in a folded scalar, where YAML keeps backslashes: one backslash there is one in the regex.
+- name: Decide whether the IP certificate can stay
+  ansible.builtin.set_fact:
+    panel_ip_cert_reusable: >-
+      {{ panel_ip_cert_check.rc == 0
+         and panel_ip_cert_check.stdout is search('IP Address:' ~ (panel_public_ip | regex_escape) ~ '(,|\s|$)', multiline=true)
+         and panel_ip_cert_key.stat.exists }}
+
+- name: "Show the plan: IP certificate"
+  ansible.builtin.debug:
+    msg: "IP certificate for {{ panel_public_ip }}: {{ 'keep ' ~ panel_ip_cert_dir if panel_ip_cert_reusable | bool else 'issue' }}"
+
+- name: Issue the IP certificate through nginx's webroot
+  when:
+    - not panel_ip_cert_reusable | bool
+    - not ansible_check_mode
+  environment:
+    HOME: "{{ panel_acme_home | dirname }}"
+  block:
+    - name: Check for acme.sh
+      ansible.builtin.stat:
+        path: "{{ panel_acme_home }}/acme.sh"
+      register: panel_acme_bin
+
+    - name: Download the acme.sh installer
+      ansible.builtin.get_url:
+        url: "{{ panel_acme_install_url }}"
+        dest: "{{ panel_acme_home | dirname }}/acme-install.sh"
+        mode: "0700"
+      when: not panel_acme_bin.stat.exists
+
+    - name: Install acme.sh
+      ansible.builtin.command:
+        argv: [sh, "{{ panel_acme_home | dirname }}/acme-install.sh"]
+        chdir: "{{ panel_acme_home | dirname }}"
+        creates: "{{ panel_acme_home }}/acme.sh"
+
+    - name: Let nginx answer the ACME challenge on port 80
+      ansible.builtin.command:
+        argv: ["{{ panel_bin }}", nginx, acme-front]
+      changed_when: true
+
+    # Retried once only when the CA did not answer at all; a refusal (validation, rate limit) is final.
+    - name: Issue the certificate for {{ panel_public_ip }}
+      ansible.builtin.command:
+        argv:
+          - "{{ panel_acme_home }}/acme.sh"
+          - --issue
+          - -d
+          - "{{ panel_public_ip }}"
+          - --webroot
+          - "{{ panel_acme_webroot }}"
+          - --server
+          - letsencrypt
+          - --listen-v4
+          - --request-v4
+          - --certificate-profile
+          - shortlived
+          - --days
+          - "3"
+          - --force
+      register: panel_ip_cert_issue
+      until: >-
+        panel_ip_cert_issue.rc == 0
+        or (panel_ip_cert_issue.stdout ~ panel_ip_cert_issue.stderr) is not search('Cannot init API|Could not get nonce|curl error|timed out|: Timeout')
+      retries: 1
+      delay: 10
+      changed_when: true
+      failed_when: false
+
+    - name: Require the issued certificate
+      ansible.builtin.assert:
+        that:
+          - panel_ip_cert_issue.rc == 0
+        fail_msg: >-
+          acme.sh could not issue the IP certificate for {{ panel_public_ip }} (port 80 must be reachable from the
+          internet, and Let's Encrypt allows 5 per address a week): {{ (panel_ip_cert_issue.stdout_lines + panel_ip_cert_issue.stderr_lines)[-15:] }}
+        quiet: true
+
+    - name: Create the IP certificate directory
+      ansible.builtin.file:
+        path: "{{ panel_ip_cert_dir }}"
+        state: directory
+        mode: "0700"
+
+    # acme.sh exits non-zero when the reload command fails (x-ui not there yet, say): the files decide.
+    - name: Install the certificate where the panel reads it
+      ansible.builtin.command:
+        argv:
+          - "{{ panel_acme_home }}/acme.sh"
+          - --installcert
+          - -d
+          - "{{ panel_public_ip }}"
+          - --key-file
+          - "{{ panel_ip_cert_dir }}/privkey.pem"
+          - --fullchain-file
+          - "{{ panel_ip_cert_dir }}/fullchain.pem"
+          - --reloadcmd
+          - "{{ panel_acme_reload_cmd }}"
+      changed_when: true
+      failed_when: false
+
+    - name: Keep the key private
+      ansible.builtin.file:
+        path: "{{ panel_ip_cert_dir }}/privkey.pem"
+        mode: "0600"
+
+    - name: Check the installed certificate
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ panel_ip_cert_dir }}/fullchain.pem", -noout, -checkend, "86400", -ext, subjectAltName]
+      register: panel_ip_cert_installed
+      changed_when: false
+      failed_when: >-
+        panel_ip_cert_installed.rc != 0
+        or panel_ip_cert_installed.stdout is not search('IP Address:' ~ (panel_public_ip | regex_escape) ~ '(,|\s|$)', multiline=true)

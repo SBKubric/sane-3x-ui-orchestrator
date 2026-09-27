@@ -6,7 +6,8 @@ monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-moni
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
 > Status: roles `common`, `panel`, `hop`, `monserver` and `monclient`, `wipe.yml` and `verify.yml` are real;
-> the first full stand run (`wipe.yml` + `site.yml` of `stand-full` to a green `verify.yml`) is #5.
+> the first full stand run (`wipe.yml` + `site.yml` of `stand-full` to a green `verify.yml`) is #5. The default
+> profile is [«only 443»](#front-only-443) (#21).
 
 ## Layout
 
@@ -14,7 +15,7 @@ mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric
 ansible.cfg            roles path, root over ssh, no default inventory
 requirements.txt       ansible-core + ansible-lint (pinned)
 requirements.yml       collections (pinned)
-site.yml               converge: common -> panel -> hops -> monserver -> monclient -> verify.yml
+site.yml               converge: common -> panel -> hops -> panel inbounds again -> monserver -> monclient -> verify.yml
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
                        (steps: roles/<role>/tasks/wipe.yml)
 verify.yml             non-destructive checks; also imported last by site.yml (tag verify)
@@ -24,9 +25,11 @@ inventories/
   stand-chain/         panel + hops; monserver/monclient empty
   stand-full/          panel + hops + monserver + monclient
 roles/
-  common/              supported OS check, base packages, time sync
+  common/              supported OS check, base packages, time sync; tasks/verify_front.yml + files/portscan.py:
+                       verify.yml's «only 443» check from the controller
   panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, inbounds
-                       from panel_inbounds; tasks/api_login.yml is the panel API login helper for other roles
+                       from panel_inbounds, the «only 443» front (tasks/front.yml); tasks/api_login.yml is the
+                       panel API login helper for other roles
   hop/                 chain registry converged with group hops through the panel API; install + join;
                        neighbour target of every edge (files/neighbour.py: scan + Reality handshake check)
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
@@ -34,7 +37,10 @@ roles/
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
 tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API, and
                        neighbour.py against a fake scanner, fake xray and local sites (CI)
-tests/panel/           role panel's inbounds and the targets part of verify.yml against the same mock (CI)
+tests/panel/           role panel's inbounds, its «only 443» front and the targets part of verify.yml against the
+                       same mock and local fakes (CI)
+tests/monserver/       role monserver's Settings against a mock of mon-server's admin API, verify's probe links (CI)
+tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
 ```
 
@@ -63,6 +69,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `mon_version` | release tag of 3ax-ui-monitoring for mon-server and mon-client |
 | `acme_production` | `false` = Let's Encrypt staging for mon-server (default); hops always use production LE |
 | `mon_auto_approve` | approve mon-client pairing requests through the mon-server admin API |
+| `front_mode` | `only443` (default) or `off`: the profile «only 443» on the panel and every hop, see [Front: only 443](#front-only-443) |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
 panel's chain registry:
@@ -114,6 +121,9 @@ skipped when the host already matches, so a second run reports `changed=0`.
    The token is read back every run and never stored in the vault.
 6. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
    hops play, so hops that join in the same run find the relayed ports in the chain document.
+7. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
+   fail2ban, `webListen` 127.0.0.1 and `chainPanelHost`, then the panel's nginx front with its firewall, see
+   [Front: only 443](#front-only-443).
 
 Secrets never reach the output: the tasks that carry the password, the Telegram token, the monitoring
 token or the session cookie are `no_log`. install.sh prints random credentials of its own; they are
@@ -123,8 +133,8 @@ Facts left on the panel host for later plays (`hostvars[groups['panel'][0]]`):
 
 | Fact | Value | Used by |
 |---|---|---|
-| `panel_url` | `https://<panel_public_ip>:<panel_port><panel_base_path>` | hop, monserver (`panelUrl`), verify |
-| `panel_ca_pem` | PEM of the self-signed certificate | monserver (`panelCa`) |
+| `panel_url` | `https://<panel_public_ip><panel_base_path>` (443) behind the front, else `https://<panel_public_ip>:<panel_port><panel_base_path>` | hop, monserver (`panelUrl`), verify |
+| `panel_ca_pem` | empty behind the front (the IP certificate is publicly trusted), else the PEM of the self-signed certificate | monserver (`panelCa`) |
 | `panel_mon_token` | monitoring bearer token (only with a `monserver` host) | monserver (`monToken`) |
 
 The facts exist only in a run that includes the panel play (`--tags panel` or a full run).
@@ -140,8 +150,9 @@ assumed. Each entry:
 | `protocol` | xray protocol (`vless`, `vmess`, `trojan`, `shadowsocks`, ...) or `amneziawg` (required; `nativewg` and `mtproto` are not managed) |
 | `port` | listen port (required for xray). For `amneziawg`: the AWG server's UDP port; default: the random port the panel picked |
 | `enable` | default `true`; for `amneziawg` it switches the inbound and the AWG server |
+| `followChain` | `true`: the inbound follows the chain (Reality only). The panel sets its Reality `target`, `serverNames` and `settings.serverName` to the active edge's neighbour target on every switch; while an edge is active the role therefore leaves those three to the panel and converges the declared ones only while no edge is active. With an active edge that has no neighbour target yet the panel refuses the flag: the role converges the rest, warns, and flags it in the second pass of `site.yml` after role hop wrote the target |
 | `listen`, `total`, `expiryTime`, `trafficReset` | as in the panel (xray only); not declared = left as the panel has it (on add: `""`, `0`, `0`, `never`) |
-| `settings`, `streamSettings`, `sniffing` | mappings (xray only) merged key by key into the panel's JSON of the same name; keys the entry does not name stay as the panel has them, lists are replaced. `settings.clients` is refused: users are added in the panel, the monitoring probe client by the panel itself. `sniffing` not declared on add = the UI default |
+| `settings`, `streamSettings`, `sniffing` | mappings (xray only) merged key by key into the panel's JSON of the same name; keys the entry does not name stay as the panel has them, lists are replaced. `settings.clients` is refused: users are added in the panel, the monitoring probe client by the panel itself. A declared `streamSettings.network` drops the panel's settings of every other transport (`tcpSettings` when moving to `xhttp`), and on a VLESS inbound whose network is not `tcp` the clients' `flow` is cleared (Vision is TCP only); their ids, emails and subIds stay. `sniffing` not declared on add = the UI default |
 
 The converge, on the panel host (`POST <base>login`, then `panel/api/...`):
 
@@ -182,7 +193,18 @@ from the panel outward) and restart the relay. verify.yml waits up to 2 minutes 
 
 Port 443 is not available for an inbound while the panel's nginx front is on (`nginxMode` other than `off`;
 install.sh sets `shared`): nginx owns the public port and the panel refuses the add with "Port already
-exists: 443". The stand inventories therefore put VLESS-Reality on 8443.
+exists: 443". The stand inventories therefore put VLESS-Reality on 8443; behind the only443 front the panel moves it to
+`127.0.0.1:8443` (it keeps the port number, `listen` and `publicPort` are the panel's) and publishes it on 443, which is
+the port its links carry. The role never declares `listen`, so it does not fight that move.
+
+**VLESS + XHTTP + Reality.** The stand's inbound is XHTTP, not TCP + Vision (ADR 0005): `xhttpSettings` `path: /`,
+`host: ""`, `mode: auto`. `auto` lets the server take every XHTTP mode and each client pick its own (an xray-core
+client picks `stream-one` with Reality); the path is not a secret, Reality authenticates first. Clients built on
+xray-core with XHTTP (v2rayNG, v2rayN, Hiddify's xray core; the panel and mon-client run xray 26.3.27) connect; check a
+sing-box-based client for XHTTP support before relying on it (upstream sing-box did not have the transport when this
+was written). The migration from the TCP + Vision inbound happens in place on the first run (matched
+by remark): same keys, same clients, their Vision flow cleared, a new link for each client (`type=xhttp`, port 443,
+the active edge's server name) that they get by refreshing the subscription.
 The Reality `target` must be a site Xray's Reality can borrow a handshake from: with Xray 26.3.27 and the
 `chrome` fingerprint, `www.microsoft.com` fails every handshake ("REALITY: processed invalid connection ...
 handshake did not complete successfully") while `dl.google.com`, `github.com` and `www.samsung.com` work; the
@@ -194,26 +216,27 @@ Example (`inventories/stand-full/group_vars/panel.yml`):
 panel_inbounds:
   - remark: vless-reality
     protocol: vless
-    port: 8443
+    port: 8443                    # behind the front: 127.0.0.1:8443, published on 443
+    followChain: true             # target/serverNames follow the active edge's neighbour
     settings:
       decryption: none
       fallbacks: []
     streamSettings:
-      network: tcp
+      network: xhttp
       security: reality
       realitySettings:            # privateKey, settings.publicKey and shortIds are made on add
         show: false
         xver: 0
-        target: dl.google.com:443
+        target: dl.google.com:443 # until an edge is active
         serverNames: [dl.google.com]
         settings:
           fingerprint: chrome
           serverName: ""
           spiderX: /
-      tcpSettings:
-        acceptProxyProtocol: false
-        header:
-          type: none
+      xhttpSettings:
+        path: /
+        host: ""
+        mode: auto
     sniffing:
       enabled: true
       destOverride: [http, tls, quic]
@@ -273,20 +296,29 @@ Per hop, against `GET panel/api/chain/list`:
 | Registry / box | Action |
 |---|---|
 | no hop of that name | `add {name, host, role, subPort, subScheme, position}` → install with the join token |
-| `joined`, same host / sub port / scheme, `x-ui chain status` answers with this name, `x-ui -v` = `xui_version` (a leading `v` on either side is ignored) | nothing |
-| anything else (pending, broken box, other version, new host) | `update` of what changed → `reissueToken` → install |
+| `joined`, same host / sub port / scheme (behind the front: 443/https, see below), `x-ui chain status` answers with this name, `x-ui -v` = `xui_version` (a leading `v` on either side is ignored), the front in `proxy.json` = `front_mode` | nothing |
+| anything else (pending, broken box, other version, new host, other front) | `update` of what changed → `reissueToken` → install |
 
 The plan line names why a hop re-joins, e.g. `proxy=rejoin (subScheme http -> https)`.
 
 Install = `install.sh <xui_version>` from the same tag with `XUI_PROXY_MODE=1`, `PROXY_NEXT_HOP`,
-`PROXY_NEXT_HOP_SUB_PORT`/`_SCHEME`, `PROXY_SUB_PORT`, `PROXY_TLS`, `PROXY_JOIN_TOKEN`; without a TTY and
-with an explicit tag install.sh reinstalls that tag and joins before the service starts. The role then
-waits for the registry to report the hop `joined` and checks the installed version.
+`PROXY_NEXT_HOP_SUB_PORT`/`_SCHEME`, `PROXY_SUB_PORT`, `PROXY_TLS`, `PROXY_FRONT` (`front_mode`),
+`PROXY_JOIN_TOKEN`; without a TTY and with an explicit tag install.sh reinstalls that tag and joins before the
+service starts. The role then waits for the registry to report the hop `joined` and checks the installed version.
+
+**Behind the front** (`front_mode: only443`, needs `hop_tls: letsencrypt-ip`): install.sh writes `"front": {"mode":
+"only443"}` to `proxy.json` and installs fail2ban; the box's front comes up with the IP certificate, and its polls
+report it (`X-Chain-Front`), so the panel moves the hop to **443/https** in the registry. The role therefore never
+pushes `hop_sub_port`/`hop_sub_scheme` to the registry of a hop behind its front (they stay the box's own sub server,
+behind nginx) and waits, after each install, up to `hop_front_retries` x `hop_front_delay` (3 minutes) for that report
+before it converges the next hop outward; a hop that does not report stops the run there. A box whose `proxy.json`
+names another front than `front_mode`, or whose registry entry is not 443/https, re-joins (`front off -> only443`,
+`front not reported`).
 
 The next hop of the box is `hop_next` when set, otherwise derived: the inward neighbour's host, sub port
 and scheme as registered, or the panel for the innermost hop (`hop_panel_host`, else the host of
 `panel_url`, else `panel_public_ip` from the panel's `host_vars`, else its default IPv4; sub port
-`hop_panel_sub_port`, default 2096).
+`hop_panel_sub_port`: 443 behind the panel's front, else 2096).
 
 After the loop: the [neighbour target](#neighbour-target) of every edge, then `setActive` on the edge with `hop_active: true` (exactly one edge must carry it, asserted
 before anything is written), then `del` of every registry hop the inventory does not list — the imported
@@ -321,7 +353,7 @@ default IPv4 from facts), `hop_sub_port`/`hop_sub_scheme` (2096, `https` or `htt
 `hop_domain` (`PROXY_DOMAIN`), `hop_next_sub_port`/`hop_next_sub_scheme` (for an explicit `hop_next`),
 `hop_panel_host`/`hop_panel_sub_port`/`hop_panel_sub_scheme`, `hop_install_environment` (extra install.sh
 environment, e.g. `PROXY_TLS_IPV6`), `hop_install_timeout`, `hop_join_retries`/`hop_join_delay`,
-`hop_prune`, `hop_tls_reuse`.
+`hop_prune`, `hop_tls_reuse`, `hop_front_mode` (default `front_mode`), `hop_front_retries`/`hop_front_delay`.
 
 ### Neighbour target
 
@@ -416,7 +448,9 @@ SBKubric/3ax-ui-monitoring#52/#56/#65). A second run reports `changed=0`.
    the panel play's facts (`panel_url`, `panel_mon_token`, `panel_ca_pem`), `tgToken`/`tgChatId` from
    the vault (empty vault values leave Telegram alone). Then `POST /admin/api/settings/check` must answer
    "Panel reachable"; `monserver_require_panel_reachable: false` turns that into a warning. In a run
-   without the panel play (`--tags monserver`) the panel fields are left alone with a warning.
+   without the panel play (`--tags monserver`) the panel fields are left alone with a warning. Behind the panel's
+   only443 front `panelUrl` is `https://<panel IP>/<base>/` on 443 (the front publishes `<base>mon/v1/` with the
+   publicly trusted IP certificate) and `panelCa` is emptied: mon-server trusts the system roots.
 
 Admin API calls run on the mon-server host against `https://127.0.0.1/admin/` without certificate
 verification (the certificate is for `publicIp`, on staging from an untrusted root); mutating calls
@@ -506,6 +540,62 @@ Runs on every host of group `monclient` (decision #55, item 6).
 Knobs in `roles/monclient/defaults/main.yml`: `monclient_server_url`, `monclient_log_level`,
 `monclient_pairing_retries`/`monclient_pairing_delay`, `monclient_release_url`.
 
+## Front: only 443
+
+The default profile (`front_mode: only443`; SBKubric/sane-3x-ui [ADR 0005](https://github.com/SBKubric/sane-3x-ui/blob/main/docs/adr/0005-only-443-on-every-hop.md),
+panel `v1.9.0-chain.10`+). Every box, the real server and each hop, accepts TCP only on **443** (plus SSH, 80 for the
+ACME webroot, and the UDP of AmneziaWG and the relayed UDP ports): nginx reads the SNI and passes a Reality client on
+(the next hop, the inbound on the real server), an unknown SNI to the edge's neighbour target or a cover page, and
+answers requests by address (no SNI) with the box's Let's Encrypt IP certificate on its HTTP side: subscriptions, the
+chain poll (`/chain/v1/`), `/join/` on a hop, and on the panel `<base>mon/v1/`, `<base>login` and `<base>panel/api/`
+only. The panel's UI is not reachable from outside: `<base>panel/` gets the cover page. Limits and fail2ban guard the
+HTTP side (SBKubric/sane-3x-ui#141).
+
+What the roles do with `only443`:
+
+| Box | Role | What |
+|---|---|---|
+| real | panel | install.sh with `XUI_WEB_LISTEN=127.0.0.1` and `XUI_FAIL2BAN=1`; the Let's Encrypt IP certificate in `/root/cert/ip` (acme.sh through nginx's webroot on :80, shortlived, renewed every 3 days; a valid one is kept, see LE limits); fail2ban (and the sshd jail on the journal where `auth.log` is missing); `webListen` 127.0.0.1 and `chainPanelHost` = the public IP through the settings form (`panel/setting/all` → `update`, a restart when `webListen` changes); then `panel/api/nginx`: mode `only443`, subscriptions and panel behind 443, firewall on, `80` added to `firewallExtra` (the panel's firewall does not keep the ACME port by itself), the plan's blockers refused, `apply`, and `confirm` before the 2-minute rollback |
+| hops | hop | install.sh with `PROXY_FRONT=only443` (a converged box re-joins once to get it), fail2ban with it; the registry follows the box's front report (443/https), the role waits for it hop by hop |
+| mon-server | monserver | `panelUrl` = `https://<panel IP>/<base>/`, `panelCa` empty |
+
+The role's own panel API calls keep going to `https://127.0.0.1:<panel_port><base>` on the panel host over ssh
+(`delegate_to`): neither `webListen` 127.0.0.1 nor the firewall (it never touches the loopback) takes that away.
+
+**Convergence order** (a fresh stand and an existing one alike; `site.yml` does it in one run):
+
+1. **real**: the inbounds (the XHTTP migration, the front needs a Reality inbound to route), the IP certificate, then
+   the front with its firewall, confirmed. The panel's port and the sub port 2096 close; a hop that still polls 2096
+   loses the wave until step 2 reinstalls it.
+2. **inner hops**, from the panel outward (`hop_position`): reinstall with `PROXY_FRONT=only443`, the innermost one
+   polling the panel on 443; the role waits until the registry shows the hop on 443/https (its front report).
+3. **edges**: reinstall, dialling their inner neighbour on 443, wait for the report the same way. An inner hop keeps its
+   old sub port open until every outer neighbour has polled it on 443, then closes it.
+4. the neighbour target of every edge and `setActive`; then the second pass over `panel_inbounds` flags the
+   chain-following inbound if the active edge had no neighbour target before (its cover becomes the neighbour's).
+5. **mon-server** switches to 443; mon-clients probe `direct` (the real server's 443) and every hop.
+6. `verify.yml`.
+
+Clients: the links change (port 443, `type=xhttp`, the active edge's server name); they get them by refreshing the
+subscription (the panel asks clients to refresh hourly while inbounds follow the chain).
+
+**Admin access through an SSH tunnel.** The panel's pages listen on 127.0.0.1 only:
+
+```sh
+ssh -L 2053:127.0.0.1:2053 real          # the vault's panel_port on both sides
+# then open https://127.0.0.1:2053/<panel_base_path>/  (the self-signed certificate names the server's IP)
+```
+
+**fail2ban on the front.** Misses (a path under the secret base path that the front does not publish, an unknown
+subscription) count: 10 in 10 minutes ban the address for an hour on 80/443 (SSH stays). `verify.yml` costs the
+controller one miss per run (it opens `<base>panel/` to see the cover page); should it be banned:
+`ssh real fail2ban-client set 3ax-ui-probe unbanip <controller IP>`.
+
+**`front_mode: off`** keeps the behaviour before this profile: hops are (re)installed with `PROXY_FRONT=off`, and the
+role leaves the panel's front, `webListen` and `chainPanelHost` as they are (install.sh's default front is `shared`,
+without a firewall). It does not undo an `only443` panel: switch its front off on the Nginx page (through the tunnel)
+first, then rerun `site.yml` with `front_mode: off`.
+
 ## wipe.yml
 
 Stops and deletes what `site.yml` and install.sh put on the boxes, so that the next `site.yml` starts from
@@ -519,8 +609,8 @@ then:
 
 | Group | Deleted | Kept |
 |---|---|---|
-| panel | unit `x-ui`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3), the rest of nginx.conf |
-| hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`) |
+| panel | unit `x-ui`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3, fail2ban), the rest of nginx.conf, the front's LE IP certificate `/root/cert/ip` with acme.sh's renewal (the next `site.yml` keeps using it) |
+| hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`); fail2ban and its jails |
 | monserver | unit `mon-server`; `/usr/local/bin/mon-server`, `/etc/mon-server`, `/var/cache/3ax-ui-orchestrator/mon-server`, everything in `/var/lib/mon-server` (database: admin account, Settings, mon-client registry) | `/var/lib/mon-server/certs` (certmagic's ACME account and certificates) and the `mon-server` user that owns it; `-e monserver_wipe_certs=true` deletes the whole data dir and the user |
 | monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`; user and group `mon-client` | nothing |
 
@@ -537,8 +627,9 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
+| panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
@@ -610,7 +701,9 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify
    `--ask-vault-pass` or `--vault-password-file ~/.3ax-ui-vault-pass`. The examples below use
    `--ask-vault-pass`.
 4. **Profile.** `inventories/stand-chain` (panel + hops) or `inventories/stand-full` (+ mon-server and
-   mon-client); versions in `inventories/<profile>/group_vars/all/main.yml`.
+   mon-client); versions and `front_mode` (`only443`, the default) in `inventories/<profile>/group_vars/all/main.yml`.
+   With only443 every box needs its address reachable from the internet on 80 (Let's Encrypt IP certificates through
+   nginx's webroot) and 443, and must not be behind NAT.
 5. **Wipe**, then **converge**; `site.yml` ends with `verify.yml`:
    ```sh
    ansible-playbook -i inventories/stand-full wipe.yml -e wipe_confirm=yes --ask-vault-pass
@@ -618,11 +711,22 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify
    ```
    A fresh panel gets new inbounds (`panel_inbounds`, with new Reality and AWG keys) and a new chain
    registry, so clients' subscriptions from before the wipe are dead. Keep the output of both runs if the run is the resolution of a ticket.
-6. **Verify alone**, any time later (read-only):
+   The order inside `site.yml` is the [convergence order](#front-only-443): the panel behind its front, then every hop
+   from the panel outward, each waiting for its front report, then mon-server on 443.
+6. **Verify alone**, any time later (read-only; with only443 it costs the controller one miss in the front's fail2ban
+   probe jail, see [Front: only 443](#front-only-443)):
    ```sh
    ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass
    ```
+7. **Admin access** to the panel's pages from then on: through an SSH tunnel, `ssh -L <panel_port>:127.0.0.1:<panel_port>
+   real`, then `https://127.0.0.1:<panel_port><panel_base_path>`.
 
+**An existing stand to «only 443»** (no wipe): bump `xui_version` to `v1.9.0-chain.10` (or later) and rerun `site.yml`.
+The panel is reinstalled with its database, the VLESS inbound moves to XHTTP in place (its clients keep their ids and
+subIds), the panel goes behind its front, every hop re-joins with `PROXY_FRONT=only443` from the panel outward, and
+mon-server moves to 443. Between the panel's front coming up and a hop's reinstall that hop's wave is stale (it still
+polls 2096): a few minutes without chain updates, while its relay keeps carrying traffic. Clients refresh their
+subscription for the new links.
 **Version upgrade** (no wipe): bump `xui_version` and/or `mon_version` (and `mon_xray_version` in
 `group_vars/monclient.yml`) in the profile, then rerun `site.yml`. The panel is reinstalled on the new tag
 with its database kept, every hop re-joins with the new version (keeping its LE certificate), mon-server
@@ -637,7 +741,9 @@ IP address) in 7 days.
 - mon-server uses LE staging by default (`acme_production: false`; the mon-client trusts the staging
   roots). With `acme_production: true` it counts against the same 5-per-7-days limit, which is why
   `wipe.yml` keeps mon-server's certificates unless `-e monserver_wipe_certs=true`.
-- The panel uses its own self-signed certificate: no LE.
+- The panel's own port uses a self-signed certificate: no LE. Behind the only443 front the panel box gets a production
+  LE IP certificate too (`/root/cert/ip`, what the front's HTTP side and mon-server use); like a hop's it is issued once
+  and kept by `site.yml` and `wipe.yml` while valid for the address.
 
 ## Development
 
@@ -650,7 +756,10 @@ install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, ne
 certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
 neighbour target with `tests/hop/fake_neighbour.py` in place of the scanner and the handshake check — found
 and written before `setActive`, a stored target kept without a scan or rescanned when its check fails, the
-fallback with a warning and a rescan on every run, the override, its refusals, check mode; the
+fallback with a warning and a rescan on every run, the override, its refusals, check mode; the «only 443» front
+(`PROXY_FRONT`, the innermost hop polling the panel on 443, the edge installed after its inner neighbour reported its
+front, a converged chain moved behind the front with re-joins only, a front that does not report stopping the run,
+`hop_tls` refused without the IP certificate, verify requiring 443/https in the registry); the
 panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
 wrong, and the neighbour target warnings; `tests/hop/test_neighbour_script.py`: `neighbour.py` against a fake
 RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois and a fake xray — the address list and
@@ -659,8 +768,22 @@ pinned download; `tests/panel/test_panel_inbounds.py`: role panel's inbounds wit
 the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
 idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
 field updated without re-keying, port and enable, the AWG server switched off by hand, unlisted inbounds
-left alone, check mode, refusals, no private key or cookie in `-vvv` output; and the targets play of
+left alone, check mode, refusals, no private key or cookie in `-vvv` output, the TCP + Vision inbound migrated to
+XHTTP in place (keys, client ids/emails/subIds kept, Vision flow cleared, `tcpSettings` dropped), `followChain` taking
+the active edge's neighbour and not fought afterwards, the flag waiting for a neighbour target; and the targets play of
 `verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target;
+`tests/panel/test_panel_front.py`: the «only 443» front against the same mock and local fakes — only443 applied
+with subscriptions/panel behind 443, the firewall and 80 kept in `firewallExtra`, then confirmed, idempotent, the
+relocated inbound left alone by the inbounds converge, the owner's firewall ports kept, blockers refused, a pending
+confirmation confirmed, warnings shown, check mode, `front_mode: off`; `webListen`/`chainPanelHost` through the
+whole settings form with a restart only for a new listen address; the LE IP certificate through a fake acme.sh and
+x-ui (installer, acme-front before the issue, webroot/shortlived flags, reuse while valid for the address, reissue
+for another address or an expiring one, check mode); `panel_url`/`panel_ca_pem` behind the front;
+`tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
+`panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
+`tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
+open, an old port still answering, a closed front, a closed ACME port (warning), the panel UI answering on the front,
+a failing API login;
 `tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
 the certificate flags, a repeated wipe and a bare box with `changed=0`, one group by tag; and checks that
 `wipe.yml` refuses without confirmation. The mon-server/mon-client plays of `verify.yml` have no mock and
@@ -675,7 +798,8 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
   python3 tests/hop/test_neighbour_script.py &&
   python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
-  python3 tests/wipe/test_wipe.py'
+  python3 tests/panel/test_panel_front.py && python3 tests/monserver/test_settings.py &&
+  python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py'
 ```
 
 ## License

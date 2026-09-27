@@ -53,8 +53,11 @@
         argv: [bash, "{{ panel_install_script }}", "{{ panel_version }}"]
         chdir: /root
         stdin: "{{ ['N', 'n', '3', '', panel_cert_file, panel_key_file] | join('\n') }}"
-      environment:
-        XUI_REPO: "{{ panel_repo }}"
+      # With only443 the panel's pages stay on the loopback from the start (XUI_WEB_LISTEN, which also skips its
+      # prompt) and fail2ban comes along for the front's jails (XUI_FAIL2BAN).
+      environment: >-
+        {{ {'XUI_REPO': panel_repo}
+           | combine({'XUI_WEB_LISTEN': panel_web_listen, 'XUI_FAIL2BAN': '1'} if panel_front_mode == 'only443' else {}) }}
       timeout: "{{ panel_install_timeout | int }}"
       register: panel_install
       changed_when: true

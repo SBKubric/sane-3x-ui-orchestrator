@@ -47,19 +47,26 @@
   no_log: true
   when: hop_entry | length == 0
 
+- name: "Compare host, sub port and scheme with the registry: {{ hop_item.name }}"
+  ansible.builtin.set_fact:
+    hop_registry_update: >-
+      {{ {}
+         | combine({'host': hop_item.host} if hop_entry.host != hop_item.host else {})
+         | combine({'subPort': hop_item.sub_port | int}
+                   if hop_item.front_mode == 'off' and hop_entry.subPort | int != hop_item.sub_port | int else {})
+         | combine({'subScheme': hop_item.sub_scheme}
+                   if hop_item.front_mode == 'off' and hop_entry.subScheme != hop_item.sub_scheme else {}) }}
+
+# Behind the front the box reports its sub port and scheme (443/https) itself: only the host is the inventory's.
 - name: "Update host, sub port or scheme in the registry: {{ hop_item.name }}"
   ansible.builtin.include_tasks: api.yml
   vars:
     hop_api_path: "update/{{ hop_entry.id }}"
     hop_api_method: POST
-    hop_api_body: >-
-      {{ {}
-         | combine({'host': hop_item.host} if hop_entry.host != hop_item.host else {})
-         | combine({'subPort': hop_item.sub_port | int} if hop_entry.subPort | int != hop_item.sub_port | int else {})
-         | combine({'subScheme': hop_item.sub_scheme} if hop_entry.subScheme != hop_item.sub_scheme else {}) }}
+    hop_api_body: "{{ hop_registry_update }}"
   when:
     - hop_item.action == 'rejoin'
-    - hop_entry.host != hop_item.host or hop_entry.subPort | int != hop_item.sub_port | int or hop_entry.subScheme != hop_item.sub_scheme
+    - hop_registry_update | length > 0
 
 - name: "Reissue the join token: {{ hop_item.name }}"
   ansible.builtin.include_tasks: api.yml
@@ -106,3 +113,41 @@
          | map(attribute='state') | first | default('?') }}); see the install output above and
       `x-ui chain status` / `journalctl -u x-ui` on {{ hop_item.inventory_host }}.
     quiet: true
+
+# The convergence order behind the front: a hop's front report reaches the panel with its first poll (an edge's
+# through its inner neighbour's), and moves it to 443/https in the registry. Only then is the next hop outward
+# installed, so it dials 443; the box keeps its old sub port open until every outer neighbour has done so.
+- name: "Wait for the front report: {{ hop_item.name }}"
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/chain/list"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+  register: hop_front_wait
+  until: >-
+    (hop_front_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name)
+     | map(attribute='subPort') | first | default(0) | int) == 443
+    and (hop_front_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name)
+         | map(attribute='subScheme') | first | default('')) == 'https'
+  retries: "{{ hop_front_retries | int }}"
+  delay: "{{ hop_front_delay | int }}"
+  failed_when: false
+  no_log: true
+  when: hop_item.front_mode == 'only443'
+
+- name: "Require the front report: {{ hop_item.name }}"
+  ansible.builtin.assert:
+    that:
+      - hop_front_entry.subPort | default(0) | int == 443
+      - hop_front_entry.subScheme | default('') == 'https'
+    fail_msg: >-
+      {{ hop_item.name }} has not reported its front (registry: {{ hop_front_entry.subPort | default('?') }}/{{
+      hop_front_entry.subScheme | default('?') }}, want 443/https) within {{ hop_front_retries | int * hop_front_delay | int }}s;
+      the next hop outward would dial a port the front closes. On {{ hop_item.inventory_host }}: `journalctl -u x-ui | grep front`
+      (the front needs the IP certificate in /root/cert/ip and nginx with the stream module), `x-ui chain status`.
+    success_msg: "front of {{ hop_item.name }}: 443/https in the registry"
+  vars:
+    hop_front_entry: "{{ hop_front_wait.json.obj.hops | default([], true) | selectattr('name', 'equalto', hop_item.name) | first | default({}) }}"
+  when: hop_item.front_mode == 'only443'

@@ -7,9 +7,17 @@ HTTP 200 + success false + "<code>: <detail>", strict JSON bodies (unknown field
 0-based inner positions compacted after every change, next hops re-chained (inner N -> N-1, edges -> last
 joined inner), pending/joined/legacy/draining, one-time join tokens, setActive and del refusals, draining of a
 hop with live outer neighbours, an edge's neighbour target (realityTarget/realityServerName, validated like
-web/service/chain_follow.go neighbourTarget, refused on an inner hop). Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box),
-GET /test/state, POST /test/reset, GET /install.sh (the fake installer), and for the panel part
-POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
+web/service/chain_follow.go neighbourTarget, refused on an inner hop) and the chain-following inbounds that take it
+(followChain: rewritten on setActive, on a save while an edge is active, refused without a neighbour target).
+Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box), POST /test/front (a box's front report),
+POST /test/chain/update (a registry update by hop name), GET /test/state, POST /test/reset, GET /install.sh (the fake
+installer), and for the panel part POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
+
+The panel part also has the front's settings (panel/api/nginx/settings|plan|apply|confirm|status, web/service/
+nginx_service.go, nginx_apply.go, nginx_confirm.go): apply moves the routed inbounds to the loopback (listen
+127.0.0.1, publicPort 443, no PROXY header for Reality) and arms the 2-minute confirmation when it closes ports,
+confirm clears it; and the settings form (panel/setting/all|update: update takes the whole form, a key left out
+is zeroed). Test hooks: POST /test/panel/nginx (seed settings, blockers, warnings, a pending confirmation).
 """
 
 import ipaddress
@@ -57,13 +65,14 @@ class Registry:
             hop["position"] = seed.get("position", 0)
             hop["realityTarget"] = seed.get("realityTarget", "")
             hop["realityServerName"] = seed.get("realityServerName", "")
+            hop["frontMode"] = seed.get("frontMode", "off")
             self.hops.append(hop)
         self._reconcile()
 
     def _new_hop(self, name, host, role, sub_port, sub_scheme):
         hop = {"id": self.next_id, "name": name, "host": host, "role": role, "nextHopId": None, "position": 0,
                "subPort": sub_port, "subScheme": sub_scheme, "state": "pending", "isActive": False,
-               "realityTarget": "", "realityServerName": "",
+               "realityTarget": "", "realityServerName": "", "frontMode": "off",
                "drainRevision": 0, "drainUntil": 0, "joinTokenExpires": 0, "observedAddr": "", "joinedAt": 0,
                "lastSeenAt": 0, "lastRevision": 0, "createdAt": 0, "updatedAt": 0}
         self.next_id += 1
@@ -195,6 +204,8 @@ class Registry:
             if target and hop["role"] != "edge":
                 raise Refusal("reality_target_edge_only", f"{hop['name']!r} is an {hop['role']} front")
             if (target, server_name) != (hop["realityTarget"], hop["realityServerName"]):
+                if hop["isActive"]:
+                    self.panel.follow_edge(dict(hop, realityTarget=target, realityServerName=server_name))
                 hop["realityTarget"], hop["realityServerName"], changed = target, server_name, True
         for field in ("name", "host", "subPort", "subScheme"):
             if field in body and body[field] != hop[field]:
@@ -220,6 +231,7 @@ class Registry:
             raise Refusal("hop_not_joined", f"{hop['name']} is {hop['state']}")
         if hop["isActive"]:
             return
+        self.panel.follow_edge(hop)
         for other in self.hops:
             other["isActive"] = False
         hop["isActive"] = True
@@ -278,9 +290,9 @@ PROBE_PREFIX = "probe-"
 INBOUND_FIELDS = {"id": int, "up": int, "down": int, "total": int, "allTime": int, "remark": str, "enable": bool,
                   "expiryTime": int, "trafficReset": str, "lastTrafficResetTime": int, "clientStats": list,
                   "listen": str, "port": int, "protocol": str, "settings": str, "streamSettings": str, "tag": str,
-                  "sniffing": str, "publicPort": int}
+                  "sniffing": str, "publicPort": int, "followChain": bool}
 UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "trafficReset", "listen", "port", "protocol",
-                 "settings", "streamSettings", "sniffing")
+                 "settings", "streamSettings", "sniffing", "followChain")
 AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
               "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str}
 
@@ -319,10 +331,23 @@ class Panel:
         self.registry = registry
         self.reset({})
 
+    NGINX_DEFAULTS = {"mode": "shared", "domain": "", "stubSiteId": 0, "subsBehind443": False, "panelBehind443": False,
+                      "manageFirewall": False, "firewallExtra": "", "realityPort": 8443, "httpPort": 0}
+    SETTINGS_DEFAULTS = {"webListen": "", "webDomain": "", "webPort": 2053, "webCertFile": "/etc/x-ui/tls/panel.crt",
+                         "webKeyFile": "/etc/x-ui/tls/panel.key", "webBasePath": "/base/", "sessionMaxAge": 360,
+                         "tgBotEnable": False, "tgBotToken": "", "tgBotChatId": "", "subEnable": True, "subPort": 2096,
+                         "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
+                         "timeLocation": "Local", "externalTrafficInformEnable": False}
+
     def reset(self, seed):
+        self.nginx = dict(self.NGINX_DEFAULTS, **seed.get("nginx", {}))
+        self.nginx_blockers = []
+        self.nginx_warnings = []
+        self.confirm_deadline = 0
+        self.settings = dict(self.SETTINGS_DEFAULTS, **seed.get("settings", {}))
         self.inbounds = []
         self.next_id = 1
-        self.x25519 = []
+        self.x25519 = list(seed.get("x25519", []))
         self.targets = seed.get("targets")
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
@@ -335,7 +360,7 @@ class Panel:
         record = {"id": self.next_id, "up": 0, "down": 0, "total": 0, "allTime": 0, "remark": "", "enable": True,
                   "expiryTime": 0, "trafficReset": "never", "lastTrafficResetTime": 0, "clientStats": [],
                   "listen": "", "port": 0, "protocol": "", "settings": "", "streamSettings": "", "tag": "",
-                  "sniffing": "", "publicPort": 0}
+                  "sniffing": "", "publicPort": 0, "followChain": False}
         record.update(inbound)
         record["id"] = self.next_id
         if not record["tag"]:
@@ -376,6 +401,45 @@ class Panel:
             client.setdefault("updated_at", before.get("updated_at", 1790000000000))
         return json.dumps(parsed, indent=2)
 
+    @staticmethod
+    def _neighbour_stream(stream_settings, edge):
+        """withNeighbourTarget: target and strict serverNames of the edge's neighbour, a legacy dest dropped."""
+        stream = json.loads(stream_settings or "{}")
+        if stream.get("security") != "reality":
+            raise Refusal("follow_chain_not_reality", f"security is {stream.get('security')!r}, not reality")
+        name = edge["realityServerName"] or edge["realityTarget"].rpartition(":")[0]
+        reality = stream.setdefault("realitySettings", {})
+        reality["target"] = edge["realityTarget"]
+        reality.pop("dest", None)
+        reality["serverNames"] = [name]
+        if isinstance(reality.get("settings"), dict):
+            reality["settings"]["serverName"] = name
+        return json.dumps(stream, indent=2)
+
+    def _active_edge(self):
+        return next((h for h in self.registry.hops if h["isActive"]), None)
+
+    def prepare_follower(self, body):
+        """PrepareFollower: a flagged inbound must be Reality and takes the active edge's neighbour on every save."""
+        if not body.get("followChain"):
+            return
+        if json.loads(body.get("streamSettings") or "{}").get("security") != "reality":
+            raise Refusal("follow_chain_not_reality", f"inbound {body.get('remark')!r} cannot follow the chain")
+        edge = self._active_edge()
+        if edge is None:
+            return
+        if not edge["realityTarget"]:
+            raise Refusal("no_neighbour_target", f"the active edge {edge['name']!r} has no neighbour target")
+        body["streamSettings"] = self._neighbour_stream(body.get("streamSettings"), edge)
+
+    def follow_edge(self, edge):
+        """followEdgeTx: every flagged inbound takes the edge's neighbour; refused without one."""
+        followers = [i for i in self.inbounds if i.get("followChain")]
+        if followers and not edge["realityTarget"]:
+            raise Refusal("no_neighbour_target", f"{edge['name']!r} has no neighbour target")
+        for inbound in followers:
+            inbound["streamSettings"] = self._neighbour_stream(inbound["streamSettings"], edge)
+
     def _port_taken(self, port, own_id=0):
         return any(i["port"] == port and i["id"] != own_id and i["protocol"] != "amneziawg" for i in self.inbounds)
 
@@ -392,6 +456,7 @@ class Panel:
             raise Refusal("probe_email", "email is reserved for monitoring probes")
         if self._port_taken(body.get("port", 0)):
             raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
+        self.prepare_follower(body)
         body["tag"] = f"inbound-{body.get('port', 0)}"
         body["settings"] = self._reserialize(body.get("settings", ""))
         record = self._store(body)
@@ -400,6 +465,7 @@ class Panel:
 
     def update(self, inbound_id, raw):
         body = bind(raw, INBOUND_FIELDS)
+        self.prepare_follower(body)
         old = self.load(inbound_id)
         if self._port_taken(body.get("port", 0), inbound_id):
             raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
@@ -451,9 +517,76 @@ class Panel:
                                                         "flow": "", "subId": "probe-sub", "comment": "monitoring probe"})
             inbound["settings"] = self._reserialize(json.dumps(settings), inbound["settings"])
 
+    # --- the front (nginx) -----------------------------------------------------------------------------
+    def _routes(self):
+        """collectRoutes: enabled VLESS Reality inbounds are what the front can route by server name."""
+        return [i for i in self.inbounds if i["enable"] and i["protocol"] == "vless"
+                and json.loads(i["streamSettings"] or "{}").get("security") == "reality"]
+
+    @staticmethod
+    def _closes_ports(nginx):
+        return nginx["mode"] == "only443" and nginx["manageFirewall"]
+
+    @staticmethod
+    def _normalized(nginx):
+        """GetSettings: off drops every switch, shared drops the panel and the firewall."""
+        out = dict(nginx)
+        if out["mode"] in ("off", ""):
+            out.update(subsBehind443=False, panelBehind443=False, manageFirewall=False)
+        elif out["mode"] == "shared":
+            out.update(panelBehind443=False, manageFirewall=False)
+        return out
+
+    def nginx_settings(self):
+        return self._normalized(self.nginx)
+
+    def nginx_plan(self, raw):
+        body = bind(raw, {"mode": str, "domain": str, "stubSiteId": int, "subsBehind443": bool, "panelBehind443": bool,
+                          "manageFirewall": bool, "firewallExtra": str, "realityPort": int, "httpPort": int})
+        blockers = list(self.nginx_blockers)
+        if body.get("mode") != "off" and not self._routes():
+            blockers.append({"code": "nothingToRoute"})
+        return {"mode": body.get("mode", ""), "changes": [], "blockers": blockers, "warnings": list(self.nginx_warnings)}
+
+    def nginx_apply(self, raw):
+        body = bind(raw, {"mode": str, "domain": str, "stubSiteId": int, "subsBehind443": bool, "panelBehind443": bool,
+                          "manageFirewall": bool, "firewallExtra": str, "realityPort": int, "httpPort": int})
+        if body.get("mode") not in ("off", "shared", "only443"):
+            raise Refusal("invalid_request", f"unknown mode {body.get('mode')!r}")
+        previous = self.nginx_settings()
+        wanted = self._normalized(dict(self.NGINX_DEFAULTS, **body))
+        if wanted["mode"] != "off":
+            if not self._routes():
+                raise Refusal("nothing_to_route", "no inbound can be routed by server name")
+            for inbound in self._routes():
+                stream = json.loads(inbound["streamSettings"])
+                stream.setdefault("sockopt", {})["acceptProxyProtocol"] = False
+                inbound.update(listen="127.0.0.1", publicPort=443, streamSettings=json.dumps(stream, indent=2))
+        self.nginx = wanted
+        if self._closes_ports(wanted) and (not self._closes_ports(previous)
+                                           or (wanted["panelBehind443"] and not previous["panelBehind443"])):
+            self.confirm_deadline = 1790000120000
+
+    def nginx_confirm(self):
+        self.confirm_deadline = 0
+
+    def nginx_status(self):
+        nginx = self.nginx_settings()
+        return {"installed": True, "running": True, "mode": nginx["mode"], "domain": nginx["domain"],
+                "firewallOn": self._closes_ports(nginx), "confirmDeadline": self.confirm_deadline,
+                "ipCertFile": "/root/cert/ip/fullchain.pem", "publicPort": 443, "routes": [],
+                "warnings": list(self.nginx_warnings)}
+
+    # --- the settings form ------------------------------------------------------------------------------
+    def update_settings(self, raw):
+        body = json.loads(raw or "{}")
+        # UpdateAllSetting saves every field of the form: one left out goes back to its zero value.
+        self.settings = {key: body.get(key, type(value)()) for key, value in self.settings.items()}
+
     def state(self):
         return {"inbounds": [dict(i) for i in self.inbounds], "awg": dict(self.awg), "ports": self.ports(),
-                "x25519": list(self.x25519)}
+                "x25519": list(self.x25519), "nginx": dict(self.nginx), "confirmDeadline": self.confirm_deadline,
+                "settings": dict(self.settings)}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
@@ -530,8 +663,29 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/test/panel/ensure":
                 reg.panel.ensure()
                 return self._send(200, {"ok": True})
+            if path == "/test/panel/nginx":
+                seed = json.loads(raw or "{}")
+                reg.panel.nginx.update(seed.get("settings", {}))
+                reg.panel.nginx_blockers = seed.get("blockers", [])
+                reg.panel.nginx_warnings = seed.get("warnings", [])
+                reg.panel.confirm_deadline = seed.get("confirmDeadline", reg.panel.confirm_deadline)
+                return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
+                return self._send(200, {"ok": True})
+            if path == "/test/chain/update":
+                body = json.loads(raw)
+                hop = next(h for h in reg.hops if h["name"] == body.pop("name"))
+                reg.update(hop["id"], body)
+                return self._send(200, {"ok": True})
+            if path == "/test/front":
+                # RecordFront: the box's report moves its sub port and scheme, and the revision with them.
+                body = json.loads(raw)
+                hop = next(h for h in reg.hops if h["name"] == body["name"])
+                hop["frontMode"] = body["mode"]
+                if (hop["subPort"], hop["subScheme"]) != (body["subPort"], body["subScheme"]):
+                    hop["subPort"], hop["subScheme"] = body["subPort"], body["subScheme"]
+                    reg.revision += 1
                 return self._send(200, {"ok": True})
             if path == "/test/join":
                 body = json.loads(raw)
@@ -547,6 +701,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"success": False, "msg": "wrong username or password", "obj": None})
                 return self._send(200, {"success": True, "msg": "", "obj": None},
                                   headers={"Set-Cookie": COOKIE + "; Path=/base/; HttpOnly"})
+            if path.startswith(BASE + "panel/setting/") and COOKIE in (self.headers.get("Cookie") or ""):
+                route = path[len(BASE + "panel/setting/"):]
+                reg.calls.append({"method": method, "path": "setting/" + route, "body": raw})
+                if method == "POST" and route == "all":
+                    return self._send(200, {"success": True, "msg": "", "obj": dict(reg.panel.settings)})
+                if method == "POST" and route == "update":
+                    reg.panel.update_settings(raw)
+                    return self._send(200, {"success": True, "msg": "", "obj": None})
+                return self._send(404, None, raw=b"404 page not found")
             prefix = BASE + "panel/api/"
             if not path.startswith(prefix) or COOKIE not in (self.headers.get("Cookie") or ""):
                 return self._send(404, None, raw=b"404 page not found")
@@ -595,6 +758,16 @@ class Handler(BaseHTTPRequestHandler):
             return panel.new_x25519()
         if method == "GET" and route == "awg/server":
             return dict(panel.awg)
+        if method == "GET" and route == "nginx/settings":
+            return panel.nginx_settings()
+        if method == "GET" and route == "nginx/status":
+            return panel.nginx_status()
+        if method == "POST" and route == "nginx/plan":
+            return panel.nginx_plan(raw)
+        if method == "POST" and route == "nginx/apply":
+            return panel.nginx_apply(raw)
+        if method == "POST" and route == "nginx/confirm":
+            return panel.nginx_confirm()
         if method == "GET" and route == "monitoring/targets":
             if panel.targets is None:
                 raise Refusal("monitoring_off", "no targets seeded")

@@ -8,27 +8,85 @@
 #              client timestamps, the monitoring probe client it adds).
 #   amneziawg  add: POST inbounds/add, a bare record on the AWG server's port (peers live in the AWG tables).
 #              Existing: only enable is converged (POST inbounds/setEnable/<id>); the port follows the server.
+# followChain (panel_inbounds_active_edge from inbounds.yml): with an active edge that has a neighbour target the panel
+# owns realitySettings target/dest/serverNames and settings.serverName of a flagged inbound, so they are left out of the
+# comparison; with an active edge without one the panel refuses the flag, which then waits (panel_inbound_eff is the
+# entry as it can be converged in this pass).
 - name: "Find the inbound in the panel: {{ panel_inbound.remark }}"
   ansible.builtin.set_fact:
     panel_inbound_entry: "{{ panel_inbounds_current | selectattr('remark', 'equalto', panel_inbound.remark) | first | default({}) }}"
     panel_inbound_awg: "{{ panel_inbound.protocol == 'amneziawg' }}"
+  no_log: true
+
+- name: "Resolve what the chain owns: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
+    panel_inbound_follow_waits: "{{ panel_inbound_follow_waits_ }}"
+    panel_inbound_eff: >-
+      {%- set e = panel_inbound | combine({'followChain': false} if panel_inbound_follow_waits_ else {}) -%}
+      {%- if panel_inbound_chain_owns_ and e.streamSettings is defined and e.streamSettings.realitySettings is defined -%}
+      {%-   set rs = e.streamSettings.realitySettings -%}
+      {%-   set rs_kept = rs | dict2items | rejectattr('key', 'in', ['target', 'dest', 'serverNames']) | items2dict -%}
+      {%-   if rs.settings is defined and rs.settings is mapping -%}
+      {%-     set rs_kept = rs_kept | combine({'settings': rs.settings | dict2items | rejectattr('key', 'equalto', 'serverName') | items2dict}) -%}
+      {%-   endif -%}
+      {%-   set e = e | combine({'streamSettings': e.streamSettings | combine({'realitySettings': rs_kept})}) -%}
+      {%- endif -%}
+      {{ e }}
+  vars:
+    panel_inbound_follow_: "{{ panel_inbound.followChain | default(false) | bool }}"
+    panel_inbound_edge_: "{{ panel_inbounds_active_edge | default({}) }}"
+    panel_inbound_follow_waits_: >-
+      {{ panel_inbound_follow_ and panel_inbound_edge_ | length > 0
+         and panel_inbound_edge_.realityTarget | default('', true) | length == 0
+         and not (panel_inbound_entry.followChain | default(false) | bool) }}
+    panel_inbound_chain_owns_: >-
+      {{ panel_inbound_follow_ and panel_inbound_entry | length > 0 and panel_inbound_edge_ | length > 0
+         and panel_inbound_edge_.realityTarget | default('', true) | length > 0 }}
+  no_log: true
+
+- name: "Warn that the chain flag waits: {{ panel_inbound.remark }}"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: followChain of {{ panel_inbound.remark }} waits for a neighbour target of the active edge
+      {{ panel_inbounds_active_edge.name }} (the panel refuses the flag without one); role hop writes it, and the
+      inbounds run again after the hops play.
+  when: panel_inbound_follow_waits | bool
+
+- name: "Choose the managed top-level fields: {{ panel_inbound.remark }}"
+  ansible.builtin.set_fact:
     # Top-level fields the entry manages: enable always (default true), the rest when declared; the AWG
     # inbound's port belongs to the server.
     panel_inbound_top: >-
-      {{ {'enable': true} | combine(panel_inbound | dict2items
+      {{ {'enable': true} | combine(panel_inbound_eff | dict2items
          | selectattr('key', 'in', ['enable'] if panel_inbound.protocol == 'amneziawg'
-                                   else ['port', 'enable', 'listen', 'total', 'expiryTime', 'trafficReset'])
+                                   else ['port', 'enable', 'listen', 'total', 'expiryTime', 'trafficReset', 'followChain'])
          | items2dict) }}
   no_log: true
 
 - name: "Compare with the panel: {{ panel_inbound.remark }}"
   ansible.builtin.set_fact:
     panel_inbound_have: "{{ panel_inbound_have_blobs }}"
+    # A declared network drops the settings of the other transports; a VLESS client's Vision flow goes with TCP.
     panel_inbound_want: >-
       {%- set want = {} -%}
+      {%- set declared = panel_inbound_eff.streamSettings | default({}) -%}
       {%- for blob in ['settings', 'streamSettings', 'sniffing'] -%}
-      {%-   set _ = want.update({blob: panel_inbound_have_blobs[blob] | combine(panel_inbound[blob] | default({}), recursive=true)}) -%}
+      {%-   set base = panel_inbound_have_blobs[blob] -%}
+      {%-   if blob == 'streamSettings' and declared.network is defined -%}
+      {%-     set base = base | dict2items
+                          | rejectattr('key', 'in', panel_inbound_transport_keys | reject('in', declared.keys() | list) | list)
+                          | items2dict -%}
+      {%-   endif -%}
+      {%-   set _ = want.update({blob: base | combine(panel_inbound_eff[blob] | default({}), recursive=true)}) -%}
       {%- endfor -%}
+      {%- if panel_inbound.protocol == 'vless' and want.streamSettings.network | default('tcp') not in ['tcp', 'raw']
+            and want.settings.clients is defined and want.settings.clients is sequence and want.settings.clients is not string -%}
+      {%-   set clients = [] -%}
+      {%-   for c in want.settings.clients -%}
+      {%-     set _ = clients.append(c | combine({'flow': ''}) if c is mapping and c.flow | default('') | length > 0 else c) -%}
+      {%-   endfor -%}
+      {%-   set _ = want.update({'settings': want.settings | combine({'clients': clients})}) -%}
+      {%- endif -%}
       {{ want }}
   vars:
     panel_inbound_have_blobs: >-
@@ -76,11 +134,11 @@
 - name: "Check for Reality: {{ panel_inbound.remark }}"
   ansible.builtin.set_fact:
     panel_inbound_reality_keys: >-
-      {{ (panel_inbound.streamSettings | default({})).security | default('') == 'reality'
-         and ((panel_inbound.streamSettings.realitySettings | default({})).privateKey | default('') | length == 0) }}
+      {{ (panel_inbound_eff.streamSettings | default({})).security | default('') == 'reality'
+         and ((panel_inbound_eff.streamSettings.realitySettings | default({})).privateKey | default('') | length == 0) }}
     panel_inbound_reality_short_ids: >-
-      {{ (panel_inbound.streamSettings | default({})).security | default('') == 'reality'
-         and (panel_inbound.streamSettings.realitySettings | default({})).shortIds is not defined }}
+      {{ (panel_inbound_eff.streamSettings | default({})).security | default('') == 'reality'
+         and (panel_inbound_eff.streamSettings.realitySettings | default({})).shortIds is not defined }}
 
 # Check mode stops at the plan: the API writes cannot be simulated.
 - name: "Add the inbound: {{ panel_inbound.remark }}"
@@ -105,11 +163,12 @@
               'enable': panel_inbound.enable | default(true), 'listen': panel_inbound.listen | default(''),
               'total': panel_inbound.total | default(0), 'expiryTime': panel_inbound.expiryTime | default(0),
               'trafficReset': panel_inbound.trafficReset | default('never'),
+              'followChain': panel_inbound_eff.followChain | default(false) | bool,
               'settings': ({'clients': []} | combine(panel_inbound.settings | default({}), recursive=true)) | to_json,
               'streamSettings': panel_inbound_stream | to_json if panel_inbound_stream | length > 0 else '',
               'sniffing': panel_inbound.sniffing | default(panel_inbound_default_sniffing) | to_json} }}
         panel_inbound_stream: >-
-          {{ panel_inbound.streamSettings | default({})
+          {{ panel_inbound_eff.streamSettings | default({})
              | combine({'realitySettings': {'privateKey': panel_call.obj.privateKey, 'settings': {'publicKey': panel_call.obj.publicKey}}}
                        if panel_inbound_reality_keys | bool else {}, recursive=true)
              | combine({'realitySettings': {'shortIds': ['%016x' | format(18446744073709551615 | random)]}}
@@ -120,10 +179,12 @@
   vars:
     panel_call_path: "inbounds/update/{{ panel_inbound_entry.id }}"
     panel_call_method: POST
-    # The whole inbound as the panel has it (the update copies every field), with the managed fields replaced.
+    # The whole inbound as the panel has it (the update copies every field, followChain included: left out, it
+    # would unflag the inbound), with the managed fields replaced.
     panel_call_body: >-
       {%- set body = panel_inbound_entry | dict2items | selectattr('key', 'in', ['up', 'down', 'total', 'remark', 'enable', 'expiryTime',
-                       'trafficReset', 'lastTrafficResetTime', 'listen', 'port', 'protocol', 'settings', 'streamSettings', 'sniffing'])
+                       'trafficReset', 'lastTrafficResetTime', 'listen', 'port', 'protocol', 'followChain', 'settings',
+                       'streamSettings', 'sniffing'])
                      | items2dict | combine(panel_inbound_top) -%}
       {%- for blob in ['settings', 'streamSettings', 'sniffing'] -%}
       {%-   if panel_inbound_want[blob] != panel_inbound_have[blob] -%}

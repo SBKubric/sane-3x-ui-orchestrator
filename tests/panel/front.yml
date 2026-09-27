@@ -1,0 +1,16 @@
+---
+# One task file of role panel's only443 front (tasks_from: panel_test_tasks) against mock_panel.py and local fakes
+# (see test_panel_front.py).
+- name: Panel front
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Run the task file under test
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: "{{ panel_test_tasks }}"
+
+    - name: Show the panel facts
+      ansible.builtin.debug:
+        msg: "panel_url={{ panel_url }} panel_ca_pem={{ panel_ca_pem | length }} chars"
+      when: panel_test_tasks == 'facts'
