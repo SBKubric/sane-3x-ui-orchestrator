@@ -1,4 +1,4 @@
-"""Test double of the 3ax-ui panel API (SBKubric/sane-3x-ui v1.9.0-chain.5), for tests of roles hop and panel:
+"""Test double of the 3ax-ui panel API (SBKubric/sane-3x-ui v1.9.0-chain.8), for tests of roles hop and panel:
 the chain registry (web/controller/chain_controller.go, web/service/chain_service.go) and, for role panel's
 inbounds, the inbound API, the AmneziaWG server and the monitoring page data (see Panel below).
 
@@ -6,11 +6,13 @@ It keeps the parts the role depends on: the login cookie, the {success, msg, obj
 HTTP 200 + success false + "<code>: <detail>", strict JSON bodies (unknown fields and wrong types are HTTP 400),
 0-based inner positions compacted after every change, next hops re-chained (inner N -> N-1, edges -> last
 joined inner), pending/joined/legacy/draining, one-time join tokens, setActive and del refusals, draining of a
-hop with live outer neighbours. Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box),
+hop with live outer neighbours, an edge's neighbour target (realityTarget/realityServerName, validated like
+web/service/chain_follow.go neighbourTarget, refused on an inner hop). Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box),
 GET /test/state, POST /test/reset, GET /install.sh (the fake installer), and for the panel part
 POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
 """
 
+import ipaddress
 import json
 import secrets
 import threading
@@ -53,12 +55,15 @@ class Registry:
             hop["state"] = seed.get("state", "joined")
             hop["isActive"] = seed.get("isActive", False)
             hop["position"] = seed.get("position", 0)
+            hop["realityTarget"] = seed.get("realityTarget", "")
+            hop["realityServerName"] = seed.get("realityServerName", "")
             self.hops.append(hop)
         self._reconcile()
 
     def _new_hop(self, name, host, role, sub_port, sub_scheme):
         hop = {"id": self.next_id, "name": name, "host": host, "role": role, "nextHopId": None, "position": 0,
                "subPort": sub_port, "subScheme": sub_scheme, "state": "pending", "isActive": False,
+               "realityTarget": "", "realityServerName": "",
                "drainRevision": 0, "drainUntil": 0, "joinTokenExpires": 0, "observedAddr": "", "joinedAt": 0,
                "lastSeenAt": 0, "lastRevision": 0, "createdAt": 0, "updatedAt": 0}
         self.next_id += 1
@@ -108,6 +113,35 @@ class Registry:
         if sub_scheme is not None and sub_scheme not in ("http", "https"):
             raise Refusal("invalid_sub_scheme", f"{sub_scheme!r}")
 
+    @staticmethod
+    def _neighbour(target, server_name):
+        """neighbourTarget of the panel: empty = none; host:port with a port 1-65535; an address needs a name."""
+        target, server_name = (target or "").strip(), (server_name or "").strip()
+        if not target:
+            if server_name:
+                raise Refusal("invalid_reality_target", f"reality server name {server_name!r} needs a reality target")
+            return "", ""
+        host, sep, port = target.rpartition(":")
+        if not sep or not host or " " in host or "/" in host:
+            raise Refusal("invalid_reality_target", f"reality target {target!r} must be host:port")
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise Refusal("invalid_reality_target", f"reality target {target!r} has no port between 1 and 65535")
+        if not server_name:
+            try:
+                ipaddress.ip_address(host.strip("[]"))
+            except ValueError:
+                return target, ""
+            raise Refusal("invalid_reality_server_name",
+                          f"reality target {target!r} is an address; give the server name its site answers to")
+        try:
+            ipaddress.ip_address(server_name)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+        if is_ip or any(c in server_name for c in " :/"):
+            raise Refusal("invalid_reality_server_name", f"reality server name {server_name!r} must be a domain name")
+        return target, server_name
+
     def token_for(self, hop):
         token = secrets.token_hex(16)
         self.tokens[token] = hop["id"]
@@ -122,7 +156,11 @@ class Registry:
         if body.get("role") not in ("inner", "edge"):
             raise Refusal("invalid_role", repr(body.get("role")))
         self._name_free(body["name"])
+        target, server_name = self._neighbour(body.get("realityTarget"), body.get("realityServerName"))
+        if target and body["role"] != "edge":
+            raise Refusal("reality_target_edge_only", f"{body['name']!r} is an {body['role']} front")
         hop = self._new_hop(body["name"], body["host"].strip(), body["role"], sub_port, sub_scheme)
+        hop["realityTarget"], hop["realityServerName"] = target, server_name
         if hop["role"] == "inner":
             inners = self._inners()
             position = body.get("position", len(inners))
@@ -149,6 +187,15 @@ class Registry:
         if "name" in body:
             self._name_free(body["name"], hop_id)
         changed = False
+        if "realityTarget" in body or "realityServerName" in body:
+            # Update: an omitted field keeps its value; an empty realityTarget clears the server name too.
+            target = body.get("realityTarget", hop["realityTarget"])
+            server_name = body.get("realityServerName", hop["realityServerName"]) if target else ""
+            target, server_name = self._neighbour(target, server_name)
+            if target and hop["role"] != "edge":
+                raise Refusal("reality_target_edge_only", f"{hop['name']!r} is an {hop['role']} front")
+            if (target, server_name) != (hop["realityTarget"], hop["realityServerName"]):
+                hop["realityTarget"], hop["realityServerName"], changed = target, server_name, True
         for field in ("name", "host", "subPort", "subScheme"):
             if field in body and body[field] != hop[field]:
                 hop[field], changed = body[field], True
@@ -409,9 +456,11 @@ class Panel:
                 "x25519": list(self.x25519)}
 
 
-ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int}
+ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
+              "realityTarget": str, "realityServerName": str}
 UPDATE_FIELDS = {"name": str, "host": str, "subPort": int, "subScheme": str, "role": str, "position": int,
-                 "state": str, "isActive": bool, "nextHopId": int, "id": int}
+                 "state": str, "isActive": bool, "nextHopId": int, "id": int, "realityTarget": str,
+                 "realityServerName": str}
 DEL_FIELDS = {"force": bool, "skipDrain": bool}
 
 

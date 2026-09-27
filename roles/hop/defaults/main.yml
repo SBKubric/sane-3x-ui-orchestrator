@@ -13,6 +13,7 @@
 #                  inner 1 -> panel (address and sub port of a derived next hop come from the registry)
 #   hop_tls        PROXY_TLS mode for install.sh                  (default below)
 #   hop_host       public address registered in the chain         (default below)
+#   hop_reality_target, hop_reality_server_name   neighbour target of an edge, instead of the scan (see below)
 # Group inputs: xui_version (group_vars/all), panel_* from the vault (API login through role panel).
 
 hop_name: "{{ inventory_hostname }}"
@@ -99,3 +100,89 @@ hop_verify_delay: 10
 # hop_verify_tls_probe_host overrides where it is fetched from (an inventory host or localhost).
 hop_verify_tls_url: "https://{{ hop_host }}:{{ hop_sub_port }}/"
 hop_verify_tls_probe_host: ""
+
+# Neighbour target of every edge (tasks/neighbour.yml; SBKubric/sane-3x-ui ADR 0005, orchestrator#20): the site the
+# Reality inbounds that follow the chain imitate while this edge is active, kept in the chain registry
+# (realityTarget, realityServerName). Found by scanning the edge's /24 from the controller, never from a box: TLS 1.3,
+# h2, X25519, no redirect to another host, not a CDN, and a real Reality handshake through a local xray pair.
+# A stored target in the edge's /24 that still passes the handshake is kept (no scan, no write). With nothing found,
+# the fallback below is written and the run and verify.yml warn. false = leave the registry fields alone.
+hop_neighbour_enabled: true
+# Per edge, in host_vars: a target of your own instead of the scan ("host:port"; an address needs the server
+# name its site answers to). It is written as given; a failed handshake check only warns.
+hop_reality_target: ""
+hop_reality_server_name: ""
+# Known-good shared target for an edge without a neighbour (passed the xray 26.3.27 handshake in
+# SBKubric/sane-3x-ui#129). Empty server name = the target's host.
+hop_reality_fallback_target: dl.google.com:443
+hop_reality_fallback_server_name: ""
+# The scan: addresses of the edge's /24 nearest to it first (the edge itself left out), at most this many, with this
+# many parallel TLS probes and seconds each; then the best candidates get the handshake check, first pass wins.
+hop_neighbour_port: 443
+hop_neighbour_scan_limit: 254
+hop_neighbour_scan_threads: 8
+hop_neighbour_scan_timeout: 4
+hop_neighbour_confirm: 3
+# CDN filter: the candidate's AS (Team Cymru's whois, host:port; empty = skip) must not be one of these, and its
+# HTTP answer must not carry a CDN's headers (Cloudflare, Akamai, Fastly, CloudFront; see neighbour.py).
+hop_neighbour_asn_whois: whois.cymru.com:43
+hop_neighbour_cdn_asns:
+  - 13335   # Cloudflare
+  - 209242  # Cloudflare Spectrum/WARP
+  - 54113   # Fastly
+  - 20940   # Akamai
+  - 16625   # Akamai
+  - 12222   # Akamai
+  - 21342   # Akamai
+  - 32787   # Akamai (Prolexic)
+  - 35994   # Akamai
+  - 33905   # Akamai
+  - 16702   # Akamai
+  - 18680   # Akamai
+  - 18717   # Akamai
+  - 23454   # Akamai
+  - 23455   # Akamai
+  - 24319   # Akamai
+  - 34164   # Akamai
+  - 43639   # Akamai
+# The handshake check: a VLESS-Reality server with the candidate as target and a client through it, both xray on the
+# controller (loopback only); passes when every one of the tries fetches the probe URL through the tunnel.
+hop_neighbour_check_tries: 3
+hop_neighbour_probe_url: https://www.cloudflare.com/cdn-cgi/trace
+# Tools, downloaded once to the controller and checked against the pinned sha256 (linux amd64 or arm64). Set
+# hop_neighbour_scanner_bin / hop_neighbour_xray_bin to use binaries you have instead.
+hop_neighbour_cache: "{{ playbook_dir }}/.cache/neighbour"
+hop_neighbour_scanner_version: v0.2.3
+hop_neighbour_xray_version: v26.3.27
+hop_neighbour_scanner_bin: ""
+hop_neighbour_xray_bin: ""
+hop_neighbour_downloads:
+  scanner:
+    x86_64:
+      url: "https://github.com/XTLS/RealiTLScanner/releases/download/{{ hop_neighbour_scanner_version }}/RealiTLScanner-linux-amd64"
+      sha256: a55595446de9f1c2e6c5c3cd766a7320a11115947df48f101749bb62c8055592
+    aarch64:
+      url: "https://github.com/XTLS/RealiTLScanner/releases/download/{{ hop_neighbour_scanner_version }}/RealiTLScanner-linux-arm64"
+      sha256: 27bdd3e53d4391c66c8df3391d3c3fb5eb2dc356125f2fb33ac58fcaaf8f88b3
+  xray:
+    x86_64:
+      url: "https://github.com/XTLS/Xray-core/releases/download/{{ hop_neighbour_xray_version }}/Xray-linux-64.zip"
+      sha256: 23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae
+    aarch64:
+      url: "https://github.com/XTLS/Xray-core/releases/download/{{ hop_neighbour_xray_version }}/Xray-linux-arm64-v8a.zip"
+      sha256: 4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c
+# The helper that scans and checks (python3 of the controller, standard library only).
+hop_neighbour_script: "{{ role_path }}/files/neighbour.py"
+hop_neighbour_command: ["{{ ansible_playbook_python }}", "{{ hop_neighbour_script }}"]
+hop_neighbour_tool_args: >-
+  {{ ['--cache', hop_neighbour_cache, '--downloads', hop_neighbour_downloads | to_json]
+     + (['--xray', hop_neighbour_xray_bin] if hop_neighbour_xray_bin | length > 0 else [])
+     + (['--scanner', hop_neighbour_scanner_bin] if hop_neighbour_scanner_bin | length > 0 else []) }}
+hop_neighbour_check_args: >-
+  {{ hop_neighbour_tool_args + ['--tries', hop_neighbour_check_tries | string, '--probe-url', hop_neighbour_probe_url] }}
+hop_neighbour_find_args: >-
+  {{ hop_neighbour_check_args
+     + ['--port', hop_neighbour_port | string, '--limit', hop_neighbour_scan_limit | string,
+        '--threads', hop_neighbour_scan_threads | string, '--timeout', hop_neighbour_scan_timeout | string,
+        '--confirm', hop_neighbour_confirm | string, '--asn-whois', hop_neighbour_asn_whois,
+        '--cdn-asns', hop_neighbour_cdn_asns | join(',')] }}

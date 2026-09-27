@@ -27,11 +27,13 @@ roles/
   common/              supported OS check, base packages, time sync
   panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, inbounds
                        from panel_inbounds; tasks/api_login.yml is the panel API login helper for other roles
-  hop/                 chain registry converged with group hops through the panel API; install + join
+  hop/                 chain registry converged with group hops through the panel API; install + join;
+                       neighbour target of every edge (files/neighbour.py: scan + Reality handshake check)
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
                        tasks/api_login.yml is the mon-server admin API login helper for other roles
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
-tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API (CI)
+tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API, and
+                       neighbour.py against a fake scanner, fake xray and local sites (CI)
 tests/panel/           role panel's inbounds and the targets part of verify.yml against the same mock (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
 ```
@@ -73,6 +75,8 @@ panel's chain registry:
 | `hop_name` | name in the chain registry (default: inventory hostname) |
 | `hop_next` | next hop inward; empty = derived (edge -> outermost inner, inner N -> N-1, inner 1 -> panel) |
 | `hop_tls` | `PROXY_TLS` for install.sh: `letsencrypt-ip` (default), `none`, `manual` |
+| `hop_reality_target` | edge only, optional: its neighbour target as `host:port` instead of the scan, see [Neighbour target](#neighbour-target) |
+| `hop_reality_server_name` | server name for `hop_reality_target` (required when its host is an address; default: the host) |
 
 Panel inbounds (`inventories/<profile>/group_vars/panel.yml`), see [Inbounds](#inbounds):
 
@@ -284,7 +288,7 @@ and scheme as registered, or the panel for the innermost hop (`hop_panel_host`, 
 `panel_url`, else `panel_public_ip` from the panel's `host_vars`, else its default IPv4; sub port
 `hop_panel_sub_port`, default 2096).
 
-After the loop: `setActive` on the edge with `hop_active: true` (exactly one edge must carry it, asserted
+After the loop: the [neighbour target](#neighbour-target) of every edge, then `setActive` on the edge with `hop_active: true` (exactly one edge must carry it, asserted
 before anything is written), then `del` of every registry hop the inventory does not list — the imported
 `legacy` edge included. Edges go first, inner hops from the outside in; an inner that still has live outer
 neighbours is left `draining` by the panel. The active edge is only deleted when the inventory has no edge
@@ -318,6 +322,75 @@ default IPv4 from facts), `hop_sub_port`/`hop_sub_scheme` (2096, `https` or `htt
 `hop_panel_host`/`hop_panel_sub_port`/`hop_panel_sub_scheme`, `hop_install_environment` (extra install.sh
 environment, e.g. `PROXY_TLS_IPV6`), `hop_install_timeout`, `hop_join_retries`/`hop_join_delay`,
 `hop_prune`, `hop_tls_reuse`.
+
+### Neighbour target
+
+Every edge carries a **neighbour target** in the chain registry (`realityTarget`, `realityServerName`;
+SBKubric/sane-3x-ui [ADR 0005](https://github.com/SBKubric/sane-3x-ui/blob/main/docs/adr/0005-only-443-on-every-hop.md),
+panel `v1.9.0-chain.8`+): a real site in the same /24 as the edge's address. While the edge is active, the
+Reality inbounds that follow the chain imitate that site, and an unknown SNI on the edge is passed to it, so
+a prober sees the neighbour's site. The role picks it after converging the hops and before `setActive`
+(the panel refuses to activate an edge without one while inbounds follow the chain), per managed edge:
+
+| Situation | What happens |
+|---|---|
+| `hop_reality_target` set in the edge's `host_vars` | no scan; written as given (server name `hop_reality_server_name`, else the host); a failed handshake check prints a `WARNING` but does not stop the run |
+| the registry already holds a target in the edge's /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
+| otherwise (no target, the check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check |
+| the scan finds nothing that passes | `hop_reality_fallback_target` (`dl.google.com:443`, passed the xray 26.3.27 handshake in SBKubric/sane-3x-ui#129) and a `WARNING`; the next run scans again |
+
+How the scan works (`roles/hop/files/neighbour.py find`, all **on the controller**, `delegate_to: localhost`,
+never on a box: a VPS scanning its neighbours gets flagged):
+
+1. [XTLS RealiTLScanner](https://github.com/XTLS/RealiTLScanner) probes the addresses of the edge's /24
+   nearest to it first (the edge, `.0` and `.255` left out): at most `hop_neighbour_scan_limit` (254),
+   `hop_neighbour_scan_threads` (8) at a time, `hop_neighbour_scan_timeout` (4) seconds each, on
+   `hop_neighbour_port` (443). It keeps sites that answer **TLS 1.3 with ALPN h2 and X25519** (or the hybrid
+   X25519MLKEM768).
+2. The certificate name becomes the server name (a wildcard `*.example.com` stands for `www.example.com`; an
+   address or a bare `*` is dropped). The site must answer **TLS 1.3 + h2 again with that name as SNI**, and
+   `GET /` for that name must **not redirect to another host**.
+3. **Not a CDN**, two ways: the HTTP answer carries no CDN headers (Cloudflare `cf-ray`/`server: cloudflare`,
+   CloudFront `x-amz-cf-*`/`via: ... cloudfront`, Fastly `x-fastly-request-id`/`x-served-by: cache-...`,
+   Akamai `server: AkamaiGHost`/`x-akamai-*`), and the site's AS, looked up in
+   [Team Cymru's](https://www.team-cymru.com/ip-asn-mapping) bulk whois (`hop_neighbour_asn_whois`,
+   `whois.cymru.com:43`, TCP 43 outbound), is not in `hop_neighbour_cdn_asns` (Cloudflare, Fastly, Akamai; the
+   whole AWS AS is not listed, so CloudFront is caught by its headers). When the whois does not answer, the run
+   notes it and filters by headers only.
+4. Ranking: a 2xx answer first, then the nearest address. The best `hop_neighbour_confirm` (3) get the
+   **Reality handshake check**, the first that passes wins.
+
+The handshake check (`neighbour.py check`, also used on a stored target and on `hop_reality_target`) runs a
+pair of xray processes on the controller's loopback, as in SBKubric/sane-3x-ui#129: a VLESS + Vision + Reality
+server whose target is the candidate and whose `serverNames` is its name, and a client through it; it passes
+when all `hop_neighbour_check_tries` (3) fetches of `hop_neighbour_probe_url`
+(`https://www.cloudflare.com/cdn-cgi/trace`) through the tunnel succeed. xray is the panel's version,
+`hop_neighbour_xray_version` (`v26.3.27`).
+
+The run prints one line per edge, e.g. `neighbour target of proxy (170.168.112.0/24): 170.168.112.32:443
+(ru.zian.ru.net) from scan; scanned 253 addresses, 16 candidates, handshakes: 170.168.112.32:443 3/3 through
+the tunnel`. `verify.yml` shows each edge's target and warns (without failing) about an edge on the fallback
+or without a target. `hop_neighbour_enabled: false` leaves the registry fields alone.
+
+**Controller requirements.** Linux on x86_64 or aarch64 (the operator's `o1-ansible` container, root with
+`--network host`, works as is), the controller's Python (standard library only), and outbound access to
+GitHub (first run only), TCP 443 of the edge's /24, TCP 43 of `whois.cymru.com` and the probe URL. No Docker,
+curl or unzip is needed: RealiTLScanner (`hop_neighbour_scanner_version`, `v0.2.3`) and xray are release
+binaries downloaded once into `hop_neighbour_cache` (`<playbook dir>/.cache/neighbour`, git-ignored, so the
+download survives a throwaway container that mounts the repo) and checked against the sha256 pinned in
+`hop_neighbour_downloads`. A new version means a new pin there. `hop_neighbour_scanner_bin` /
+`hop_neighbour_xray_bin` point at binaries of your own instead. A full /24 takes about a minute (73 s with 4
+threads around the stand's `proxy`).
+
+**Override** (e.g. the scan picks something you do not like, or the controller cannot scan):
+
+```yaml
+# inventories/<profile>/host_vars/proxy.yml
+hop_reality_target: 203.0.113.20:443
+hop_reality_server_name: www.example.com   # required with an address; default: the host of the target
+```
+
+Removing the override makes the next run scan again (a target outside the edge's /24 is never kept).
 
 ## Role monserver
 
@@ -465,7 +538,7 @@ to look; the first group that fails ends the run.
 | Play | Checks |
 |---|---|
 | panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined`, and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
-| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`) |
+| hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
@@ -474,6 +547,8 @@ to look; the first group that fails ends the run.
 
 - Python 3.12+ on the controller; `pip install -r requirements.txt` and
   `ansible-galaxy collection install -r requirements.yml`.
+- For the [neighbour target](#neighbour-target) scan: a Linux x86_64/aarch64 controller with outbound
+  access to the edges' /24 on 443, `whois.cymru.com:43` and GitHub.
 - Root ssh access to every host of the profile (key-based, via the aliases above).
 - Target OS: Debian 12/13 or Ubuntu 22.04/24.04; anything else fails in role `common`.
 - The vault password.
@@ -573,8 +648,14 @@ API: login, chain list/add/update/reissueToken/setActive/del with the panel's re
 list/add/update/setEnable, the AWG server and getNewX25519Cert, the monitoring targets) and a fake
 install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
 certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
+neighbour target with `tests/hop/fake_neighbour.py` in place of the scanner and the handshake check — found
+and written before `setActive`, a stored target kept without a scan or rescanned when its check fails, the
+fallback with a warning and a rescan on every run, the override, its refusals, check mode; the
 panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
-wrong; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
+wrong, and the neighbour target warnings; `tests/hop/test_neighbour_script.py`: `neighbour.py` against a fake
+RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois and a fake xray — the address list and
+limits, every filter, the ranking, the handshake check and the confirmation of the best candidates, the
+pinned download; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
 the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
 idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
 field updated without re-keying, port and enable, the AWG server switched off by hand, unlisted inbounds
@@ -592,6 +673,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   ansible-lint &&
   for inv in inventories/*/; do for pb in site.yml wipe.yml verify.yml; do
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
+  python3 tests/hop/test_neighbour_script.py &&
   python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
   python3 tests/wipe/test_wipe.py'
 ```

@@ -155,6 +155,23 @@
         loop_var: hop_item
         label: "{{ hop_item.name }} ({{ hop_item.action }})"
 
+    # Before activation: the panel refuses to make an edge without a neighbour target active while inbounds
+    # follow the chain.
+    - name: Choose the neighbour target of every edge
+      when:
+        - hop_neighbour_enabled | bool
+        - hop_plan | selectattr('role', 'equalto', 'edge') | selectattr('managed') | list | length > 0
+      block:
+        - name: Re-read the registry before the neighbour targets
+          ansible.builtin.include_tasks: list.yml
+
+        - name: Neighbour target of edge
+          ansible.builtin.include_tasks: neighbour.yml
+          loop: "{{ hop_plan | selectattr('role', 'equalto', 'edge') | selectattr('managed') | list }}"
+          loop_control:
+            loop_var: hop_edge
+            label: "{{ hop_edge.name }}"
+
     - name: Make the hop_active edge the active one
       ansible.builtin.include_tasks: activate.yml
       when: hop_active_edge | length > 0
