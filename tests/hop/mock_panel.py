@@ -7,9 +7,11 @@ HTTP 200 + success false + "<code>: <detail>", strict JSON bodies (unknown field
 0-based inner positions compacted after every change, next hops re-chained (inner N -> N-1, edges -> last
 joined inner), pending/joined/legacy/draining, one-time join tokens, setActive and del refusals, draining of a
 hop with live outer neighbours, an edge's neighbour target (realityTarget/realityServerName, validated like
-web/service/chain_follow.go neighbourTarget, refused on an inner hop). Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box),
-GET /test/state, POST /test/reset, GET /install.sh (the fake installer), and for the panel part
-POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
+web/service/chain_follow.go neighbourTarget, refused on an inner hop) and the chain-following inbounds that take it
+(followChain: rewritten on setActive, on a save while an edge is active, refused without a neighbour target).
+Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box), POST /test/front (a box's front report),
+POST /test/chain/update (a registry update by hop name), GET /test/state, POST /test/reset, GET /install.sh (the fake
+installer), and for the panel part POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
 """
 
 import ipaddress
@@ -195,6 +197,8 @@ class Registry:
             if target and hop["role"] != "edge":
                 raise Refusal("reality_target_edge_only", f"{hop['name']!r} is an {hop['role']} front")
             if (target, server_name) != (hop["realityTarget"], hop["realityServerName"]):
+                if hop["isActive"]:
+                    self.panel.follow_edge(dict(hop, realityTarget=target, realityServerName=server_name))
                 hop["realityTarget"], hop["realityServerName"], changed = target, server_name, True
         for field in ("name", "host", "subPort", "subScheme"):
             if field in body and body[field] != hop[field]:
@@ -220,6 +224,7 @@ class Registry:
             raise Refusal("hop_not_joined", f"{hop['name']} is {hop['state']}")
         if hop["isActive"]:
             return
+        self.panel.follow_edge(hop)
         for other in self.hops:
             other["isActive"] = False
         hop["isActive"] = True
@@ -278,9 +283,9 @@ PROBE_PREFIX = "probe-"
 INBOUND_FIELDS = {"id": int, "up": int, "down": int, "total": int, "allTime": int, "remark": str, "enable": bool,
                   "expiryTime": int, "trafficReset": str, "lastTrafficResetTime": int, "clientStats": list,
                   "listen": str, "port": int, "protocol": str, "settings": str, "streamSettings": str, "tag": str,
-                  "sniffing": str, "publicPort": int}
+                  "sniffing": str, "publicPort": int, "followChain": bool}
 UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "trafficReset", "listen", "port", "protocol",
-                 "settings", "streamSettings", "sniffing")
+                 "settings", "streamSettings", "sniffing", "followChain")
 AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
               "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str}
 
@@ -322,7 +327,7 @@ class Panel:
     def reset(self, seed):
         self.inbounds = []
         self.next_id = 1
-        self.x25519 = []
+        self.x25519 = list(seed.get("x25519", []))
         self.targets = seed.get("targets")
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
@@ -335,7 +340,7 @@ class Panel:
         record = {"id": self.next_id, "up": 0, "down": 0, "total": 0, "allTime": 0, "remark": "", "enable": True,
                   "expiryTime": 0, "trafficReset": "never", "lastTrafficResetTime": 0, "clientStats": [],
                   "listen": "", "port": 0, "protocol": "", "settings": "", "streamSettings": "", "tag": "",
-                  "sniffing": "", "publicPort": 0}
+                  "sniffing": "", "publicPort": 0, "followChain": False}
         record.update(inbound)
         record["id"] = self.next_id
         if not record["tag"]:
@@ -376,6 +381,45 @@ class Panel:
             client.setdefault("updated_at", before.get("updated_at", 1790000000000))
         return json.dumps(parsed, indent=2)
 
+    @staticmethod
+    def _neighbour_stream(stream_settings, edge):
+        """withNeighbourTarget: target and strict serverNames of the edge's neighbour, a legacy dest dropped."""
+        stream = json.loads(stream_settings or "{}")
+        if stream.get("security") != "reality":
+            raise Refusal("follow_chain_not_reality", f"security is {stream.get('security')!r}, not reality")
+        name = edge["realityServerName"] or edge["realityTarget"].rpartition(":")[0]
+        reality = stream.setdefault("realitySettings", {})
+        reality["target"] = edge["realityTarget"]
+        reality.pop("dest", None)
+        reality["serverNames"] = [name]
+        if isinstance(reality.get("settings"), dict):
+            reality["settings"]["serverName"] = name
+        return json.dumps(stream, indent=2)
+
+    def _active_edge(self):
+        return next((h for h in self.registry.hops if h["isActive"]), None)
+
+    def prepare_follower(self, body):
+        """PrepareFollower: a flagged inbound must be Reality and takes the active edge's neighbour on every save."""
+        if not body.get("followChain"):
+            return
+        if json.loads(body.get("streamSettings") or "{}").get("security") != "reality":
+            raise Refusal("follow_chain_not_reality", f"inbound {body.get('remark')!r} cannot follow the chain")
+        edge = self._active_edge()
+        if edge is None:
+            return
+        if not edge["realityTarget"]:
+            raise Refusal("no_neighbour_target", f"the active edge {edge['name']!r} has no neighbour target")
+        body["streamSettings"] = self._neighbour_stream(body.get("streamSettings"), edge)
+
+    def follow_edge(self, edge):
+        """followEdgeTx: every flagged inbound takes the edge's neighbour; refused without one."""
+        followers = [i for i in self.inbounds if i.get("followChain")]
+        if followers and not edge["realityTarget"]:
+            raise Refusal("no_neighbour_target", f"{edge['name']!r} has no neighbour target")
+        for inbound in followers:
+            inbound["streamSettings"] = self._neighbour_stream(inbound["streamSettings"], edge)
+
     def _port_taken(self, port, own_id=0):
         return any(i["port"] == port and i["id"] != own_id and i["protocol"] != "amneziawg" for i in self.inbounds)
 
@@ -392,6 +436,7 @@ class Panel:
             raise Refusal("probe_email", "email is reserved for monitoring probes")
         if self._port_taken(body.get("port", 0)):
             raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
+        self.prepare_follower(body)
         body["tag"] = f"inbound-{body.get('port', 0)}"
         body["settings"] = self._reserialize(body.get("settings", ""))
         record = self._store(body)
@@ -400,6 +445,7 @@ class Panel:
 
     def update(self, inbound_id, raw):
         body = bind(raw, INBOUND_FIELDS)
+        self.prepare_follower(body)
         old = self.load(inbound_id)
         if self._port_taken(body.get("port", 0), inbound_id):
             raise Refusal("port_exists", f"Port already exists: {body.get('port')}")
@@ -532,6 +578,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
+                return self._send(200, {"ok": True})
+            if path == "/test/chain/update":
+                body = json.loads(raw)
+                hop = next(h for h in reg.hops if h["name"] == body.pop("name"))
+                reg.update(hop["id"], body)
                 return self._send(200, {"ok": True})
             if path == "/test/join":
                 body = json.loads(raw)

@@ -10,6 +10,7 @@ ansible output (-vvv).
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,14 @@ PORT = int(os.environ.get("PANEL_TEST_PORT", "18081"))
 URL = f"http://127.0.0.1:{PORT}"
 STAND = REPO / "inventories" / "stand-full" / "group_vars" / "panel.yml"
 STAND_INBOUNDS = yaml.safe_load(STAND.read_text())["panel_inbounds"]
+# The stand's inbound before orchestrator#21: VLESS + TCP + Vision + Reality, not following the chain.
+VISION = [dict(STAND_INBOUNDS[0], followChain=False, streamSettings={
+    "network": "tcp", "security": "reality",
+    "realitySettings": {"show": False, "xver": 0, "target": "dl.google.com:443", "serverNames": ["dl.google.com"],
+                        "settings": {"fingerprint": "chrome", "serverName": "", "spiderX": "/"}},
+    "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}}}), STAND_INBOUNDS[1]]
+VISION[0].pop("followChain")
+NEIGHBOUR = {"realityTarget": "10.0.0.77:443", "realityServerName": "www.neighbour.test"}
 
 
 def post(path, payload):
@@ -123,7 +132,10 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(json.loads(vless["settings"]), {"clients": [], "decryption": "none", "fallbacks": []})
         stream = json.loads(vless["streamSettings"])
         reality = stream["realitySettings"]
-        self.assertEqual((stream["network"], stream["security"]), ("tcp", "reality"))
+        self.assertEqual((stream["network"], stream["security"]), ("xhttp", "reality"))
+        self.assertEqual(stream["xhttpSettings"], {"path": "/", "host": "", "mode": "auto"})
+        self.assertNotIn("tcpSettings", stream)
+        self.assertTrue(vless["followChain"], "the stand's inbound follows the chain")
         self.assertEqual(reality["privateKey"], keys["privateKey"])
         self.assertEqual(reality["settings"]["publicKey"], keys["publicKey"])
         self.assertEqual(reality["settings"]["fingerprint"], "chrome")
@@ -141,6 +153,83 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertGreater(self.state()["revision"], revision, "the chain revision moved with the ports")
 
         self.assert_idempotent()
+
+    def seed_clients(self, remark, clients):
+        """Clients added in the panel (users, the probe), with the fields the panel keeps."""
+        inbounds = [{k: v for k, v in i.items() if k != "id"} for i in self.panel()["inbounds"]]
+        for inbound in inbounds:
+            if inbound["remark"] == remark:
+                settings = json.loads(inbound["settings"])
+                settings["clients"] = clients
+                inbound["settings"] = json.dumps(settings, indent=2)
+        post("/test/panel/reset", {"inbounds": inbounds, "awg": self.panel()["awg"], "x25519": self.panel()["x25519"]})
+
+    def test_vision_inbound_migrates_to_xhttp_keeping_clients(self):
+        self.play(inbounds=VISION)
+        vision = [{"id": "11111111-1111-4111-8111-111111111111", "email": "alice", "subId": "sub-alice", "enable": True,
+                   "flow": "xtls-rprx-vision", "limitIp": 0, "totalGB": 0, "expiryTime": 0, "tgId": "", "reset": 0},
+                  {"id": "22222222-2222-4222-8222-222222222222", "email": "probe-1", "subId": "probe-sub", "enable": True,
+                   "flow": "xtls-rprx-vision", "comment": "monitoring probe"}]
+        self.seed_clients("vless-reality", vision)
+        before = self.inbounds()["vless-reality"]
+        old_reality = json.loads(before["streamSettings"])["realitySettings"]
+
+        self.play()
+        self.assertEqual([(m, p) for m, p, _ in self.writes], [("POST", f"inbounds/update/{before['id']}")])
+        after = self.inbounds()["vless-reality"]
+        self.assertEqual(after["id"], before["id"], "migrated in place, not re-added")
+        stream = json.loads(after["streamSettings"])
+        self.assertEqual((stream["network"], stream["security"]), ("xhttp", "reality"))
+        self.assertEqual(stream["xhttpSettings"], {"path": "/", "host": "", "mode": "auto"})
+        self.assertNotIn("tcpSettings", stream, "the TCP transport settings go with the TCP transport")
+        reality = stream["realitySettings"]
+        self.assertEqual((reality["privateKey"], reality["settings"]["publicKey"], reality["shortIds"]),
+                         (old_reality["privateKey"], old_reality["settings"]["publicKey"], old_reality["shortIds"]),
+                         "the migration must not re-key")
+        clients = json.loads(after["settings"])["clients"]
+        self.assertEqual([(c["id"], c["email"], c["subId"]) for c in clients],
+                         [(c["id"], c["email"], c["subId"]) for c in vision], "UUIDs, emails and subIds are kept")
+        self.assertEqual([c["flow"] for c in clients], ["", ""], "Vision flow is TCP only")
+        self.assertEqual(clients[0]["limitIp"], 0)
+        self.assertTrue(after["followChain"])
+        self.assert_idempotent()
+
+    def test_chain_following_inbound_takes_the_active_edges_neighbour(self):
+        post("/test/reset", [{"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": True, **NEIGHBOUR}])
+        self.play()
+        vless = self.inbounds()["vless-reality"]
+        self.assertTrue(vless["followChain"])
+        reality = json.loads(vless["streamSettings"])["realitySettings"]
+        self.assertEqual((reality["target"], reality["serverNames"], reality["settings"]["serverName"]),
+                         ("10.0.0.77:443", ["www.neighbour.test"], "www.neighbour.test"))
+        # The chain owns target and serverNames now: the inventory's dl.google.com is not written back.
+        self.assert_idempotent()
+
+    def test_follow_chain_waits_for_the_active_edges_neighbour_target(self):
+        post("/test/reset", [{"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": True}])
+        self.play(inbounds=VISION)
+        out = self.play()
+        vless = self.inbounds()["vless-reality"]
+        self.assertFalse(vless["followChain"], "the panel refuses the flag while the active edge has no neighbour target")
+        self.assertEqual(json.loads(vless["streamSettings"])["network"], "xhttp", "the rest of the migration goes ahead")
+        self.assertIn("followChain of vless-reality waits for a neighbour target of the active edge proxy", flat(out))
+
+        # Role hop writes the neighbour target; the next pass flags the inbound and the panel rewrites its cover.
+        post("/test/chain/update", {"name": "proxy", **NEIGHBOUR})
+        self.play()
+        vless = self.inbounds()["vless-reality"]
+        self.assertTrue(vless["followChain"])
+        self.assertEqual(json.loads(vless["streamSettings"])["realitySettings"]["serverNames"], ["www.neighbour.test"])
+        self.assert_idempotent()
+
+    def test_follow_chain_needs_reality(self):
+        bad = [{"remark": "plain", "protocol": "vless", "port": 9443, "followChain": True,
+                "streamSettings": {"network": "tcp", "security": "none"}},
+               {"remark": "odd", "protocol": "vless", "port": 9444, "followChain": "yes"}]
+        out = self.play(inbounds=bad, expect_rc=2)
+        self.assertIn("plain: followChain needs streamSettings.security reality", out)
+        self.assertIn("odd: followChain must be true or false", out)
+        self.assertEqual(self.writes, [])
 
     def test_probe_client_and_reserialized_settings_stay_idempotent(self):
         self.converge_fresh()
@@ -309,6 +398,11 @@ class PanelInboundsTest(unittest.TestCase):
         self.seed_paths(["direct", "proxy"])
         out = self.play("-e", '{"mon_paths": ["hops", "direct"]}', playbook=HERE / "verify_targets.yml")
         self.assertRegex(out, r"monitoring: 4 targets UP")
+
+
+def flat(out):
+    """The output with the YAML callback's line folding undone."""
+    return re.sub(r"\s+", " ", out)
 
 
 if __name__ == "__main__":

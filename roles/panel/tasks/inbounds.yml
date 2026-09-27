@@ -37,6 +37,12 @@
       {%-       if ib.enable is defined and ib.enable is not boolean -%}
       {%-         set _ = out.append(name ~ ': enable must be true or false') -%}
       {%-       endif -%}
+      {%-       if ib.followChain is defined and ib.followChain is not boolean -%}
+      {%-         set _ = out.append(name ~ ': followChain must be true or false') -%}
+      {%-       elif ib.followChain | default(false) is true
+                     and ((ib.streamSettings | default({}) if ib.streamSettings | default({}) is mapping else {}).security | default('')) != 'reality' -%}
+      {%-         set _ = out.append(name ~ ': followChain needs streamSettings.security reality (only Reality follows the chain)') -%}
+      {%-       endif -%}
       {%-       for blob in ['settings', 'streamSettings', 'sniffing'] -%}
       {%-         if ib[blob] is defined and ib[blob] is not mapping -%}
       {%-           set _ = out.append(name ~ ': ' ~ blob ~ ' must be a mapping') -%}
@@ -112,6 +118,21 @@
           - panel_inbounds_conflicts | length == 0
         fail_msg: "panel inbounds vs panel_inbounds: {{ panel_inbounds_conflicts | join('; ') }}"
         quiet: true
+
+    # Chain-following inbounds: while an edge is active, the panel owns their Reality target and serverNames
+    # (its neighbour target), and refuses the flag if that edge has none yet.
+    - name: Read the active edge for the chain-following inbounds
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: chain/list
+        panel_call_method: GET
+      when: panel_inbounds | selectattr('followChain', 'defined') | selectattr('followChain') | list | length > 0
+
+    - name: Keep the active edge
+      ansible.builtin.set_fact:
+        panel_inbounds_active_edge: >-
+          {{ panel_call.obj.hops | default([], true) | selectattr('isActive') | first | default({})
+             if panel_inbounds | selectattr('followChain', 'defined') | selectattr('followChain') | list | length > 0 else {} }}
 
     - name: AmneziaWG server
       ansible.builtin.include_tasks: awg_server.yml

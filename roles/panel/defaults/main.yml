@@ -72,13 +72,25 @@ panel_tg_chat_id: "{{ tg_chat_id | default('') }}"
 #   listen, total, expiryTime, trafficReset       as in the panel; not declared = left as the panel has it
 #   settings, streamSettings, sniffing            mappings merged into the panel's JSON (xray only); keys
 #                   the entry does not name stay as the panel has them (clients, generated keys)
+#   followChain     true: the inbound follows the chain (Reality only). While an edge is active the panel owns
+#                   realitySettings target/serverNames (and settings.serverName) and sets them to that edge's
+#                   neighbour target; the role converges the declared ones only while no edge is active. The flag
+#                   waits (with a warning) while the active edge has no neighbour target: role hop writes it,
+#                   and site.yml runs the inbounds again after the hops play.
+# A declared streamSettings.network drops the panel's settings of every other transport (panel_inbound_transport_keys);
+# on a VLESS inbound whose network is not tcp the clients' flow is cleared (Vision is TCP only). Clients' ids, emails
+# and subIds stay.
 # Generated on add and read back from the panel afterwards, never stored in the inventory or the vault:
 # Reality keys (GET panel/api/server/getNewX25519Cert) and shortIds when streamSettings.security is
 # reality; the AWG server's keys and obfuscation (the panel makes them with the server).
 panel_inbounds: []
 # Fields an entry may carry, per kind.
-panel_inbound_xray_keys: [remark, protocol, port, enable, listen, total, expiryTime, trafficReset, settings, streamSettings, sniffing]
+panel_inbound_xray_keys: [remark, protocol, port, enable, listen, total, expiryTime, trafficReset, followChain, settings, streamSettings,
+                          sniffing]
 panel_inbound_awg_keys: [remark, protocol, port, enable]
+# Transport settings of streamSettings, one per network; those of another network than the declared one are dropped.
+panel_inbound_transport_keys: [tcpSettings, rawSettings, kcpSettings, wsSettings, httpSettings, httpupgradeSettings, splithttpSettings,
+                               xhttpSettings, grpcSettings, quicSettings]
 # Protocols the role does not manage (their clients and ports live outside the inbound record).
 panel_inbound_unsupported: [nativewg, mtproto]
 # sniffing of an added inbound that declares none: what the UI sends by default (also for amneziawg).
