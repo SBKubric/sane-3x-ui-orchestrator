@@ -3,8 +3,8 @@
 # Monitoring contract 3: the panel and mon-server must speak the same contract, bump both tags together.
 # The «only 443» front needs v1.9.0-chain.10 or later (SBKubric/sane-3x-ui#142-#147).
 xui_version: v1.9.0-chain.10
-# Release tag of SBKubric/3ax-ui-monitoring for mon-server and mon-client.
-mon_version: v0.1.0-stand.5
+# Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3 = main b66b795).
+mon_version: v1.9.0-chain.10
 # The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
 front_mode: only443
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.
