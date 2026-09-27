@@ -4,7 +4,8 @@
 # login and API on 443. Issued the way install.sh issues it (acme_issue_webroot): nginx takes port 80 for the ACME
 # webroot (`x-ui nginx acme-front`), acme.sh issues through it with the shortlived profile, renews every 3 days from
 # its cron and reloads nginx and the panel. A certificate for panel_public_ip that is valid for at least another day is
-# kept: nothing is asked of Let's Encrypt (5 certificates per address a week). The panel's own port keeps the
+# kept: nothing is asked of Let's Encrypt (5 certificates per address a week). The files belong to root, who runs
+# this (and acme.sh, nginx, x-ui) on the box. The panel's own port keeps the
 # self-signed certificate (tls.yml): the role's API calls verify it on 127.0.0.1.
 - name: Check the IP certificate already on the box
   ansible.builtin.command:
@@ -102,8 +103,6 @@
       ansible.builtin.file:
         path: "{{ panel_ip_cert_dir }}"
         state: directory
-        owner: root
-        group: root
         mode: "0700"
 
     # acme.sh exits non-zero when the reload command fails (x-ui not there yet, say): the files decide.
@@ -126,8 +125,6 @@
     - name: Keep the key private
       ansible.builtin.file:
         path: "{{ panel_ip_cert_dir }}/privkey.pem"
-        owner: root
-        group: root
         mode: "0600"
 
     - name: Check the installed certificate
