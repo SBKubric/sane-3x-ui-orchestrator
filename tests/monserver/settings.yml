@@ -1,0 +1,16 @@
+---
+# Role monserver's Settings step alone (tasks/settings.yml) against mock_monserver.py, with the panel play's facts
+# (panel_url, panel_mon_token, panel_ca_pem) given as host vars of the panel host. See test_settings.py.
+- name: Monitoring server settings
+  hosts: monserver
+  gather_facts: false
+  tasks:
+    - name: Log in to mon-server
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: api_login
+
+    - name: Converge the settings
+      ansible.builtin.include_role:
+        name: monserver
+        tasks_from: settings

@@ -6,7 +6,8 @@
 #   acme_production   false = Let's Encrypt staging for mon-server (MON_TLS_ACME_CA=staging)
 # Inputs from the vault: mon_admin_user, mon_admin_password, tg_bot_token, tg_chat_id.
 # Inputs from role panel facts (hostvars[groups['panel'][0]]): panel_url, panel_mon_token,
-# panel_ca_pem -> Settings panelUrl, monToken, panelCa through the admin API.
+# panel_ca_pem -> Settings panelUrl, monToken, panelCa through the admin API. Behind the panel's only443 front
+# panelUrl is https://<ip>/<base>/ on 443 and panelCa empty (the front's IP certificate is publicly trusted).
 #
 # Facts the role leaves for later plays (hostvars[groups['monserver'][0]]):
 #   monserver_url      https://<monserver_public_ip>:<monserver_port>  (role monclient: MON_SERVER_URL)
