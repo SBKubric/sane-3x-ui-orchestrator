@@ -317,6 +317,80 @@ class HopRoleTest(HopHarness):
         self.assertIn("is not v1.9.1", out)
 
 
+FRONT = ("-e", "hop_test_front=only443", "-e", "hop_test_bridge_tls=letsencrypt-ip")
+
+
+class FrontTest(HopHarness):
+    """The «only 443» front on every box (orchestrator#21): PROXY_FRONT, the front report that moves a hop to 443/https in
+    the registry, and the convergence order from the panel outward."""
+
+    def test_fresh_chain_comes_up_behind_the_front(self):
+        self.seed(LEGACY)
+        out = flat(self.play(*FRONT))
+        self.assertEqual(self.writes(), [
+            ("POST", "add", {"name": "bridge", "host": "10.0.0.2", "role": "inner", "subPort": 2096,
+                             "subScheme": "https", "position": 0}),
+            ("POST", "add", {"name": "proxy", "host": "10.0.0.3", "role": "edge", "subPort": 2096,
+                             "subScheme": "https"}),
+            ("POST", "setActive", {}),
+            ("POST", "del", {"force": False}),
+        ])
+        bridge_env, _ = self.box("bridge")
+        self.assertEqual(bridge_env["PROXY_FRONT"], "only443")
+        self.assertEqual((bridge_env["PROXY_NEXT_HOP"], bridge_env["PROXY_NEXT_HOP_SUB_PORT"],
+                          bridge_env["PROXY_NEXT_HOP_SCHEME"]), ("10.0.0.1", "443", "https"),
+                         "the panel is behind its own front: the innermost hop polls it on 443")
+        proxy_env, _ = self.box("proxy")
+        self.assertEqual(proxy_env["PROXY_FRONT"], "only443")
+        self.assertEqual((proxy_env["PROXY_NEXT_HOP"], proxy_env["PROXY_NEXT_HOP_SUB_PORT"],
+                          proxy_env["PROXY_NEXT_HOP_SCHEME"]), ("10.0.0.2", "443", "https"),
+                         "the edge is installed after bridge reported its front")
+        hops = self.hops()
+        self.assertEqual({n: (h["subPort"], h["subScheme"]) for n, h in hops.items()},
+                         {"bridge": (443, "https"), "proxy": (443, "https")})
+        self.assertIn("front of bridge: 443/https in the registry", out)
+
+        # The registry's 443 is the box's report, not a difference to converge.
+        out = flat(self.play(*FRONT))
+        self.assertIn("hops: bridge=skip, proxy=skip;", out)
+        self.assertEqual(self.calls, [])
+        self.assertRegex(out, r"bridge : ok=\d+ changed=0 ")
+        self.assertRegex(out, r"proxy : ok=\d+ changed=0 ")
+
+    def test_converged_chain_moves_behind_the_front_from_the_panel_outward(self):
+        self.seed(LEGACY)
+        self.play("-e", "hop_test_bridge_tls=letsencrypt-ip")
+        self.assertEqual(self.box("proxy")[0]["PROXY_NEXT_HOP_SUB_PORT"], "2096")
+        out = flat(self.play(*FRONT))
+        self.assertIn("hops: bridge=rejoin (front off -> only443), proxy=rejoin (front off -> only443);", out)
+        self.assertEqual([(m, p) for m, p, _ in self.writes()], [("POST", "reissueToken"), ("POST", "reissueToken")],
+                         "no sub port is pushed to the registry: the boxes report 443 themselves")
+        self.assertEqual(self.box("proxy")[0]["PROXY_NEXT_HOP_SUB_PORT"], "443")
+        self.assertEqual({(h["subPort"], h["subScheme"]) for h in self.hops().values()}, {(443, "https")})
+        self.assertIn("hops: bridge=skip, proxy=skip;", flat(self.play(*FRONT)))
+
+    def test_a_front_that_does_not_report_stops_the_run_before_the_next_hop(self):
+        self.seed(LEGACY)
+        (self.root / "bridge" / "front_fail").write_text("")
+        out = flat(self.play(*FRONT, expect_rc=2))
+        self.assertIn("bridge has not reported its front (registry: 2096/https, want 443/https)", out)
+        self.assertFalse((self.root / "proxy" / "installs").exists(), "the edge must wait for its inner neighbour")
+
+    def test_front_needs_the_ip_certificate(self):
+        self.seed(LEGACY)
+        out = flat(self.play("-e", "hop_test_front=only443", expect_rc=2))
+        self.assertIn("front_mode only443 needs hop_tls letsencrypt-ip", out)
+
+    def test_verify_requires_every_hop_behind_its_front(self):
+        self.seed(LEGACY)
+        self.play("-e", "hop_test_bridge_tls=letsencrypt-ip")
+        out = flat(self.verify(*FRONT, expect_rc=2))
+        self.assertIn("bridge is on 2096/https in the chain registry, not behind its front (443/https)", out)
+        self.play(*FRONT)
+        out = flat(self.verify(*FRONT))
+        self.assertIn("chain registry: bridge, proxy joined", out)
+
+
 NEIGHBOUR = ("10.0.0.77:443", "www.neighbour.test")
 NEIGHBOUR_2 = ("10.0.0.78:443", "shop.neighbour.test")
 FALLBACK = ("dl.google.com:443", "dl.google.com")

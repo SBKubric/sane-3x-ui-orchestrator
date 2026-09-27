@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Stand-in for install.sh in proxy mode (tests of role hop only). Served by mock_panel.py as /install.sh.
 # Records what the real installer would get (tag, PROXY_* environment, whether a token came), installs a
-# fake x-ui into $FAKE_BOX_DIR and joins with the token through the mock panel, like `x-ui chain rejoin`.
+# fake x-ui into $FAKE_BOX_DIR and joins with the token through the mock panel, like `x-ui chain rejoin`. With
+# PROXY_FRONT=only443 and a certificate the box's front comes up and reports itself (443/https) the way its first
+# poll does; a "front_fail" file in the box keeps the front down (no report).
 set -euo pipefail
 tag="$1"
 box="${FAKE_BOX_DIR:?FAKE_BOX_DIR is not set}"
@@ -12,7 +14,7 @@ mkdir -p "$box"
 echo "$tag" >>"$box/installs"
 {
     for var in XUI_REPO PROXY_NEXT_HOP PROXY_NEXT_HOP_SUB_PORT PROXY_NEXT_HOP_SCHEME PROXY_SUB_PORT PROXY_DOMAIN \
-        PROXY_TLS PROXY_CERT PROXY_KEY; do
+        PROXY_TLS PROXY_CERT PROXY_KEY PROXY_FRONT; do
         echo "${var}=${!var:-}"
     done
     echo "TOKEN_GIVEN=$([[ -n "${PROXY_JOIN_TOKEN:-}" ]] && echo yes || echo no)"
@@ -22,7 +24,8 @@ echo "${tag#v}" >"$box/version"
 # reproduces SBKubric/sane-3x-ui#124 (a reinstall that leaves "cert": "" and serves plain HTTP).
 cert=""
 [[ "${PROXY_TLS:-none}" != none && ! -e "$box/lose_cert" ]] && cert="${PROXY_CERT:-/root/cert/ip/fullchain.pem}"
-printf '{"domain": "%s", "subPort": %s, "cert": "%s"}\n' "${PROXY_DOMAIN:-}" "${PROXY_SUB_PORT:-2096}" "$cert" >"$box/proxy.json"
+printf '{"domain": "%s", "subPort": %s, "cert": "%s", "front": {"mode": "%s"}}\n' "${PROXY_DOMAIN:-}" "${PROXY_SUB_PORT:-2096}" \
+    "$cert" "${PROXY_FRONT:-off}" >"$box/proxy.json"
 scheme=$([[ -n "$cert" ]] && echo https || echo http)
 cat >"$box/x-ui" <<'XUI'
 #!/usr/bin/env bash
@@ -37,7 +40,7 @@ chain)
     reachable=true stale=""
     [[ -e "$dir/stale" ]] && reachable=false stale=" (stale — still relaying)"
     echo "name:      $name ($role)"
-    echo "next hop:  $(sed -n "s/^PROXY_NEXT_HOP=//p" "$dir/install.env"):2096 (reachable: $reachable)"
+    echo "next hop:  $(sed -n "s/^PROXY_NEXT_HOP=//p" "$dir/install.env"):$(sed -n "s/^PROXY_NEXT_HOP_SUB_PORT=//p" "$dir/install.env") (reachable: $reachable)"
     echo "revision:  1$stale"
     echo "relay:     running=true ports=[443]"
     echo "last wave: 2026-09-24T10:00:00Z"
@@ -57,5 +60,13 @@ obj = json.load(urllib.request.urlopen(req))["obj"]
 print(obj["name"], obj["role"])
 PY
     echo "Joined the chain as $(cat "$box/joined")"
+    if [[ "${PROXY_FRONT:-off}" == only443 && -n "$cert" && ! -e "$box/front_fail" ]]; then
+        python3 - "$FAKE_PANEL/test/front" "$(cut -d' ' -f1 "$box/joined")" <<'PY'
+import json, sys, urllib.request
+body = {"name": sys.argv[2], "mode": "only443", "subPort": 443, "subScheme": "https"}
+urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=json.dumps(body).encode(), method="POST")).read()
+PY
+        echo "front: only443 on 443"
+    fi
 fi
 echo "x-ui $tag installed as a CHAIN HOP"

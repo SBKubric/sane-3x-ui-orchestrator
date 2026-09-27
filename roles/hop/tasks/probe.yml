@@ -1,6 +1,6 @@
 ---
-# Reads what the box runs: version, `x-ui chain status` (the running hop, asked with its own secret)
-# and, for letsencrypt-ip, whether a certificate for hop_host is already there. Read-only, so it runs
+# Reads what the box runs: version, `x-ui chain status` (the running hop, asked with its own secret), the
+# front mode in proxy.json and, for letsencrypt-ip, whether a certificate for hop_host is already there. Read-only, so it runs
 # in check mode too. Result: fact hop_box.
 - name: Check for an installed x-ui binary
   ansible.builtin.stat:
@@ -23,6 +23,13 @@
   changed_when: false
   failed_when: false
   check_mode: false
+  when: hop_bin_stat.stat.exists
+
+- name: Read the box's proxy.json
+  ansible.builtin.slurp:
+    src: "{{ hop_proxy_config }}"
+  register: hop_box_proxy_json
+  failed_when: false
   when: hop_bin_stat.stat.exists
 
 # Valid for at least another day and issued for hop_host; openssl comes from role common. It prints the
@@ -59,6 +66,9 @@
       version: "{{ (hop_box_version.stdout | default('')) | trim if (hop_box_version.rc | default(1)) == 0 else '' }}"
       status_ok: "{{ (hop_box_status.rc | default(1)) == 0 }}"
       status_name: "{{ hop_box_status.stdout | default('') | regex_findall('(?m)^name:\\s+(\\S+)') | first | default('') }}"
+      front_mode: >-
+        {{ ((hop_box_proxy_json.content | b64decode | from_json).front | default({})).mode | default('off')
+           if hop_box_proxy_json.content is defined else 'off' }}
       le_cert_reusable: >-
         {{ hop_tls == 'letsencrypt-ip' and hop_tls_reuse | bool
            and (hop_le_cert.rc | default(1)) == 0

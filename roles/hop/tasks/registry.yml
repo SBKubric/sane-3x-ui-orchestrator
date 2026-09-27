@@ -93,8 +93,10 @@
     quiet: true
 
 # add: not in the registry. skip: joined, same host/sub port/scheme, `x-ui chain status` answers with
-# this name and the box runs xui_version (compared without a leading "v": `x-ui -v` prints none). rejoin:
-# anything else (update, reissueToken, reinstall); the plan names why.
+# this name, the box runs xui_version (compared without a leading "v": `x-ui -v` prints none) and its front
+# in hop_front_mode. rejoin: anything else (update, reissueToken, reinstall); the plan names why. Behind the
+# front the box reports its sub port and scheme itself (443/https): the registry must show that, and the
+# inventory's hop_sub_port/hop_sub_scheme (the box's own sub server behind nginx) are not compared.
 - name: Plan the hops
   ansible.builtin.set_fact:
     hop_plan: >-
@@ -110,11 +112,22 @@
       {%-     set box = hostvars[hop.inventory_host].hop_box -%}
       {%-     if entry.state != 'joined' -%}{%- set _ = why.append('registry state ' ~ entry.state) -%}{%- endif -%}
       {%-     if entry.host != hop.host -%}{%- set _ = why.append('host ' ~ entry.host ~ ' -> ' ~ hop.host) -%}{%- endif -%}
-      {%-     if entry.subPort | int != hop.sub_port | int -%}
-      {%-       set _ = why.append('subPort ' ~ entry.subPort ~ ' -> ' ~ hop.sub_port) -%}
-      {%-     endif -%}
-      {%-     if entry.subScheme != hop.sub_scheme -%}
-      {%-       set _ = why.append('subScheme ' ~ entry.subScheme ~ ' -> ' ~ hop.sub_scheme) -%}
+      {%-     if hop.front_mode == 'only443' -%}
+      {%-       if box.front_mode != 'only443' -%}
+      {%-         set _ = why.append('front ' ~ box.front_mode ~ ' -> only443') -%}
+      {%-       elif entry.subPort | int != 443 or entry.subScheme != 'https' -%}
+      {%-         set _ = why.append('front not reported (registry ' ~ entry.subPort ~ '/' ~ entry.subScheme ~ ')') -%}
+      {%-       endif -%}
+      {%-     else -%}
+      {%-       if box.front_mode != 'off' -%}
+      {%-         set _ = why.append('front ' ~ box.front_mode ~ ' -> off') -%}
+      {%-       endif -%}
+      {%-       if entry.subPort | int != hop.sub_port | int -%}
+      {%-         set _ = why.append('subPort ' ~ entry.subPort ~ ' -> ' ~ hop.sub_port) -%}
+      {%-       endif -%}
+      {%-       if entry.subScheme != hop.sub_scheme -%}
+      {%-         set _ = why.append('subScheme ' ~ entry.subScheme ~ ' -> ' ~ hop.sub_scheme) -%}
+      {%-       endif -%}
       {%-     endif -%}
       {%-     if not box.status_ok | bool -%}
       {%-       set _ = why.append('chain status fails') -%}

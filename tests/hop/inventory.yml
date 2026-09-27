@@ -37,6 +37,13 @@ all:
     # verify.yml: one retry, and a fake panel binary for the panel's version check.
     hop_verify_retries: 1
     hop_verify_delay: 1
+    # The «only 443» front (orchestrator#21): off unless a test passes hop_test_front=only443; the box reports its front
+    # through the mock right after joining, so one retry is enough. verify.yml's scan of the boxes' ports needs real
+    # addresses and is left to tests/common.
+    front_mode: "{{ hop_test_front | default('off') }}"
+    hop_front_retries: 1
+    hop_front_delay: 1
+    verify_front_scan: false
   children:
     panel:
       hosts:

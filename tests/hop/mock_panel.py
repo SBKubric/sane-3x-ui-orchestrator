@@ -65,13 +65,14 @@ class Registry:
             hop["position"] = seed.get("position", 0)
             hop["realityTarget"] = seed.get("realityTarget", "")
             hop["realityServerName"] = seed.get("realityServerName", "")
+            hop["frontMode"] = seed.get("frontMode", "off")
             self.hops.append(hop)
         self._reconcile()
 
     def _new_hop(self, name, host, role, sub_port, sub_scheme):
         hop = {"id": self.next_id, "name": name, "host": host, "role": role, "nextHopId": None, "position": 0,
                "subPort": sub_port, "subScheme": sub_scheme, "state": "pending", "isActive": False,
-               "realityTarget": "", "realityServerName": "",
+               "realityTarget": "", "realityServerName": "", "frontMode": "off",
                "drainRevision": 0, "drainUntil": 0, "joinTokenExpires": 0, "observedAddr": "", "joinedAt": 0,
                "lastSeenAt": 0, "lastRevision": 0, "createdAt": 0, "updatedAt": 0}
         self.next_id += 1
@@ -676,6 +677,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(raw)
                 hop = next(h for h in reg.hops if h["name"] == body.pop("name"))
                 reg.update(hop["id"], body)
+                return self._send(200, {"ok": True})
+            if path == "/test/front":
+                # RecordFront: the box's report moves its sub port and scheme, and the revision with them.
+                body = json.loads(raw)
+                hop = next(h for h in reg.hops if h["name"] == body["name"])
+                hop["frontMode"] = body["mode"]
+                if (hop["subPort"], hop["subScheme"]) != (body["subPort"], body["subScheme"]):
+                    hop["subPort"], hop["subScheme"] = body["subPort"], body["subScheme"]
+                    reg.revision += 1
                 return self._send(200, {"ok": True})
             if path == "/test/join":
                 body = json.loads(raw)

@@ -1,7 +1,8 @@
 ---
 # install.sh <tag> in proxy mode on the box of hop_item, joining with hop_join_token. Without a TTY
 # and with an explicit tag install.sh reinstalls that tag over an existing box, rewrites
-# /etc/x-ui/proxy.json and joins with `x-ui chain rejoin` before the service starts.
+# /etc/x-ui/proxy.json (the front from PROXY_FRONT; with only443 it also installs fail2ban) and joins
+# with `x-ui chain rejoin` before the service starts.
 - name: "Download install.sh: {{ hop_item.name }}"
   ansible.builtin.get_url:
     url: "{{ hop_item.install_url }}"
@@ -51,7 +52,7 @@
         {{ {'XUI_REPO': hop_item.repo, 'XUI_PROXY_MODE': '1',
             'PROXY_NEXT_HOP': hop_next_target.host, 'PROXY_NEXT_HOP_SUB_PORT': hop_next_target.port | string,
             'PROXY_NEXT_HOP_SCHEME': hop_next_target.scheme,
-            'PROXY_SUB_PORT': hop_item.sub_port | string, 'PROXY_DOMAIN': hop_item.domain}
+            'PROXY_SUB_PORT': hop_item.sub_port | string, 'PROXY_DOMAIN': hop_item.domain, 'PROXY_FRONT': hop_item.front_mode}
            | combine(hop_install_tls) | combine(hop_item.install_environment) }}
       timeout: "{{ hop_item.install_timeout | int }}"
       delegate_to: "{{ hop_item.inventory_host }}"
