@@ -1,0 +1,124 @@
+---
+# The panel's Nginx settings for «only 443» through panel/api/nginx/*, the calls the Nginx page makes. The managed
+# switches (panel_front_settings) and the ports of panel_front_firewall_keep in firewallExtra are merged into the
+# settings as the panel has them (domain, cover page, internal ports stay). On a difference: the plan must have no
+# blockers, then apply, then confirm. An apply that closes ports arms a rollback in 2 minutes (nginx_confirm.go) that
+# only a call through a session on the panel stops; the role's session is on 127.0.0.1, which the firewall never
+# closes. A confirmation an interrupted run left pending is confirmed as well. Check mode prints the plan.
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Read the front's settings
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: nginx/settings
+    panel_call_method: GET
+
+- name: Compare the front's settings with only443
+  ansible.builtin.set_fact:
+    panel_front_current: "{{ panel_call.obj }}"
+    panel_front_wanted: >-
+      {%- set tokens = panel_call.obj.firewallExtra | default('', true) | replace(';', ',') | split(',')
+                       | map('trim') | reject('equalto', '') | list -%}
+      {%- set missing = panel_front_firewall_keep | map('string') | reject('in', tokens) | list -%}
+      {{ panel_call.obj | combine(panel_front_settings, {'firewallExtra': (tokens + missing) | join(', ')}) }}
+
+- name: "Show the plan: front"
+  ansible.builtin.debug:
+    msg: >-
+      {%- set diff = [] -%}
+      {%- for key, value in panel_front_wanted.items() -%}
+      {%-   if panel_front_current[key] | default(none) != value -%}
+      {%-     set _ = diff.append(key ~ '=' ~ (value | string | lower)) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      front: {{ (panel_front_current.mode ~ ' -> ' ~ panel_front_wanted.mode ~ ' (' ~ diff | join(', ') ~ ')') if diff
+                else panel_front_current.mode ~ ', as wanted' }}
+
+- name: Apply only443
+  when:
+    - panel_front_wanted != panel_front_current
+    - not ansible_check_mode
+  block:
+    - name: Ask the panel for the plan
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: nginx/plan
+        panel_call_method: POST
+        panel_call_body: "{{ panel_front_wanted }}"
+
+    - name: Refuse what the panel would refuse
+      ansible.builtin.assert:
+        that:
+          - panel_call.obj.blockers | default([], true) | length == 0
+        fail_msg: >-
+          the panel's front cannot go only443 (the Nginx page says why):
+          {{ panel_call.obj.blockers | map(attribute='code')
+             | zip(panel_call.obj.blockers | map(attribute='params', default=[]) | map('join', ', '),
+                   panel_call.obj.blockers | map(attribute='text', default=''))
+             | map('join', ' ') | map('trim') | join('; ') }}
+        quiet: true
+
+    - name: Apply the front's settings
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: nginx/apply
+        panel_call_method: POST
+        panel_call_body: "{{ panel_front_wanted }}"
+
+- name: Read the front's status
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: nginx/status
+    panel_call_method: GET
+
+- name: Keep the front's status
+  ansible.builtin.set_fact:
+    panel_front_status: "{{ panel_call.obj }}"
+
+- name: Confirm that the panel is still reachable
+  when:
+    - panel_front_status.confirmDeadline | default(0) | int > 0
+    - not ansible_check_mode
+  block:
+    - name: Confirm the new front before the rollback
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: nginx/confirm
+        panel_call_method: POST
+
+    - name: Read the front's status again
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: nginx/status
+        panel_call_method: GET
+
+    - name: Keep the confirmed status
+      ansible.builtin.set_fact:
+        panel_front_status: "{{ panel_call.obj }}"
+
+- name: Require the front in only443, confirmed
+  ansible.builtin.assert:
+    that:
+      - panel_front_status.mode == panel_front_settings.mode
+      - panel_front_status.confirmDeadline | default(0) | int == 0
+      - panel_front_status.firewallOn | default(false) | bool or not panel_front_settings.manageFirewall | bool
+    fail_msg: >-
+      the panel's front is {{ panel_front_status.mode }} (firewall {{ 'on' if panel_front_status.firewallOn | default(false) else 'off' }},
+      confirmation {{ 'pending' if panel_front_status.confirmDeadline | default(0) | int > 0 else 'none' }}) after the apply;
+      see the Nginx page through the SSH tunnel and `journalctl -u {{ panel_service }}`
+    success_msg: >-
+      front: {{ panel_front_status.mode }}, firewall {{ 'on' if panel_front_status.firewallOn | default(false) else 'off' }},
+      nothing to confirm; IP certificate {{ panel_front_status.ipCertFile | default('', true) or 'none' }}
+  when: not ansible_check_mode
+
+- name: Show the warnings of the front
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the panel front reports {{ panel_front_status.warnings | map(attribute='code')
+      | zip(panel_front_status.warnings | map(attribute='params', default=[]) | map('join', ', '))
+      | map('join', ' ') | map('trim') | join('; ') }}
+  when: panel_front_status.warnings | default([], true) | length > 0

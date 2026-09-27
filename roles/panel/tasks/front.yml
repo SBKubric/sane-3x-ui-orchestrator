@@ -1,0 +1,21 @@
+---
+# The profile «only 443» on the panel (front_mode only443, SBKubric/sane-3x-ui ADR 0005), after the inbounds: the front
+# routes the Reality inbound by its server name, so it needs one. In order: the Let's Encrypt IP certificate the HTTP
+# side answers requests by address with (subscriptions, the chain poll, /mon/v1, login and API on 443), fail2ban for
+# the front's jails, webListen 127.0.0.1 and chainPanelHost, then the front itself with its firewall, confirmed.
+# The role's own API calls stay on https://127.0.0.1:<panel_port> on the panel host, which neither webListen nor the
+# firewall takes away.
+- name: The profile «only 443»
+  when: panel_front_mode == 'only443'
+  block:
+    - name: Let's Encrypt IP certificate of the HTTP side
+      ansible.builtin.include_tasks: ip_cert.yml
+
+    - name: Fail2ban for the front's jails
+      ansible.builtin.include_tasks: fail2ban.yml
+
+    - name: The panel's webListen and chainPanelHost
+      ansible.builtin.include_tasks: web_settings.yml
+
+    - name: The front in only443
+      ansible.builtin.include_tasks: front_nginx.yml

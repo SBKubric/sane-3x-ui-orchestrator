@@ -1,7 +1,7 @@
 ---
 # Role panel: install/update by tag, self-signed TLS, account from the vault, Telegram and monitoring
-# through the x-ui CLI, inbounds from panel_inbounds through the API; leaves panel_url, panel_ca_pem and
-# (with monitoring) panel_mon_token as facts.
+# through the x-ui CLI, inbounds from panel_inbounds through the API, the «only 443» front (front_mode); leaves
+# panel_url, panel_ca_pem and (with monitoring) panel_mon_token as facts.
 - name: Check role inputs
   ansible.builtin.assert:
     that:
@@ -11,9 +11,11 @@
       - panel_port is defined and panel_port | int > 0 and panel_port | int < 65536
       - panel_base_path is defined and panel_base_path | regex_replace('^/+|/+$', '') | length >= 4
       - (panel_tg_bot_token | length > 0) == (panel_tg_chat_id | string | length > 0)
+      - panel_front_mode in ['only443', 'off']
     fail_msg: >-
       role panel needs xui_version (group_vars) and panel_user, panel_password, panel_port 1-65535,
-      panel_base_path of at least 4 characters (vault); tg_bot_token and tg_chat_id go together.
+      panel_base_path of at least 4 characters (vault); tg_bot_token and tg_chat_id go together;
+      front_mode is only443 or off.
     quiet: true
 
 - name: Gather network facts for the certificate address
@@ -49,6 +51,10 @@
 - name: Inbounds from panel_inbounds
   ansible.builtin.include_tasks: inbounds.yml
   when: panel_inbounds | length > 0
+
+# After the inbounds: the front routes the Reality inbound by its server name and refuses to come up without one.
+- name: The profile «only 443»
+  ansible.builtin.include_tasks: front.yml
 
 - name: Export panel facts
   ansible.builtin.include_tasks: facts.yml

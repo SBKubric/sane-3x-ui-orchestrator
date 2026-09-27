@@ -12,6 +12,12 @@ web/service/chain_follow.go neighbourTarget, refused on an inner hop) and the ch
 Test-only extras: POST /test/join (what `x-ui chain rejoin` does on a box), POST /test/front (a box's front report),
 POST /test/chain/update (a registry update by hop name), GET /test/state, POST /test/reset, GET /install.sh (the fake
 installer), and for the panel part POST /test/panel/reset, POST /test/panel/ensure, POST /test/panel/targets.
+
+The panel part also has the front's settings (panel/api/nginx/settings|plan|apply|confirm|status, web/service/
+nginx_service.go, nginx_apply.go, nginx_confirm.go): apply moves the routed inbounds to the loopback (listen
+127.0.0.1, publicPort 443, no PROXY header for Reality) and arms the 2-minute confirmation when it closes ports,
+confirm clears it; and the settings form (panel/setting/all|update: update takes the whole form, a key left out
+is zeroed). Test hooks: POST /test/panel/nginx (seed settings, blockers, warnings, a pending confirmation).
 """
 
 import ipaddress
@@ -324,7 +330,20 @@ class Panel:
         self.registry = registry
         self.reset({})
 
+    NGINX_DEFAULTS = {"mode": "shared", "domain": "", "stubSiteId": 0, "subsBehind443": False, "panelBehind443": False,
+                      "manageFirewall": False, "firewallExtra": "", "realityPort": 8443, "httpPort": 0}
+    SETTINGS_DEFAULTS = {"webListen": "", "webDomain": "", "webPort": 2053, "webCertFile": "/etc/x-ui/tls/panel.crt",
+                         "webKeyFile": "/etc/x-ui/tls/panel.key", "webBasePath": "/base/", "sessionMaxAge": 360,
+                         "tgBotEnable": False, "tgBotToken": "", "tgBotChatId": "", "subEnable": True, "subPort": 2096,
+                         "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
+                         "timeLocation": "Local", "externalTrafficInformEnable": False}
+
     def reset(self, seed):
+        self.nginx = dict(self.NGINX_DEFAULTS, **seed.get("nginx", {}))
+        self.nginx_blockers = []
+        self.nginx_warnings = []
+        self.confirm_deadline = 0
+        self.settings = dict(self.SETTINGS_DEFAULTS, **seed.get("settings", {}))
         self.inbounds = []
         self.next_id = 1
         self.x25519 = list(seed.get("x25519", []))
@@ -497,9 +516,76 @@ class Panel:
                                                         "flow": "", "subId": "probe-sub", "comment": "monitoring probe"})
             inbound["settings"] = self._reserialize(json.dumps(settings), inbound["settings"])
 
+    # --- the front (nginx) -----------------------------------------------------------------------------
+    def _routes(self):
+        """collectRoutes: enabled VLESS Reality inbounds are what the front can route by server name."""
+        return [i for i in self.inbounds if i["enable"] and i["protocol"] == "vless"
+                and json.loads(i["streamSettings"] or "{}").get("security") == "reality"]
+
+    @staticmethod
+    def _closes_ports(nginx):
+        return nginx["mode"] == "only443" and nginx["manageFirewall"]
+
+    @staticmethod
+    def _normalized(nginx):
+        """GetSettings: off drops every switch, shared drops the panel and the firewall."""
+        out = dict(nginx)
+        if out["mode"] in ("off", ""):
+            out.update(subsBehind443=False, panelBehind443=False, manageFirewall=False)
+        elif out["mode"] == "shared":
+            out.update(panelBehind443=False, manageFirewall=False)
+        return out
+
+    def nginx_settings(self):
+        return self._normalized(self.nginx)
+
+    def nginx_plan(self, raw):
+        body = bind(raw, {"mode": str, "domain": str, "stubSiteId": int, "subsBehind443": bool, "panelBehind443": bool,
+                          "manageFirewall": bool, "firewallExtra": str, "realityPort": int, "httpPort": int})
+        blockers = list(self.nginx_blockers)
+        if body.get("mode") != "off" and not self._routes():
+            blockers.append({"code": "nothingToRoute"})
+        return {"mode": body.get("mode", ""), "changes": [], "blockers": blockers, "warnings": list(self.nginx_warnings)}
+
+    def nginx_apply(self, raw):
+        body = bind(raw, {"mode": str, "domain": str, "stubSiteId": int, "subsBehind443": bool, "panelBehind443": bool,
+                          "manageFirewall": bool, "firewallExtra": str, "realityPort": int, "httpPort": int})
+        if body.get("mode") not in ("off", "shared", "only443"):
+            raise Refusal("invalid_request", f"unknown mode {body.get('mode')!r}")
+        previous = self.nginx_settings()
+        wanted = self._normalized(dict(self.NGINX_DEFAULTS, **body))
+        if wanted["mode"] != "off":
+            if not self._routes():
+                raise Refusal("nothing_to_route", "no inbound can be routed by server name")
+            for inbound in self._routes():
+                stream = json.loads(inbound["streamSettings"])
+                stream.setdefault("sockopt", {})["acceptProxyProtocol"] = False
+                inbound.update(listen="127.0.0.1", publicPort=443, streamSettings=json.dumps(stream, indent=2))
+        self.nginx = wanted
+        if self._closes_ports(wanted) and (not self._closes_ports(previous)
+                                           or (wanted["panelBehind443"] and not previous["panelBehind443"])):
+            self.confirm_deadline = 1790000120000
+
+    def nginx_confirm(self):
+        self.confirm_deadline = 0
+
+    def nginx_status(self):
+        nginx = self.nginx_settings()
+        return {"installed": True, "running": True, "mode": nginx["mode"], "domain": nginx["domain"],
+                "firewallOn": self._closes_ports(nginx), "confirmDeadline": self.confirm_deadline,
+                "ipCertFile": "/root/cert/ip/fullchain.pem", "publicPort": 443, "routes": [],
+                "warnings": list(self.nginx_warnings)}
+
+    # --- the settings form ------------------------------------------------------------------------------
+    def update_settings(self, raw):
+        body = json.loads(raw or "{}")
+        # UpdateAllSetting saves every field of the form: one left out goes back to its zero value.
+        self.settings = {key: body.get(key, type(value)()) for key, value in self.settings.items()}
+
     def state(self):
         return {"inbounds": [dict(i) for i in self.inbounds], "awg": dict(self.awg), "ports": self.ports(),
-                "x25519": list(self.x25519)}
+                "x25519": list(self.x25519), "nginx": dict(self.nginx), "confirmDeadline": self.confirm_deadline,
+                "settings": dict(self.settings)}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
@@ -576,6 +662,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/test/panel/ensure":
                 reg.panel.ensure()
                 return self._send(200, {"ok": True})
+            if path == "/test/panel/nginx":
+                seed = json.loads(raw or "{}")
+                reg.panel.nginx.update(seed.get("settings", {}))
+                reg.panel.nginx_blockers = seed.get("blockers", [])
+                reg.panel.nginx_warnings = seed.get("warnings", [])
+                reg.panel.confirm_deadline = seed.get("confirmDeadline", reg.panel.confirm_deadline)
+                return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
@@ -598,6 +691,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"success": False, "msg": "wrong username or password", "obj": None})
                 return self._send(200, {"success": True, "msg": "", "obj": None},
                                   headers={"Set-Cookie": COOKIE + "; Path=/base/; HttpOnly"})
+            if path.startswith(BASE + "panel/setting/") and COOKIE in (self.headers.get("Cookie") or ""):
+                route = path[len(BASE + "panel/setting/"):]
+                reg.calls.append({"method": method, "path": "setting/" + route, "body": raw})
+                if method == "POST" and route == "all":
+                    return self._send(200, {"success": True, "msg": "", "obj": dict(reg.panel.settings)})
+                if method == "POST" and route == "update":
+                    reg.panel.update_settings(raw)
+                    return self._send(200, {"success": True, "msg": "", "obj": None})
+                return self._send(404, None, raw=b"404 page not found")
             prefix = BASE + "panel/api/"
             if not path.startswith(prefix) or COOKIE not in (self.headers.get("Cookie") or ""):
                 return self._send(404, None, raw=b"404 page not found")
@@ -646,6 +748,16 @@ class Handler(BaseHTTPRequestHandler):
             return panel.new_x25519()
         if method == "GET" and route == "awg/server":
             return dict(panel.awg)
+        if method == "GET" and route == "nginx/settings":
+            return panel.nginx_settings()
+        if method == "GET" and route == "nginx/status":
+            return panel.nginx_status()
+        if method == "POST" and route == "nginx/plan":
+            return panel.nginx_plan(raw)
+        if method == "POST" and route == "nginx/apply":
+            return panel.nginx_apply(raw)
+        if method == "POST" and route == "nginx/confirm":
+            return panel.nginx_confirm()
         if method == "GET" and route == "monitoring/targets":
             if panel.targets is None:
                 raise Refusal("monitoring_off", "no targets seeded")

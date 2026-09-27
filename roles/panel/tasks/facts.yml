@@ -1,11 +1,14 @@
 ---
 # Facts for later plays: hostvars[groups['panel'][0]].panel_url / .panel_ca_pem / .panel_mon_token.
+# Behind the only443 front mon-server reaches the panel on 443 with the publicly trusted IP certificate: no port in
+# panel_url and no panelCa (SBKubric/sane-3x-ui ADR 0005).
 - name: Read the panel certificate
   ansible.builtin.slurp:
     src: "{{ panel_cert_file }}"
   register: panel_cert_content
+  when: panel_front_mode != 'only443'
 
 - name: Set panel facts
   ansible.builtin.set_fact:
-    panel_url: "https://{{ panel_public_ip }}:{{ panel_port }}{{ panel_web_base_path }}"
-    panel_ca_pem: "{{ panel_cert_content.content | b64decode }}"
+    panel_url: "https://{{ panel_public_ip }}{{ '' if panel_front_mode == 'only443' else ':' ~ panel_port }}{{ panel_web_base_path }}"
+    panel_ca_pem: "{{ '' if panel_front_mode == 'only443' else panel_cert_content.content | b64decode }}"

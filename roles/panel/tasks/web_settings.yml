@@ -1,0 +1,83 @@
+---
+# webListen and chainPanelHost through the panel's settings form: POST panel/setting/update saves the whole form (a
+# field left out goes back to its zero value), so the form is read with panel/setting/all and sent back with only
+# these two changed, and only when one of them differs. A new webListen takes a panel restart; the role's API URL
+# (127.0.0.1) keeps working on the loopback.
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Read the panel's settings form
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_web_form
+  check_mode: false
+  no_log: true
+
+- name: Compare webListen and chainPanelHost
+  ansible.builtin.set_fact:
+    panel_web_current: "{{ panel_web_form.json.obj }}"
+    panel_web_wanted: "{{ panel_web_form.json.obj | combine({'webListen': panel_web_listen, 'chainPanelHost': panel_chain_host}) }}"
+  no_log: true
+
+- name: "Show the plan: panel settings"
+  ansible.builtin.debug:
+    msg: >-
+      panel settings: webListen '{{ panel_web_current.webListen }}' -> '{{ panel_web_listen }}',
+      chainPanelHost '{{ panel_web_current.chainPanelHost }}' -> '{{ panel_chain_host }}'{{
+      '' if panel_web_wanted != panel_web_current else ' (as wanted)' }}
+
+- name: Save webListen and chainPanelHost
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/update"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body: "{{ panel_web_wanted }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_web_saved
+  when:
+    - panel_web_wanted != panel_web_current
+    - not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Require the settings saved
+  ansible.builtin.assert:
+    that:
+      - panel_web_saved.json.success | default(false) | bool
+    fail_msg: "POST panel/setting/update failed: HTTP {{ panel_web_saved.status | default('?') }} {{ panel_web_saved.json.msg | default('') }}"
+    quiet: true
+  when: panel_web_saved is not skipped
+
+- name: Restart the panel on its new listen address
+  when:
+    - panel_web_saved is not skipped
+    - panel_web_current.webListen != panel_web_listen
+  block:
+    - name: Restart the panel on its new listen address
+      ansible.builtin.command:
+        argv: "{{ panel_restart_command }}"
+      changed_when: true
+
+    - name: Wait for the panel on the loopback
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ panel_api_url | urlsplit('port') }}"
+        timeout: 120
+
+    - name: Log in again after the restart
+      ansible.builtin.include_tasks: api_login.yml

@@ -10,10 +10,14 @@
 #   panel_inbounds     inbounds converged through panel/api/inbounds (tasks/inbounds.yml, README "Inbounds")
 # Monitoring is switched on only when group `monserver` is not empty.
 #
+# Inputs from the inventory (group_vars/all, optional):
+#   front_mode         only443 (default) | off: the profile «only 443» (tasks/front.yml, README "Front: only 443")
+#
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
 #   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver; only with monitoring)
-#   panel_ca_pem       PEM of the self-signed panel certificate       (role monserver: panelCa)
-#   panel_url          https://<panel_public_ip>:<panel_port><panel_base_path>  (roles hop, monserver, verify)
+#   panel_ca_pem       PEM of the self-signed panel certificate; empty behind the front (role monserver: panelCa)
+#   panel_url          https://<panel_public_ip><panel_base_path> on 443 behind the front, else
+#                      https://<panel_public_ip>:<panel_port><panel_base_path>   (roles hop, monserver, verify)
 #
 # API login helper for other roles (hop, verify), see README "Panel API from other roles":
 #   - ansible.builtin.include_role: {name: panel, tasks_from: api_login}
@@ -101,6 +105,42 @@ panel_inbound_default_sniffing:
   routeOnly: false
   ipsExcluded: []
   domainsExcluded: []
+
+# The profile «only 443» (SBKubric/sane-3x-ui ADR 0005, tasks/front.yml). only443: the panel's own pages listen on
+# 127.0.0.1 (the admin comes through an SSH tunnel), and nginx on 443 publishes the subscriptions, the chain poll,
+# /mon/v1, <base>login and <base>panel/api/ with the box's Let's Encrypt IP certificate; the firewall leaves 443/tcp,
+# SSH, 80/tcp (ACME) and the AWG UDP port open. off: the role leaves the panel's front, webListen and
+# chainPanelHost as they are (install.sh's default is the front in mode shared).
+panel_front_mode: "{{ front_mode | default('only443') }}"
+# The Nginx settings only443 sets (panel/api/nginx/apply); the rest (domain, cover page, internal ports) stays as the
+# panel has it.
+panel_front_settings:
+  mode: only443
+  subsBehind443: true
+  panelBehind443: true
+  manageFirewall: true
+# Ports kept in the firewall's firewallExtra next to the owner's own: the panel's firewall does not open 80/tcp for the
+# ACME webroot by itself, and the IP certificate renews there every 3 days.
+panel_front_firewall_keep: ["80"]
+# webListen of the panel (tasks/web_settings.yml) and chainPanelHost, the address the innermost hop polls: behind an
+# IP-only front it must be an address the IP certificate names.
+panel_web_listen: 127.0.0.1
+panel_chain_host: "{{ panel_public_ip }}"
+# A new webListen takes a restart of the panel.
+panel_restart_command: [systemctl, restart, "{{ panel_service }}"]
+# The Let's Encrypt IP certificate of the HTTP side on 443 (tasks/ip_cert.yml), issued once through nginx's webroot on
+# port 80 the way install.sh issues it (acme_issue_webroot) and renewed by acme.sh's cron every 3 days; a valid one for
+# panel_public_ip (at least a day left) is kept. wipe.yml keeps it too (Let's Encrypt: 5 per address a week).
+panel_ip_cert_dir: /root/cert/ip
+panel_acme_home: /root/.acme.sh
+panel_acme_install_url: https://get.acme.sh
+panel_acme_webroot: /usr/local/x-ui/acme-webroot
+panel_acme_reload_cmd: >-
+  systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null; systemctl restart {{ panel_service }} 2>/dev/null || true
+# fail2ban for the front's jails (the panel writes them); install.sh installs it with XUI_FAIL2BAN=1, this covers a
+# panel that is not reinstalled.
+panel_fail2ban_packages: [fail2ban, python3-systemd]
+panel_fail2ban_dir: /etc/fail2ban
 
 # Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
 panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"
