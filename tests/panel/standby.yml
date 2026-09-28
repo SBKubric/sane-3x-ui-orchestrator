@@ -1,0 +1,9 @@
+---
+# Extra inventory on top of tests/panel/hops.yml: proxy2, a second edge of the chain. Which edge is active is
+# the registry's word (the mock's chain/list), not hop_active: the targets step of verify.yml reads it there.
+all:
+  children:
+    hops:
+      hosts:
+        proxy2:
+          hop_role: edge
