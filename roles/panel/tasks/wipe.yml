@@ -1,14 +1,39 @@
 ---
-# wipe.yml on the panel host: the service, what the panel set up on the system (tunnel interfaces, nginx
-# front, firewall chain; the same steps as `x-ui uninstall`), then its files: database, certificate,
-# install dir. Packages installed by install.sh (AmneziaWG, WireGuard, nginx) stay. A box without a panel
-# reports ok; a second wipe changes nothing.
+# wipe.yml on the panel host: the service (with the ru-inside drop-in), the ru-inside timer and service, what the
+# panel set up on the system (tunnel interfaces, nginx front, firewall chain; the same steps as `x-ui uninstall`),
+# then its files: database, certificate, install dir, the ru-inside list and script. Packages installed by
+# install.sh (AmneziaWG, WireGuard, nginx) stay. A box without a panel reports ok; a second wipe changes nothing.
 - name: Remove the panel service
   ansible.builtin.include_role:
     name: common
     tasks_from: wipe_service
   vars:
     common_wipe_unit: "{{ panel_service }}"
+
+- name: Look for the ru-inside timer
+  ansible.builtin.stat:
+    path: "{{ panel_ru_inside_systemd_dir }}/{{ panel_ru_inside_unit }}.timer"
+    get_checksum: false
+  register: panel_wipe_ru_inside_timer
+
+- name: Stop and disable the ru-inside timer
+  ansible.builtin.systemd_service:
+    name: "{{ panel_ru_inside_unit }}.timer"
+    state: stopped
+    enabled: false
+  when: panel_wipe_ru_inside_timer.stat.exists
+
+- name: Remove the ru-inside timer file
+  ansible.builtin.file:
+    path: "{{ panel_ru_inside_systemd_dir }}/{{ panel_ru_inside_unit }}.timer"
+    state: absent
+
+- name: Remove the ru-inside service
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: wipe_service
+  vars:
+    common_wipe_unit: "{{ panel_ru_inside_unit }}"
 
 - name: Take down the panel's tunnels, nginx front and firewall chain
   ansible.builtin.shell:

@@ -27,7 +27,8 @@ inventories/
 roles/
   common/              supported OS check, base packages, time sync; tasks/verify_front.yml + files/portscan.py:
                        verify.yml's «only 443» check from the controller
-  panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, inbounds
+  panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, geosite
+                       ru-inside dropped (tasks/ru_inside.yml + files/ru_inside.py, the daily refresh), inbounds
                        from panel_inbounds, the «only 443» front (tasks/front.yml); tasks/api_login.yml is the
                        panel API login helper for other roles
   hop/                 chain registry converged with group hops through the panel API; install + join;
@@ -37,8 +38,8 @@ roles/
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
 tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API, and
                        neighbour.py against a fake scanner, fake xray and local sites (CI)
-tests/panel/           role panel's inbounds, its «only 443» front and the targets part of verify.yml against the
-                       same mock and local fakes (CI)
+tests/panel/           role panel's inbounds, its «only 443» front, geosite ru-inside (with a local source of the
+                       list) and the targets part of verify.yml against the same mock and local fakes (CI)
 tests/monserver/       role monserver's Settings against a mock of mon-server's admin API, verify's probe links (CI)
 tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
@@ -119,9 +120,12 @@ skipped when the host already matches, so a second run reports `changed=0`.
 5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
    if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
    The token is read back every run and never stored in the vault.
-6. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
+6. **geosite ru-inside** (`panel_ru_inside_enabled`, on by default): the list of sites reachable only from inside
+   Russia, kept fresh on the box by a daily timer, and a routing rule in the panel's Xray template that drops the
+   clients' traffic to them, see [Blocking ru-inside](#blocking-ru-inside).
+7. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
    hops play, so hops that join in the same run find the relayed ports in the chain document.
-7. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
+8. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
    fail2ban, `webListen` 127.0.0.1 and `chainPanelHost`, then the panel's nginx front with its firewall, see
    [Front: only 443](#front-only-443).
 
@@ -254,6 +258,49 @@ mon-client path (`xray:<id>` and `awg:0`).
 Knobs in `roles/panel/defaults/main.yml`: `panel_public_ip` (default IPv4 from facts; set it in
 `host_vars` behind NAT), `panel_cert_sans`, `panel_cert_valid_days`, `panel_tls_dir`,
 `panel_install_ref`/`panel_install_url`, `panel_install_timeout`.
+
+### Blocking ru-inside
+
+Clients of the panel get no answer from the sites of `geosite:ru-inside`
+([golukon/russia-only-geosite](https://github.com/golukon/russia-only-geosite): sites reachable only from inside
+Russia; one `geosite.dat` of about 13 KB, released daily at about 03:30 UTC): a routing rule of the panel's Xray
+template sends them to the `blocked` blackhole outbound, a silent drop. Only the panel: the hops relay TCP/UDP and never
+see a domain. The rule matches the domain a client asks for, or the one xray sniffs (the stand's inbound sniffs
+http/tls/quic); a client that resolves the name itself and sends only an IP to an inbound without sniffing passes.
+
+On the panel host (`tasks/ru_inside.yml`):
+
+- **The list.** `/usr/local/sbin/3ax-ru-inside refresh` (`files/ru_inside.py`, settings in `/etc/3ax-ru-inside.json`)
+  downloads `geosite.dat.sha256sum` and `geosite.dat`, checks the sha256, the size (`panel_ru_inside_min_bytes` ..
+  `panel_ru_inside_max_bytes`) and that the file has the category `ru-inside`, and replaces
+  `/var/lib/3ax-ru-inside/ru-inside.dat` atomically when the content differs (a current list only gets its mtime
+  touched: the file's age is the time since the last good check). `/usr/local/x-ui/bin/ru-inside.dat`, in xray's
+  asset folder, is a link to it: install.sh deletes `/usr/local/x-ui` with that folder on every (re)install, so the
+  list lives outside it and a drop-in of `x-ui.service` (`ExecStartPre=-3ax-ru-inside ensure`) puts the link back
+  before the panel starts xray. The name is neither one of the panel's geo files nor `geosite_<alias>.dat`/
+  `geoip_<alias>.dat` of its custom geo resources.
+- **The timer.** `3ax-ru-inside.timer` runs the same refresh daily (`panel_ru_inside_on_calendar`, 05:00 UTC, with
+  `panel_ru_inside_randomized_delay` 1h; `Persistent=true`), and restarts xray (`systemctl reload x-ui`, what
+  `x-ui restart-xray` does) only when the list changed. A failed download or check keeps the old list; the reason is
+  in `journalctl -u 3ax-ru-inside` and the service is `failed` (exit 3) until the next good run.
+- **Every run** of `site.yml` refreshes the list the same way. A box that cannot fetch it (no GitHub), or gets a list
+  that fails a check, gets it from the controller: `get_url` downloads it there against the same sum file, and the
+  script on the box checks it again and installs it. With neither, the old list stays with a `WARNING`; with no list
+  at all there is no rule (xray does not start on an `ext:` rule whose file is missing), and a rule left from before
+  is taken out.
+- **The rule.** `{"type": "field", "ruleTag": "3ax-ru-inside", "domain": ["ext:ru-inside.dat:ru-inside"],
+  "outboundTag": "blocked"}`, right after the panel's `api` rule (the panel keeps that one first), read and saved
+  through `POST <base>panel/xray/` and `panel/xray/update` with the rest of the form as it was. Other rules and
+  outbounds stay; the rule is found by its `ruleTag`, or by its domain entry when the panel's routing editor dropped
+  the tag, and there is exactly one. A missing `blocked` outbound is added as a blackhole; one with another protocol
+  stops the run. After a save xray is restarted through the panel (`panel/api/server/restartXrayService`); if it
+  does not come up, the previous template goes back and the run fails. A new list under an unchanged rule only
+  restarts xray.
+
+`panel_ru_inside_enabled: false` takes the rule out and stops the timer (the files stay until `wipe.yml`). The URLs,
+file name, schedule and limits are `panel_ru_inside_*` in `roles/panel/defaults/main.yml`. `verify.yml` checks the
+rule, the list and the timer, and warns when the list's last good check is older than `panel_ru_inside_max_age_days`
+(3).
 
 ### Panel API from other roles
 
@@ -609,7 +656,7 @@ then:
 
 | Group | Deleted | Kept |
 |---|---|---|
-| panel | unit `x-ui`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3, fail2ban), the rest of nginx.conf, the front's LE IP certificate `/root/cert/ip` with acme.sh's renewal (the next `site.yml` keeps using it) |
+| panel | unit `x-ui` (with the ru-inside drop-in), units `3ax-ru-inside.timer`/`.service`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the ru-inside list `/var/lib/3ax-ru-inside`, `/usr/local/sbin/3ax-ru-inside` and `/etc/3ax-ru-inside.json`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3, fail2ban), the rest of nginx.conf, the front's LE IP certificate `/root/cert/ip` with acme.sh's renewal (the next `site.yml` keeps using it) |
 | hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`); fail2ban and its jails |
 | monserver | unit `mon-server`; `/usr/local/bin/mon-server`, `/etc/mon-server`, `/var/cache/3ax-ui-orchestrator/mon-server`, everything in `/var/lib/mon-server` (database: admin account, Settings, mon-client registry) | `/var/lib/mon-server/certs` (certmagic's ACME account and certificates) and the `mon-server` user that owns it; `-e monserver_wipe_certs=true` deletes the whole data dir and the user |
 | monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`; user and group `mon-client` | nothing |
@@ -627,7 +674,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -779,6 +826,15 @@ confirmation confirmed, warnings shown, check mode, `front_mode: off`; `webListe
 whole settings form with a restart only for a new listen address; the LE IP certificate through a fake acme.sh and
 x-ui (installer, acme-front before the issue, webroot/shortlived flags, reuse while valid for the address, reissue
 for another address or an expiring one, check mode); `panel_url`/`panel_ca_pem` behind the front;
+`tests/panel/test_ru_inside.py`: geosite ru-inside against the same mock (its Xray template API and an xray restart
+that fails on a missing `ext:` file) and a local source of the list — a fresh box (list, link, timer, service,
+drop-in, the rule right after the api rule, one restart), idempotent, other rules and the form kept, a rule the UI
+stripped of its tag not doubled, the api rule elsewhere, a missing blackhole added and a `blocked` of another protocol
+refused, a new list restarting xray, a box without GitHub served by the controller, a bad checksum or a list without
+the category keeping the old one with a warning, no list anywhere leaving the template alone and taking a stale rule
+out, a failed restart putting the old template back, `panel_ru_inside_enabled: false`; the script as the timer and
+`ExecStartPre` run it (restart only on a new list, the check time, the link after a reinstall); the ru-inside check of
+`verify.yml` (fresh, old list, no rule, no file);
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -798,7 +854,8 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
     ansible-playbook -i "$inv" "$pb" --syntax-check; done; done &&
   python3 tests/hop/test_neighbour_script.py &&
   python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
-  python3 tests/panel/test_panel_front.py && python3 tests/monserver/test_settings.py &&
+  python3 tests/panel/test_panel_front.py && python3 tests/panel/test_ru_inside.py &&
+  python3 tests/monserver/test_settings.py &&
   python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py'
 ```
 

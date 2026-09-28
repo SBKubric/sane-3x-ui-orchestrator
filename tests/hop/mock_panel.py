@@ -18,15 +18,43 @@ nginx_service.go, nginx_apply.go, nginx_confirm.go): apply moves the routed inbo
 127.0.0.1, publicPort 443, no PROXY header for Reality) and arms the 2-minute confirmation when it closes ports,
 confirm clears it; and the settings form (panel/setting/all|update: update takes the whole form, a key left out
 is zeroed). Test hooks: POST /test/panel/nginx (seed settings, blockers, warnings, a pending confirmation).
+
+And the Xray template (web/controller/xray_setting.go, web/service/xray_setting.go): POST panel/xray/ answers the
+template in the panel's wrapper (obj = a JSON string {xraySetting, inboundTags, clientReverseTags, outboundTestUrl,
+hiddifyCompat}); POST panel/xray/update takes the form (xraySetting, outboundTestUrl: empty = the default URL,
+hiddifyCompat: empty = unchanged), refuses JSON that does not parse and pins the api rule first (EnsureStatsRouting);
+POST panel/api/server/restartXrayService fails the way xray does on a routing rule whose ext: file is missing from
+the asset folder or lacks the category. Test hook: POST /test/panel/xray (template, assetDir, restartFails).
 """
 
 import ipaddress
 import json
+import os
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs
+
+# web/service/config.json of the panel: the template of a fresh install.
+DEFAULT_XRAY_TEMPLATE = {
+    "log": {"access": "none", "dnsLog": False, "error": "", "loglevel": "warning", "maskAddress": ""},
+    "api": {"tag": "api", "services": ["HandlerService", "LoggerService", "StatsService"]},
+    "inbounds": [{"tag": "api", "listen": "127.0.0.1", "port": 62789, "protocol": "tunnel",
+                  "settings": {"address": "127.0.0.1"}}],
+    "outbounds": [{"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "AsIs", "redirect": "", "noises": []}},
+                  {"tag": "blocked", "protocol": "blackhole", "settings": {}}],
+    "policy": {"levels": {"0": {"statsUserDownlink": True, "statsUserUplink": True}},
+               "system": {"statsInboundDownlink": True, "statsInboundUplink": True, "statsOutboundDownlink": False,
+                          "statsOutboundUplink": False}},
+    "routing": {"domainStrategy": "AsIs", "rules": [
+        {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+        {"type": "field", "outboundTag": "blocked", "ip": ["geoip:private"]},
+        {"type": "field", "outboundTag": "blocked", "protocol": ["bittorrent"]}]},
+    "stats": {},
+    "metrics": {"tag": "metrics_out", "listen": "127.0.0.1:11111"},
+}
+DEFAULT_OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
 
 BASE = "/base/"
 USER, PASSWORD = "admin", "secret-pass"
@@ -349,6 +377,12 @@ class Panel:
         self.next_id = 1
         self.x25519 = list(seed.get("x25519", []))
         self.targets = seed.get("targets")
+        self.xray_template = json.dumps(seed.get("xrayTemplate", DEFAULT_XRAY_TEMPLATE))
+        self.outbound_test_url = DEFAULT_OUTBOUND_TEST_URL
+        self.hiddify_compat = False
+        self.xray_asset_dir = seed.get("xrayAssetDir")
+        self.xray_restart_fails = False
+        self.xray_restarts = 0
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
                     "h1": "1-100", "endpoint": "10.0.0.1"}
@@ -583,10 +617,51 @@ class Panel:
         # UpdateAllSetting saves every field of the form: one left out goes back to its zero value.
         self.settings = {key: body.get(key, type(value)()) for key, value in self.settings.items()}
 
+    # --- the Xray template ----------------------------------------------------------------------------------
+    def xray_setting(self):
+        return json.dumps({"xraySetting": json.loads(self.xray_template), "inboundTags": "[]", "clientReverseTags": "[]",
+                           "outboundTestUrl": self.outbound_test_url, "hiddifyCompat": self.hiddify_compat})
+
+    def xray_update(self, raw):
+        form = parse_qs(raw, keep_blank_values=True)
+        template = form.get("xraySetting", [""])[0]
+        try:
+            config = json.loads(template)
+        except ValueError as err:
+            raise Refusal("xray", f"xray template config invalid: {err}") from err
+        rules = config.get("routing", {}).get("rules", [])
+        api = [i for i, r in enumerate(rules) if r.get("outboundTag") == "api" and "api" in (r.get("inboundTag") or [])]
+        if not api or api[0] != 0:  # EnsureStatsRouting: re-marshalled only when it moves the api rule
+            rule = rules.pop(api[0]) if api else {"type": "field", "inboundTag": ["api"], "outboundTag": "api"}
+            config.setdefault("routing", {})["rules"] = [rule] + rules
+            template = json.dumps(config, sort_keys=True)
+        self.xray_template = template
+        self.outbound_test_url = form.get("outboundTestUrl", [""])[0] or DEFAULT_OUTBOUND_TEST_URL
+        if form.get("hiddifyCompat", [""])[0]:
+            self.hiddify_compat = form["hiddifyCompat"][0] == "true"
+
+    def xray_restart(self):
+        self.xray_restarts += 1
+        if self.xray_restart_fails:
+            raise Refusal("xray", "Failed to restart xray-core")
+        for rule in json.loads(self.xray_template).get("routing", {}).get("rules", []):
+            for entry in rule.get("domain", []):
+                if not entry.startswith("ext:"):
+                    continue
+                _, name, category = entry.split(":", 2)
+                path = os.path.join(self.xray_asset_dir or "/nonexistent", name)
+                if not os.path.isfile(path):
+                    raise Refusal("xray", f"failed to load file: {name} > open {path}: no such file or directory")
+                with open(path, "rb") as f:
+                    if category.upper().encode() not in f.read().upper():
+                        raise Refusal("xray", f"list not found in {name}: {category}")
+
     def state(self):
         return {"inbounds": [dict(i) for i in self.inbounds], "awg": dict(self.awg), "ports": self.ports(),
                 "x25519": list(self.x25519), "nginx": dict(self.nginx), "confirmDeadline": self.confirm_deadline,
-                "settings": dict(self.settings)}
+                "settings": dict(self.settings), "xrayTemplate": json.loads(self.xray_template),
+                "outboundTestUrl": self.outbound_test_url, "hiddifyCompat": self.hiddify_compat,
+                "xrayRestarts": self.xray_restarts}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
@@ -670,6 +745,15 @@ class Handler(BaseHTTPRequestHandler):
                 reg.panel.nginx_warnings = seed.get("warnings", [])
                 reg.panel.confirm_deadline = seed.get("confirmDeadline", reg.panel.confirm_deadline)
                 return self._send(200, {"ok": True})
+            if path == "/test/panel/xray":
+                seed = json.loads(raw or "{}")
+                if "template" in seed:
+                    reg.panel.xray_template = json.dumps(seed["template"])
+                reg.panel.xray_asset_dir = seed.get("assetDir", reg.panel.xray_asset_dir)
+                reg.panel.xray_restart_fails = seed.get("restartFails", reg.panel.xray_restart_fails)
+                reg.panel.outbound_test_url = seed.get("outboundTestUrl", reg.panel.outbound_test_url)
+                reg.panel.hiddify_compat = seed.get("hiddifyCompat", reg.panel.hiddify_compat)
+                return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
@@ -709,6 +793,18 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "POST" and route == "update":
                     reg.panel.update_settings(raw)
                     return self._send(200, {"success": True, "msg": "", "obj": None})
+                return self._send(404, None, raw=b"404 page not found")
+            if path.startswith(BASE + "panel/xray/") and COOKIE in (self.headers.get("Cookie") or ""):
+                route = path[len(BASE + "panel/xray/"):]
+                reg.calls.append({"method": method, "path": "xray/" + route, "body": raw})
+                try:
+                    if method == "POST" and route == "":
+                        return self._send(200, {"success": True, "msg": "", "obj": reg.panel.xray_setting()})
+                    if method == "POST" and route == "update":
+                        reg.panel.xray_update(raw)
+                        return self._send(200, {"success": True, "msg": "Settings modified", "obj": None})
+                except Refusal as err:
+                    return self._send(200, {"success": False, "msg": str(err), "obj": None})
                 return self._send(404, None, raw=b"404 page not found")
             prefix = BASE + "panel/api/"
             if not path.startswith(prefix) or COOKIE not in (self.headers.get("Cookie") or ""):
@@ -782,6 +878,8 @@ class Handler(BaseHTTPRequestHandler):
             return panel.set_enable(inbound_id, raw)
         if route == "awg/server":
             return panel.save_awg(raw)
+        if route == "server/restartXrayService":
+            return panel.xray_restart()
         return self._not_found()
 
     @staticmethod

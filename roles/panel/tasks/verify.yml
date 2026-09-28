@@ -1,7 +1,7 @@
 ---
-# verify.yml on the panel host: version, API login with the vault account, and the chain registry against
+# verify.yml on the panel host: version, API login with the vault account, the chain registry against
 # group hops (every hop joined, behind its front on 443/https when its front_mode is only443, the active edge
-# is the one with hop_active). Read-only.
+# is the one with hop_active), and geosite:ru-inside (the rule, the list and its age, the timer). Read-only.
 - name: Read the panel version
   ansible.builtin.command:
     argv: ["{{ panel_bin }}", "-v"]
@@ -110,3 +110,7 @@
           the chain registry also has {{ panel_verify_chain_extra | join(', ') }}, which group hops does not list
           (role hop deletes them unless hop_prune is false)
       when: panel_verify_chain_extra | length > 0
+
+- name: Check geosite:ru-inside
+  ansible.builtin.include_tasks: verify_ru_inside.yml
+  when: panel_ru_inside_enabled | bool

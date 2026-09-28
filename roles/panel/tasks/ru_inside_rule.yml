@@ -1,0 +1,148 @@
+---
+# The ru-inside rule in the panel's Xray template (tasks/ru_inside.yml). Inputs: panel_ru_inside_rule_wanted (the box
+# has the list and the feature is on), panel_ru_inside_list_changed (a new list or a new link on the box).
+# Wanted: exactly one rule, right after the panel's api rule (the panel pins that one first on every save), and the
+# blackhole outbound it points at; other rules and outbounds (WARP, geoip:private, per-inbound rules) stay as they
+# are. Not wanted: our rule taken out, the outbound left. The form is sent back whole (outboundTestUrl,
+# hiddifyCompat), only when the template differs; then xray is restarted through the panel, and if it does not come
+# up the previous template is put back. A new list under an unchanged rule only restarts xray.
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Read the panel's Xray template
+  ansible.builtin.include_tasks: ru_inside_template.yml
+
+- name: Plan the Xray template
+  ansible.builtin.set_fact:
+    panel_ru_inside_outbounds: >-
+      {{ panel_ru_inside_template.outbounds | default([]) | selectattr('tag', 'defined')
+         | selectattr('tag', 'equalto', panel_ru_inside_outbound) | list }}
+    panel_ru_inside_wanted: >-
+      {%- set tpl = panel_ru_inside_template -%}
+      {%- set rules = (tpl.routing | default({})).rules | default([]) -%}
+      {%- set others = [] -%}
+      {%- for rule in rules -%}
+      {%-   if rule not in panel_ru_inside_rules -%}
+      {%-     set _ = others.append(rule) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if panel_ru_inside_rule_wanted | bool -%}
+      {%-   set first = others[:1] | selectattr('outboundTag', 'defined') | selectattr('outboundTag', 'equalto', 'api') | list -%}
+      {%-   set head = first if first and 'api' in (first[0].inboundTag | default([])) else [] -%}
+      {%-   set outbounds = tpl.outbounds | default([]) -%}
+      {%-   set blocked = outbounds | selectattr('tag', 'defined') | selectattr('tag', 'equalto', panel_ru_inside_outbound) | list -%}
+      {%-   set blackhole = {'tag': panel_ru_inside_outbound, 'protocol': 'blackhole', 'settings': {}} -%}
+      {{ tpl | combine({'routing': (tpl.routing | default({})) | combine({'rules': head + [panel_ru_inside_rule] + others[head | length:]}),
+                        'outbounds': outbounds if blocked else outbounds + [blackhole]}) }}
+      {%- elif others | length != rules | length -%}
+      {{ tpl | combine({'routing': tpl.routing | combine({'rules': others})}) }}
+      {%- else -%}
+      {{ tpl }}
+      {%- endif -%}
+  no_log: true
+
+- name: Require a blackhole behind the rule's outbound tag
+  ansible.builtin.assert:
+    that:
+      - panel_ru_inside_outbounds | rejectattr('protocol', 'equalto', 'blackhole') | list | length == 0
+    fail_msg: >-
+      in the panel's Xray template, outbound {{ panel_ru_inside_outbound }} is
+      {{ panel_ru_inside_outbounds[0].protocol | default('?') }}, not blackhole: the ru-inside rule would not drop the
+      traffic. Give that outbound another tag or set panel_ru_inside_outbound to a blackhole's tag.
+    quiet: true
+  when: panel_ru_inside_rule_wanted | bool
+
+- name: "Show the plan: ru-inside rule"
+  ansible.builtin.debug:
+    msg: >-
+      geosite ru-inside rule: {{ panel_ru_inside_rules | length }} in the Xray template ->
+      {{ 1 if panel_ru_inside_rule_wanted | bool else 0 }}{{ ' (as wanted)' if panel_ru_inside_wanted == panel_ru_inside_template else '' }}
+
+- name: Save the Xray template and restart xray
+  when:
+    - panel_ru_inside_wanted != panel_ru_inside_template
+    - not ansible_check_mode
+  block:
+    - name: Save the Xray template
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/xray/update"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        body_format: form-urlencoded
+        body:
+          xraySetting: "{{ panel_ru_inside_wanted | to_json(ensure_ascii=false) }}"
+          outboundTestUrl: "{{ panel_ru_inside_form.outboundTestUrl | default('') }}"
+          hiddifyCompat: "{{ panel_ru_inside_form.hiddifyCompat | default(false) | bool | string | lower }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      register: panel_ru_inside_saved
+      changed_when: true
+      no_log: true
+
+    - name: Require the Xray template saved
+      ansible.builtin.assert:
+        that:
+          - panel_ru_inside_saved.json.success | default(false) | bool
+        fail_msg: "POST panel/xray/update failed: HTTP {{ panel_ru_inside_saved.status | default('?') }} {{ panel_ru_inside_saved.json.msg | default('') }}"
+        quiet: true
+
+    - name: Restart xray on the new template
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: server/restartXrayService
+        panel_call_method: POST
+
+  rescue:
+    - name: Put the previous Xray template back
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/xray/update"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        body_format: form-urlencoded
+        body:
+          xraySetting: "{{ panel_ru_inside_template | to_json(ensure_ascii=false) }}"
+          outboundTestUrl: "{{ panel_ru_inside_form.outboundTestUrl | default('') }}"
+          hiddifyCompat: "{{ panel_ru_inside_form.hiddifyCompat | default(false) | bool | string | lower }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      changed_when: true
+      no_log: true
+
+    - name: Restart xray on the previous template
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/api/server/restartXrayService"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      changed_when: true
+      failed_when: false
+      no_log: true
+
+    - name: Stop on the failed restart
+      ansible.builtin.fail:
+        msg: >-
+          xray did not restart with the {{ 'ru-inside rule' if panel_ru_inside_rule_wanted | bool else 'ru-inside rule taken out' }};
+          the previous template is back: {{ ansible_failed_result.msg | default('') }}
+
+- name: Restart xray on the new list
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: server/restartXrayService
+    panel_call_method: POST
+  when:
+    - panel_ru_inside_wanted == panel_ru_inside_template
+    - panel_ru_inside_rules | length > 0
+    - panel_ru_inside_list_changed | bool
+    - not ansible_check_mode

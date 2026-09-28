@@ -1,0 +1,11 @@
+# {{ ansible_managed }} (3ax-ui-orchestrator, role panel)
+# geosite:ru-inside for the panel's xray (role panel, tasks/ru_inside.yml): download, check, replace, restart xray on
+# a new list. Exit 3 = the source could not be fetched or failed a check, the old list stays (see the journal).
+[Unit]
+Description=Refresh geosite ru-inside for the panel's xray
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ panel_ru_inside_command }} refresh

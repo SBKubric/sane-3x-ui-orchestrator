@@ -1,0 +1,57 @@
+---
+# verify.yml on the panel host, with the api_login session: the ru-inside rule in the panel's Xray template, the list
+# in xray's asset folder (a warning when its last good check is older than panel_ru_inside_max_age_days) and the
+# daily timer active. Read-only.
+- name: Read the panel's Xray template
+  ansible.builtin.include_tasks: ru_inside_template.yml
+
+- name: Require the ru-inside rule
+  ansible.builtin.assert:
+    that:
+      - panel_ru_inside_rules | length > 0
+    fail_msg: "no ru-inside rule in the panel's Xray template; run site.yml"
+    quiet: true
+
+- name: Look at the list in xray's asset folder
+  ansible.builtin.stat:
+    path: "{{ panel_ru_inside_asset_dir }}/{{ panel_ru_inside_file }}"
+    follow: true
+    get_checksum: false
+  register: panel_ru_inside_verify_file
+
+- name: Require the list
+  ansible.builtin.assert:
+    that:
+      - panel_ru_inside_verify_file.stat.exists
+      - panel_ru_inside_verify_file.stat.size | default(0) | int >= panel_ru_inside_min_bytes | int
+    fail_msg: >-
+      {{ panel_ru_inside_asset_dir }}/{{ panel_ru_inside_file }} is missing{{ ' or too small' if panel_ru_inside_verify_file.stat.exists else '' }}:
+      xray does not start with the ru-inside rule; run site.yml
+    quiet: true
+
+- name: Check the ru-inside timer
+  ansible.builtin.systemd_service:
+    name: "{{ panel_ru_inside_unit }}.timer"
+  register: panel_ru_inside_verify_timer
+  when: panel_ru_inside_systemd | bool
+
+- name: Require the ru-inside timer active
+  ansible.builtin.assert:
+    that:
+      - panel_ru_inside_verify_timer.status.ActiveState | default('') == 'active'
+    fail_msg: >-
+      {{ panel_ru_inside_unit }}.timer is {{ panel_ru_inside_verify_timer.status.ActiveState | default('missing') }},
+      not active; run site.yml
+    quiet: true
+  when: panel_ru_inside_systemd | bool
+
+- name: Report the ru-inside list
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'WARNING: ' if panel_ru_inside_verify_age > panel_ru_inside_max_age_days | int else '' }}geosite ru-inside:
+      {{ ('the list was last checked ' ~ panel_ru_inside_verify_age ~ ' days ago (' ~ panel_ru_inside_unit ~ '.service: see its journal)')
+         if panel_ru_inside_verify_age > panel_ru_inside_max_age_days | int else
+         ('rule in the Xray template, list of ' ~ panel_ru_inside_verify_file.stat.size ~ ' bytes checked '
+          ~ panel_ru_inside_verify_age ~ ' days ago' ~ (', timer active' if panel_ru_inside_systemd | bool else '')) }}
+  vars:
+    panel_ru_inside_verify_age: "{{ ((now().timestamp() - panel_ru_inside_verify_file.stat.mtime) / 86400) | int }}"

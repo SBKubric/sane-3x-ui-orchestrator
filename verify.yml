@@ -7,6 +7,8 @@
 #   panel      version; API login with the vault account; chain/list: every hop of group hops joined,
 #              the active edge = the hop with hop_active
 #   panel      (front_mode only443) every hop behind its front: 443/https in the chain registry
+#   panel      geosite:ru-inside: the rule in the Xray template, the list in xray's asset folder (a warning when
+#              its last good check is older than panel_ru_inside_max_age_days), the daily timer active
 #   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port (443 behind the
