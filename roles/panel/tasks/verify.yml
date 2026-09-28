@@ -85,17 +85,28 @@
                                      ~ ' front (443/https): its front is down or has not reported yet') -%}
           {%-   endif -%}
           {%- endfor -%}
+          {{ out }}
+        # A switch of the active edge through the bot (/proxy), the chain editor or the API is an ordinary operation
+        # (#35): verify only warns, and checks the stand as it is (verify_targets.yml takes the active edge from the
+        # registry too). site.yml puts hop_active back.
+        panel_verify_chain_warnings: >-
           {%- set active = panel_verify_chain.json.obj.activeEdge | default('', true) -%}
           {%- if panel_verify_chain_expected.active and active != panel_verify_chain_expected.active -%}
-          {%-   set _ = out.append('the active edge is ' ~ (active or 'none') ~ ', but the inventory marks '
-                                   ~ panel_verify_chain_expected.active ~ ' with hop_active') -%}
+          {{ ['the active edge is ' ~ (active or 'none') ~ ', but the inventory marks ' ~ panel_verify_chain_expected.active
+              ~ ' with hop_active (switched by the bot, the chain editor or the API?); site.yml puts it back'] }}
+          {%- else -%}
+          {{ [] }}
           {%- endif -%}
-          {{ out }}
         panel_verify_chain_extra: >-
           {{ panel_verify_chain.json.obj.hops | default([], true) | map(attribute='name')
              | reject('in', panel_verify_chain_expected.hops) | list }}
 
-    - name: Require every hop joined and the right active edge
+    - name: Warn about an active edge other than hop_active
+      ansible.builtin.debug:
+        msg: "WARNING: chain registry: {{ panel_verify_chain_warnings | join('; ') }}"
+      when: panel_verify_chain_warnings | length > 0
+
+    - name: Require every hop joined
       ansible.builtin.assert:
         that:
           - panel_verify_chain_problems | length == 0
