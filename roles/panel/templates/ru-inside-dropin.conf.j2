@@ -1,0 +1,5 @@
+# {{ ansible_managed }} (3ax-ui-orchestrator, role panel)
+# install.sh removes xray's asset folder with the panel: put the ru-inside link back before xray starts, or xray
+# refuses the panel's routing rule that names it. "-": a failure here never keeps the panel down.
+[Service]
+ExecStartPre=-{{ panel_ru_inside_command }} ensure

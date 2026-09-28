@@ -1,0 +1,17 @@
+---
+# Role panel's geosite:ru-inside (tasks/ru_inside.yml) or its check (tasks/verify_ru_inside.yml) against mock_panel.py,
+# a local source of the list and a box laid out under a temp dir (see test_ru_inside.py).
+- name: Panel ru-inside
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Log in to the panel (verify.yml has done it before its checks)
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+      when: panel_test_tasks == 'verify_ru_inside'
+
+    - name: Run the task file under test
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: "{{ panel_test_tasks }}"

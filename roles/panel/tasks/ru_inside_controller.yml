@@ -1,0 +1,70 @@
+---
+# The panel host could not get the ru-inside list, or got one that failed a check (tasks/ru_inside.yml): the controller
+# downloads it, get_url checks it against the same sum file, and the refresh script on the box checks it again and
+# installs it. A failure here only leaves the reason for the warning.
+- name: Say why the controller downloads the list
+  ansible.builtin.debug:
+    msg: "geosite ru-inside: the panel host could not fetch the list ({{ panel_ru_inside_host_reason }}); trying the controller"
+
+- name: Download the list through the controller
+  block:
+    - name: Make a temp dir on the controller
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: .ru-inside
+      delegate_to: localhost
+      register: panel_ru_inside_ctl_dir
+      changed_when: false
+
+    - name: Download the list on the controller, checked against the sum file
+      ansible.builtin.get_url:
+        url: "{{ panel_ru_inside_url }}"
+        dest: "{{ panel_ru_inside_ctl_dir.path }}/{{ panel_ru_inside_url | urlsplit('path') | basename }}"
+        checksum: "sha256:{{ panel_ru_inside_sha256_url }}"
+        timeout: "{{ panel_ru_inside_timeout | int }}"
+        mode: "0600"
+      delegate_to: localhost
+      register: panel_ru_inside_ctl_get
+      changed_when: false
+
+    - name: Read the checksum of the controller's list
+      ansible.builtin.stat:
+        path: "{{ panel_ru_inside_ctl_get.dest }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: panel_ru_inside_ctl_stat
+
+    # The script removes it once read; the result below says whether anything changed.
+    - name: Copy the controller's list to the panel host
+      ansible.builtin.copy:
+        src: "{{ panel_ru_inside_ctl_get.dest }}"
+        dest: "{{ panel_ru_inside_store_dir }}/.controller-{{ panel_ru_inside_file }}"
+        mode: "0600"
+      changed_when: false
+
+    - name: Install the controller's list on the panel host
+      ansible.builtin.command:
+        argv: ["{{ panel_ru_inside_script }}", --config, "{{ panel_ru_inside_config }}", --no-restart, install,
+               "{{ panel_ru_inside_store_dir }}/.controller-{{ panel_ru_inside_file }}", "{{ panel_ru_inside_ctl_stat.stat.checksum }}"]
+      register: panel_ru_inside_install
+      changed_when: panel_ru_inside_install.stdout is search('"result":\s*"updated"|"linked":\s*true')
+      failed_when: panel_ru_inside_install.rc not in [0, 3, 4]
+
+    - name: Keep the result of the controller's list
+      ansible.builtin.set_fact:
+        panel_ru_inside_list: "{{ panel_ru_inside_install.stdout | from_json | combine({'via': 'controller'}) }}"
+        panel_ru_inside_controller_reason: "{{ (panel_ru_inside_install.stdout | from_json).reason }}"
+
+  rescue:
+    - name: Keep why the controller could not get the list
+      ansible.builtin.set_fact:
+        panel_ru_inside_controller_reason: "{{ ansible_failed_result.msg | default('failed') }}"
+
+  always:
+    - name: Remove the controller's temp dir
+      ansible.builtin.file:
+        path: "{{ panel_ru_inside_ctl_dir.path }}"
+        state: absent
+      delegate_to: localhost
+      changed_when: false
+      when: panel_ru_inside_ctl_dir.path is defined

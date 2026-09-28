@@ -44,6 +44,8 @@ all:
     hop_front_retries: 1
     hop_front_delay: 1
     verify_front_scan: false
+    # verify.yml's geosite ru-inside check is covered by tests/panel/test_ru_inside.py.
+    panel_ru_inside_enabled: false
   children:
     panel:
       hosts:

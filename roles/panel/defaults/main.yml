@@ -142,6 +142,54 @@ panel_acme_reload_cmd: >-
 panel_fail2ban_packages: [fail2ban, python3-systemd]
 panel_fail2ban_dir: /etc/fail2ban
 
+# geosite:ru-inside (tasks/ru_inside.yml, README "Blocking ru-inside"): traffic of the panel's clients to the domains
+# of golukon/russia-only-geosite (reachable only from inside Russia) is dropped silently, by a routing rule of the
+# panel's Xray template (domain ext:<file>:<category> -> the blackhole outbound, right after the panel's api rule).
+# The list is kept in panel_ru_inside_store_dir and linked into xray's asset folder (install.sh removes that folder;
+# x-ui's ExecStartPre puts the link back); a daily timer and every run refresh it: sha256 against the sum file, size,
+# category, atomic replace, xray restarted only on a new list. A box that cannot fetch it gets the controller's copy.
+# No list at all = no rule (xray refuses to start on an ext: rule without its file). false = the rule is taken out
+# and the timer stopped; the files stay.
+panel_ru_inside_enabled: true
+panel_ru_inside_url: https://raw.githubusercontent.com/golukon/russia-only-geosite/release/geosite.dat
+# sha256sum format ("<hex>  geosite.dat"); the controller's get_url looks for the list's file name in it.
+panel_ru_inside_sha256_url: "{{ panel_ru_inside_url }}.sha256sum"
+panel_ru_inside_category: ru-inside
+# Name in xray's asset folder: not one of the panel's own geo files (geosite.dat, geosite_RU.dat, ...) and not
+# geosite_<alias>.dat / geoip_<alias>.dat, which the panel's custom geo resources write.
+panel_ru_inside_file: ru-inside.dat
+panel_ru_inside_asset_dir: "{{ panel_bin | dirname }}/bin"
+panel_ru_inside_store_dir: /var/lib/3ax-ru-inside
+# The refresh script (files/ru_inside.py), its settings and its units (<unit>.service + <unit>.timer, and a drop-in
+# for the panel's service).
+panel_ru_inside_script: /usr/local/sbin/3ax-ru-inside
+panel_ru_inside_config: /etc/3ax-ru-inside.json
+panel_ru_inside_unit: 3ax-ru-inside
+panel_ru_inside_systemd_dir: /etc/systemd/system
+# false: the units are written but systemd is not asked to load, start or check them (tests; a box without systemd).
+panel_ru_inside_systemd: true
+# The release comes out at about 03:30 UTC.
+panel_ru_inside_on_calendar: "*-*-* 05:00:00 UTC"
+panel_ru_inside_randomized_delay: 1h
+# Size sanity of a downloaded list (the real one is about 13 KB) and the download timeout in seconds.
+panel_ru_inside_min_bytes: 1024
+panel_ru_inside_max_bytes: 16777216
+panel_ru_inside_timeout: 60
+# How the timer restarts xray on a new list: what `x-ui restart-xray` does (the panel restarts xray on SIGUSR1).
+panel_ru_inside_restart_command: [systemctl, reload, "{{ panel_service }}"]
+# The rule is found by its ruleTag, or by its domain entry when the panel's routing editor has dropped the tag.
+panel_ru_inside_rule_tag: 3ax-ru-inside
+panel_ru_inside_outbound: blocked
+# verify.yml warns when the list's last good check (the file's mtime) is older than this many days.
+panel_ru_inside_max_age_days: 3
+# Derived.
+panel_ru_inside_command: "{{ panel_ru_inside_script }} --config {{ panel_ru_inside_config }}"
+panel_ru_inside_rule:
+  type: field
+  ruleTag: "{{ panel_ru_inside_rule_tag }}"
+  domain: ["ext:{{ panel_ru_inside_file }}:{{ panel_ru_inside_category }}"]
+  outboundTag: "{{ panel_ru_inside_outbound }}"
+
 # Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
 panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"
 
@@ -154,13 +202,17 @@ panel_api_ca_path: "{{ panel_cert_file }}"
 panel_api_login_required: true
 
 # wipe.yml (tasks/wipe.yml): what install.sh and the panel leave on the box: config dir with the database
-# and the certificate, install dir, `x-ui` wrapper, log dir, install.sh itself.
+# and the certificate, install dir, `x-ui` wrapper, log dir, install.sh itself; and the ru-inside list, its script
+# and settings (its units go with the panel's service).
 panel_wipe_paths:
   - "{{ panel_etc_dir }}"
   - "{{ panel_bin | dirname }}"
   - "{{ panel_cli }}"
   - "{{ panel_log_dir }}"
   - "{{ panel_install_script }}"
+  - "{{ panel_ru_inside_store_dir }}"
+  - "{{ panel_ru_inside_script }}"
+  - "{{ panel_ru_inside_config }}"
 # Tunnel interfaces the panel brings up from its database (AmneziaWG, WireGuard): every <iface>.conf in
 # these directories is taken down with its quick tool and deleted, as `x-ui uninstall` does. The
 # packages stay installed (a fresh install.sh finds them).

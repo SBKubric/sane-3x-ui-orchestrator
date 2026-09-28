@@ -1,0 +1,154 @@
+---
+# geosite:ru-inside (orchestrator#28, README "Blocking ru-inside"; the variables are in defaults/main.yml):
+#   1. the list on the box: the refresh script (files/ru_inside.py) downloads it, checks it against the sum file and
+#      replaces the kept copy only when it differs; a box that cannot fetch it, or gets one that fails a check, gets the
+#      controller's download (the same sum file) instead; nothing anywhere keeps the old copy, or warns without one;
+#   2. the daily timer that runs the same refresh, and x-ui's ExecStartPre that puts the link back after install.sh;
+#   3. the rule in the panel's Xray template (tasks/ru_inside_rule.yml), only while the box has the list.
+- name: Check the ru-inside inputs
+  ansible.builtin.assert:
+    that:
+      - panel_ru_inside_file is match('^[A-Za-z0-9._-]+\.dat$')
+      - panel_ru_inside_file is not match('^(geosite|geoip)([_.].*)?$')
+      - panel_ru_inside_category is match('^[A-Za-z0-9!@._-]+$')
+      - panel_ru_inside_min_bytes | int > 0
+    fail_msg: >-
+      panel_ru_inside_file must be <name>.dat and not geosite*/geoip* (the panel's own geo files and its custom geo
+      resources live there too); panel_ru_inside_category is one geosite category.
+    quiet: true
+
+- name: Keep the list, its timer and the link on the panel host
+  when: panel_ru_inside_enabled | bool
+  block:
+    - name: Create the ru-inside directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ panel_ru_inside_store_dir }}"
+        - "{{ panel_ru_inside_script | dirname }}"
+        - "{{ panel_ru_inside_config | dirname }}"
+        - "{{ panel_ru_inside_systemd_dir }}/{{ panel_service }}.service.d"
+
+    - name: Install the refresh script
+      ansible.builtin.copy:
+        src: ru_inside.py
+        dest: "{{ panel_ru_inside_script }}"
+        mode: "0755"
+
+    - name: Write the refresh script's settings
+      ansible.builtin.copy:
+        content: "{{ panel_ru_inside_settings | to_nice_json }}\n"
+        dest: "{{ panel_ru_inside_config }}"
+        mode: "0644"
+      vars:
+        panel_ru_inside_settings:
+          url: "{{ panel_ru_inside_url }}"
+          sha256_url: "{{ panel_ru_inside_sha256_url }}"
+          category: "{{ panel_ru_inside_category }}"
+          file: "{{ panel_ru_inside_file }}"
+          store_dir: "{{ panel_ru_inside_store_dir }}"
+          asset_dir: "{{ panel_ru_inside_asset_dir }}"
+          min_bytes: "{{ panel_ru_inside_min_bytes | int }}"
+          max_bytes: "{{ panel_ru_inside_max_bytes | int }}"
+          timeout: "{{ panel_ru_inside_timeout | int }}"
+          restart: "{{ panel_ru_inside_restart_command }}"
+
+    - name: Write the timer, its service and x-ui's drop-in
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ panel_ru_inside_systemd_dir }}/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - {src: ru-inside.service.j2, dest: "{{ panel_ru_inside_unit }}.service"}
+        - {src: ru-inside.timer.j2, dest: "{{ panel_ru_inside_unit }}.timer"}
+        - {src: ru-inside-dropin.conf.j2, dest: "{{ panel_service }}.service.d/{{ panel_ru_inside_unit }}.conf"}
+      loop_control:
+        label: "{{ item.dest }}"
+      register: panel_ru_inside_units
+
+    - name: Start the daily timer
+      ansible.builtin.systemd_service:
+        name: "{{ panel_ru_inside_unit }}.timer"
+        enabled: true
+        state: "{{ 'restarted' if panel_ru_inside_units.results[1] is changed else 'started' }}"
+        daemon_reload: "{{ panel_ru_inside_units is changed }}"
+      when: panel_ru_inside_systemd | bool
+
+    # xray is restarted once, below, through the panel: after the rule if the template changes, else for a new list.
+    - name: Refresh the list on the panel host
+      ansible.builtin.command:
+        argv: ["{{ panel_ru_inside_script }}", --config, "{{ panel_ru_inside_config }}", --no-restart, refresh]
+      register: panel_ru_inside_refresh
+      changed_when: panel_ru_inside_refresh.stdout is search('"result":\s*"updated"|"linked":\s*true')
+      failed_when: panel_ru_inside_refresh.rc not in [0, 3, 4]
+      when: not ansible_check_mode
+
+    - name: Keep the panel host's result
+      ansible.builtin.set_fact:
+        panel_ru_inside_list: "{{ panel_ru_inside_refresh.stdout | from_json | combine({'via': 'panel host'}) }}"
+        panel_ru_inside_host_reason: "{{ (panel_ru_inside_refresh.stdout | from_json).reason }}"
+        panel_ru_inside_controller_reason: ""
+      when: not ansible_check_mode
+
+    - name: Get the list through the controller
+      ansible.builtin.include_tasks: ru_inside_controller.yml
+      when:
+        - not ansible_check_mode
+        - panel_ru_inside_list.result in ['kept', 'missing']
+
+    - name: Look for the list (check mode)
+      ansible.builtin.stat:
+        path: "{{ panel_ru_inside_store_dir }}/{{ panel_ru_inside_file }}"
+        get_checksum: false
+      register: panel_ru_inside_stat
+      when: ansible_check_mode
+
+    - name: Take the list as it is (check mode)
+      ansible.builtin.set_fact:
+        panel_ru_inside_list: "{{ {'result': 'current' if panel_ru_inside_stat.stat.exists else 'missing', 'sha256': '', 'bytes': 0,
+                                   'linked': false, 'via': 'check mode'} }}"
+      when: ansible_check_mode
+
+    - name: Show the list
+      ansible.builtin.debug:
+        msg: >-
+          geosite ru-inside: {{ panel_ru_inside_list.result }} {{ panel_ru_inside_list.sha256 }}
+          ({{ panel_ru_inside_list.bytes }} bytes, via the {{ panel_ru_inside_list.via }})
+      when: panel_ru_inside_list.result in ['updated', 'current']
+
+    - name: Warn about the list
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: geosite ru-inside: {{ ('keeping the list ' ~ panel_ru_inside_list.sha256 ~ ' the panel host has')
+          if panel_ru_inside_list.result == 'kept' else 'no list on the panel host, so no rule' }}.
+          The panel host: {{ panel_ru_inside_host_reason }}. The controller: {{ panel_ru_inside_controller_reason }}
+      when: panel_ru_inside_list.result in ['kept', 'missing']
+
+- name: Stop the ru-inside timer
+  when:
+    - not panel_ru_inside_enabled | bool
+    - panel_ru_inside_systemd | bool
+  block:
+    - name: Look for the ru-inside timer
+      ansible.builtin.stat:
+        path: "{{ panel_ru_inside_systemd_dir }}/{{ panel_ru_inside_unit }}.timer"
+        get_checksum: false
+      register: panel_ru_inside_timer_file
+
+    - name: Stop and disable the ru-inside timer
+      ansible.builtin.systemd_service:
+        name: "{{ panel_ru_inside_unit }}.timer"
+        enabled: false
+        state: stopped
+      when: panel_ru_inside_timer_file.stat.exists
+
+- name: The ru-inside rule in the panel's Xray template
+  ansible.builtin.include_tasks: ru_inside_rule.yml
+  vars:
+    panel_ru_inside_rule_wanted: >-
+      {{ panel_ru_inside_enabled | bool and panel_ru_inside_list.result | default('missing') in ['updated', 'current', 'kept'] }}
+    panel_ru_inside_list_changed: >-
+      {{ panel_ru_inside_enabled | bool and (panel_ru_inside_list.result | default('') == 'updated'
+         or panel_ru_inside_list.linked | default(false) | bool) }}

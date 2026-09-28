@@ -29,7 +29,8 @@ http { include /etc/nginx/conf.d/*.conf; }
 PANEL = ["etc/x-ui/x-ui.db", "etc/x-ui/tls/panel.crt", "etc/x-ui/tls/panel.key", "usr/local/x-ui/x-ui",
          "usr/local/x-ui/bin/xray-linux-amd64", "usr/bin/x-ui", "var/log/x-ui/3xipl.log", "root/3ax-ui-install.sh",
          "etc/amnezia/amneziawg/awg0.conf", "etc/wireguard/wg0.conf", "etc/nginx/stream-enabled/3ax-ui.conf",
-         "etc/nginx/conf.d/3ax-ui.conf", "etc/nginx/conf.d/other-site.conf"]
+         "etc/nginx/conf.d/3ax-ui.conf", "etc/nginx/conf.d/other-site.conf", "var/lib/3ax-ru-inside/ru-inside.dat",
+         "usr/local/sbin/3ax-ru-inside", "etc/3ax-ru-inside.json"]
 HOP = ["etc/x-ui/proxy.json", "etc/x-ui/chain/secret", "etc/x-ui/chain/document.json", "etc/x-ui/chain-join.url",
        "usr/local/x-ui/x-ui", "usr/bin/x-ui", "var/log/x-ui/x.log", "root/3ax-ui-install.sh",
        "root/.3ax-ui-join-token", "root/cert/ip/fullchain.pem", "root/cert/ip/privkey.pem",
@@ -90,7 +91,8 @@ class WipeTest(unittest.TestCase):
         self.wipe()
         for rel in ("etc/x-ui", "usr/local/x-ui", "usr/bin/x-ui", "var/log/x-ui", "root/3ax-ui-install.sh",
                     "etc/amnezia/amneziawg/awg0.conf", "etc/wireguard/wg0.conf",
-                    "etc/nginx/stream-enabled/3ax-ui.conf", "etc/nginx/conf.d/3ax-ui.conf"):
+                    "etc/nginx/stream-enabled/3ax-ui.conf", "etc/nginx/conf.d/3ax-ui.conf", "var/lib/3ax-ru-inside",
+                    "usr/local/sbin/3ax-ru-inside", "etc/3ax-ru-inside.json"):
             self.assertFalse(self.exists("real", rel), f"panel: {rel} left")
         self.assertTrue(self.exists("real", "etc/nginx/conf.d/other-site.conf"), "an unrelated nginx site was removed")
         nginx = (self.root / "real/etc/nginx/nginx.conf").read_text()

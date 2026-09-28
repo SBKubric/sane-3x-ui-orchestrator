@@ -23,6 +23,11 @@ all:
       - "{{ box }}/etc/nginx/conf.d/3ax-ui.conf"
     panel_wipe_nginx_conf: "{{ box }}/etc/nginx/nginx.conf"
     panel_wipe_firewall_chain: 3AXUI-WIPE-TEST
+    panel_ru_inside_unit: 3axui-wipe-test-ru-inside
+    panel_ru_inside_systemd_dir: "{{ box }}/etc/systemd/system"
+    panel_ru_inside_store_dir: "{{ box }}/var/lib/3ax-ru-inside"
+    panel_ru_inside_script: "{{ box }}/usr/local/sbin/3ax-ru-inside"
+    panel_ru_inside_config: "{{ box }}/etc/3ax-ru-inside.json"
     # hops
     hop_service: 3axui-wipe-test-x-ui
     hop_proxy_config: "{{ box }}/etc/x-ui/proxy.json"
