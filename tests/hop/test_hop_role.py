@@ -273,6 +273,15 @@ class HopRoleTest(HopHarness):
         self.assertIn("proxy is pending in the chain registry, not joined", out)
         self.assertIn("the active edge is none, but the inventory marks proxy with hop_active", out)
 
+    def test_verify_warns_about_an_active_edge_switched_outside(self):
+        # #35: the bot, the chain editor or the API switched the active edge; verify warns and goes on.
+        self.converge_fresh()
+        self.seed([{"name": "bridge", "host": "10.0.0.2", "role": "inner", "subPort": 443, "subScheme": "https"},
+                   {"name": "proxy", "host": "10.0.0.3", "role": "edge", "subPort": 443, "subScheme": "https"}])
+        out = self.verify()
+        self.assertIn("WARNING: chain registry: the active edge is none, but the inventory marks proxy", out)
+        self.assertIn("chain registry: bridge, proxy joined; active edge none", out)
+
     def test_verify_names_a_stale_hop(self):
         self.converge_fresh()
         (self.root / "bridge" / "stale").write_text("")
