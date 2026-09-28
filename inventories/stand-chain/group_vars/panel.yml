@@ -29,7 +29,8 @@ panel_inbounds:
           serverName: ""
           spiderX: /
       xhttpSettings:
-        path: /
+        # Clients and the monitoring probes take it from the panel (subscription link, probe material).
+        path: /api/v1/client-sync
         host: ""
         # auto: the server takes every mode; xray-core clients pick stream-one with Reality.
         mode: auto

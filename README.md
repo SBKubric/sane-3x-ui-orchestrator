@@ -238,7 +238,7 @@ panel_inbounds:
           serverName: ""
           spiderX: /
       xhttpSettings:
-        path: /
+        path: /api/v1/client-sync
         host: ""
         mode: auto
     sniffing:
