@@ -399,6 +399,67 @@ class PanelInboundsTest(unittest.TestCase):
         out = self.play("-e", '{"mon_paths": ["hops", "direct"]}', playbook=HERE / "verify_targets.yml")
         self.assertRegex(out, r"monitoring: 4 targets UP")
 
+    # --- chain followers on a standby edge (panel#157 Q2: the panel does not probe them there) ------------
+    STANDBY = (*CHAIN, "-i", str(HERE / "standby.yml"))
+    STANDBY_PATHS = ["direct", "inner:bridge", "edge:proxy", "edge:proxy2"]
+
+    def seed_followers(self, active, follower_paths, plain_paths=STANDBY_PATHS):
+        """Registry bridge + edges proxy and proxy2 (active names the active edge, None: no active edge); panel
+        inbounds vless-reality (id 1, followChain) and plain (id 2); targets: vless-reality on follower_paths,
+        plain on plain_paths, awg on every path."""
+        post("/test/reset", [{"name": "bridge", "host": "10.0.0.2", "role": "inner"},
+                             {"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": active == "proxy"},
+                             {"name": "proxy2", "host": "10.0.0.4", "role": "edge", "isActive": active == "proxy2"}])
+        post("/test/panel/reset", {"inbounds": [
+            {"remark": "vless-reality", "protocol": "vless", "port": 8443, "followChain": True},
+            {"remark": "plain", "protocol": "vless", "port": 9443, "followChain": False}]})
+
+        def inbound(inbound_id, remark, port, paths, kind="xray"):
+            return {"kind": kind, "inboundId": inbound_id, "tag": f"inbound-{port}", "remark": remark,
+                    "protocol": "vless" if kind == "xray" else "amneziawg", "port": port, "enable": True,
+                    "worst": "UP", "targets": [target(kind, inbound_id, p) for p in paths]}
+        post("/test/panel/targets", monitoring([inbound(1, "vless-reality", 8443, follower_paths),
+                                                inbound(2, "plain", 9443, plain_paths),
+                                                inbound(0, "awg", 51820, self.STANDBY_PATHS, kind="awg")]))
+
+    def verify_standby(self, expect_rc=0):
+        return self.play(*self.STANDBY, playbook=HERE / "verify_targets.yml", expect_rc=expect_rc)
+
+    def test_verify_targets_skips_chain_followers_on_a_standby_edge(self):
+        self.seed_followers("proxy", ["direct", "inner:bridge", "edge:proxy"])
+        out = self.verify_standby()
+        self.assertRegex(out, r"monitoring: 11 targets UP on\s+vless-reality, plain, awg")
+        self.assertIn("list", self.reads)  # chain/list: the mock logs chain routes without the prefix
+        self.assertIn("inbounds/list", self.reads)
+
+    def test_verify_targets_follows_a_switch_of_the_active_edge(self):
+        # The bot switched to proxy2 (inventory hop_active still says proxy): the follower is expected there.
+        self.seed_followers("proxy2", ["direct", "inner:bridge", "edge:proxy"])
+        out = flat(self.verify_standby(expect_rc=2))
+        self.assertIn("vless-reality (xray 1, port 8443) has no target for monclient/edge:proxy2", out)
+
+        self.seed_followers("proxy2", ["direct", "inner:bridge", "edge:proxy2"])
+        out = self.verify_standby()
+        self.assertRegex(out, r"monitoring: 11 targets UP")
+
+    def test_verify_targets_still_needs_a_plain_inbound_on_every_edge(self):
+        self.seed_followers("proxy", ["direct", "inner:bridge", "edge:proxy"],
+                            plain_paths=["direct", "inner:bridge", "edge:proxy"])
+        out = flat(self.verify_standby(expect_rc=2))
+        self.assertIn("plain (xray 2, port 9443) has no target for monclient/edge:proxy2", out)
+        self.assertNotIn("vless-reality (xray 1, port 8443) has no target", out)
+
+    def test_verify_targets_expects_no_follower_on_any_edge_without_an_active_edge(self):
+        self.seed_followers(None, ["direct", "inner:bridge"])
+        out = self.verify_standby()
+        self.assertRegex(out, r"monitoring: 10 targets UP")
+
+    def test_verify_targets_names_a_missing_inner_path_of_a_follower(self):
+        self.seed_followers(None, ["direct"])
+        out = flat(self.verify_standby(expect_rc=2))
+        self.assertIn("vless-reality (xray 1, port 8443) has no target for monclient/inner:bridge", out)
+        self.assertNotIn("has no target for monclient/inner:bridge, monclient/edge", out)
+
 
 def flat(out):
     """The output with the YAML callback's line folding undone."""
