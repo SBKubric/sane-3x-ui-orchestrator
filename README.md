@@ -394,7 +394,7 @@ host (`tasks/warp.yml`), through the panel's API on 127.0.0.1:
   (addresses, `client_id`, peer) from Cloudflare.
 - **Outbound.** `warp` (WireGuard), built the way the panel's WARP modal builds it (`warp_modal.html`): `secretKey`
   from the registration, `address` v4/32 and v6/128, `reserved` = the bytes of `client_id`, peer
-  `engage.cloudflareclient.com:2408` with `0.0.0.0/0, ::/0`, `domainStrategy: ForceIP`, `workers: 2`; and on top
+  `engage.cloudflareclient.com:2408` with `0.0.0.0/0, ::/0`, `domainStrategy: ForceIPv4` (the modal has `ForceIP`, which may pick the IPv6 endpoint on a host without IPv6), `workers: 2`; and on top
   `mtu: 1280` (`warp_mtu`; the modal writes 1420) and `noKernelTun: true` (a kernel TUN under root drops UDP,
   SBKubric/sane-3x-ui#131). An existing `warp` outbound is converged in place (keys the role does not set stay), a
   second one is dropped. When Cloudflare does not answer `warp/config`, an existing outbound with the registration's

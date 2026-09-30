@@ -47,7 +47,7 @@ PRIVATE_IP = {"type": "field", "outboundTag": "blocked", "ip": ["geoip:private"]
 TORRENT = {"type": "field", "outboundTag": "blocked", "protocol": ["bittorrent"]}
 
 # The outbound the panel's WARP modal builds from DEFAULT_WARP_DEVICE (warp_modal.html collectConfig, Outbound.toJson),
-# with MTU 1280 instead of 1420: reserved = the bytes of client_id "8/+A".
+# with MTU 1280 instead of 1420 and ForceIPv4 instead of ForceIP: reserved = the bytes of client_id "8/+A".
 OUTBOUND = {
     "protocol": "wireguard",
     "settings": {
@@ -55,7 +55,7 @@ OUTBOUND = {
         "secretKey": PRIVATE,
         "address": ["172.16.0.2/32", "2606:4700:110:8a36:df92:102a:9602:fa18/128"],
         "workers": 2,
-        "domainStrategy": "ForceIP",
+        "domainStrategy": "ForceIPv4",
         "reserved": [243, 255, 128],
         "peers": [{"publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=", "allowedIPs": ["0.0.0.0/0", "::/0"],
                    "endpoint": "engage.cloudflareclient.com:2408", "keepAlive": 0}],
