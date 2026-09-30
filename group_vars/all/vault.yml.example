@@ -18,3 +18,6 @@ mon_admin_password: change-me
 # One Telegram bot and chat for both the panel and mon-server (#2, #4); leave both empty to skip.
 tg_bot_token: "123456:change-me"
 tg_chat_id: "-1000000000000"
+
+# WARP+ license key for the panel's WARP (#41), optional; empty = the free account.
+warp_license: ""

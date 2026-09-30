@@ -1,0 +1,259 @@
+---
+# WARP (orchestrator#41, README "WARP"; the variables are in defaults/main.yml). With panel_warp_enabled:
+#   1. the panel's WARP registration (POST <base>panel/xray/warp/data): an existing one is reused; none = an X25519
+#      pair from the panel (server/getNewX25519Cert, as WireGuard keys) and warp/reg; panel_warp_license through
+#      warp/license when the registration has another key; the device (addresses, client_id, peer) from warp/config;
+#   2. the WireGuard outbound `warp` built from it the way the panel's WARP modal builds it, with panel_warp_mtu and
+#      noKernelTun; an existing one is converged in place (keys it has and we do not set stay), a second one dropped.
+#      When Cloudflare does not answer, an existing outbound with the registration's key keeps its peer data;
+#   3. the rule «tcp,udp -> warp» (ruleTag 3ax-warp) last in the routing, after every rule the template has.
+# No outbound to write (the registration failed) = no rule, and a rule left from before is taken out: xray would send
+# the traffic into an outbound that is not there. Disabled: our rule out, and the `warp` outbound unless another rule
+# still points at it. Saved and xray restarted through tasks/xray_template_save.yml.
+- name: Check the WARP inputs
+  ansible.builtin.assert:
+    that:
+      - panel_warp_mtu | int >= 576 and panel_warp_mtu | int <= 1500
+      - panel_warp_tag | length > 0
+    fail_msg: "warp_mtu must be 576-1500 (1280 by default)"
+    quiet: true
+
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Read the panel's Xray template
+  ansible.builtin.include_tasks: xray_template.yml
+
+- name: Start from no registration
+  ansible.builtin.set_fact:
+    panel_warp_data: {}
+    panel_warp_config: {}
+    panel_warp_problem: ""
+    panel_warp_registered: false
+
+- name: Get the WARP registration
+  when: panel_warp_enabled | bool
+  block:
+    - name: Read the panel's WARP registration
+      ansible.builtin.include_tasks: warp_call.yml
+      vars:
+        panel_warp_action: data
+
+    - name: Keep the WARP registration
+      ansible.builtin.set_fact:
+        panel_warp_data: "{{ panel_warp_call.json.obj | from_json if panel_warp_call.json.obj | default('', true) | length > 0 else {} }}"
+      no_log: true
+
+    - name: Register WARP
+      when:
+        - panel_warp_data | length == 0
+        - not ansible_check_mode
+      block:
+        - name: Generate the WireGuard keys in the panel
+          ansible.builtin.include_tasks: api.yml
+          vars:
+            panel_call_path: server/getNewX25519Cert
+            panel_call_method: GET
+
+        # xray x25519 prints base64url without padding; WireGuard and Cloudflare take standard base64.
+        - name: Register WARP through the panel
+          ansible.builtin.include_tasks: warp_call.yml
+          vars:
+            panel_warp_action: reg
+            panel_warp_body:
+              privateKey: >-
+                {{ panel_call.obj.privateKey | replace('-', '+') | replace('_', '/') }}{{ '=' * ((4 - panel_call.obj.privateKey | length % 4) % 4) }}
+              publicKey: >-
+                {{ panel_call.obj.publicKey | replace('-', '+') | replace('_', '/') }}{{ '=' * ((4 - panel_call.obj.publicKey | length % 4) % 4) }}
+
+        # RegWarp answers success with an empty obj when Cloudflare's answer has no account.
+        - name: Tell whether WARP is registered
+          ansible.builtin.set_fact:
+            panel_warp_registered: >-
+              {{ panel_warp_call.json.success | default(false) | bool and panel_warp_call.json.obj | default('', true) | length > 0 }}
+
+        - name: Keep the new WARP registration
+          ansible.builtin.set_fact:
+            panel_warp_data: "{{ (panel_warp_call.json.obj | from_json).data if panel_warp_registered | bool else {} }}"
+            panel_warp_config: "{{ (panel_warp_call.json.obj | from_json).config if panel_warp_registered | bool else {} }}"
+            panel_warp_problem: >-
+              {{ '' if panel_warp_registered | bool else 'the registration failed: ' ~ ('the panel got no account from api.cloudflareclient.com'
+                 if panel_warp_call.json.success | default(false) | bool else panel_warp_call.json.msg | default(panel_warp_call.msg | default(''), true)) }}
+          no_log: true
+
+    - name: Report the WARP registration
+      ansible.builtin.debug:
+        msg: "WARP: registered with Cloudflare through the panel"
+      when: panel_warp_registered | bool
+
+    - name: Read the WARP device from Cloudflare
+      when:
+        - panel_warp_data | length > 0
+        - not panel_warp_registered | bool
+      block:
+        - name: Read the WARP device through the panel
+          ansible.builtin.include_tasks: warp_call.yml
+          vars:
+            panel_warp_action: config
+
+        - name: Keep the WARP device
+          ansible.builtin.set_fact:
+            panel_warp_config: >-
+              {{ panel_warp_call.json.obj | from_json if panel_warp_call.json.success | default(false) | bool
+                 and panel_warp_call.json.obj | default('', true) is match('\s*\{') else {} }}
+            panel_warp_config_problem: >-
+              {{ 'Cloudflare answered without the device' if panel_warp_call.json.success | default(false) | bool
+                 else panel_warp_call.json.msg | default(panel_warp_call.msg | default(''), true) }}
+          no_log: true
+
+    - name: Set the WARP+ license
+      when:
+        - panel_warp_license | length > 0
+        - panel_warp_data | length > 0
+        - panel_warp_data.license_key | default('') != panel_warp_license
+        - not ansible_check_mode
+      block:
+        - name: Send the WARP+ license through the panel
+          ansible.builtin.include_tasks: warp_call.yml
+          vars:
+            panel_warp_action: license
+            panel_warp_body:
+              license: "{{ panel_warp_license }}"
+
+        - name: Keep the licensed registration
+          ansible.builtin.set_fact:
+            panel_warp_data: "{{ panel_warp_call.json.obj | from_json }}"
+          when: panel_warp_call.json.success | default(false) | bool
+          no_log: true
+
+        - name: Report the WARP+ license
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'WARP: the WARP+ license is set' if panel_warp_call.json.success | default(false) | bool else
+                 'WARNING: WARP: the WARP+ license was not accepted (' ~ (panel_warp_call.json.msg | default(panel_warp_call.msg | default(''), true))
+                 ~ '); the registration keeps its own' }}
+
+# The outbound as warp_modal.html collectConfig builds it (Outbound.toJson: workers 2, the peer's allowedIPs and
+# keepAlive 0), reserved = the bytes of the device's client_id; panel_warp_mtu and noKernelTun on top.
+- name: Build the WARP outbound
+  ansible.builtin.set_fact:
+    panel_warp_outbound: >-
+      {%- set tpl_outbounds = panel_xray_template.outbounds | default([]) -%}
+      {%- set existing = tpl_outbounds | selectattr('tag', 'defined') | selectattr('tag', 'equalto', panel_warp_tag) | first | default({}) -%}
+      {%- set device = panel_warp_config.config | default({}, true) -%}
+      {%- set peer = (device.peers | default([{}], true))[0] -%}
+      {%- set local = {'mtu': panel_warp_mtu | int, 'domainStrategy': panel_warp_domain_strategy,
+                       'noKernelTun': panel_warp_no_kernel_tun | bool} -%}
+      {%- if not panel_warp_enabled | bool or panel_warp_data.private_key | default('') | length == 0 -%}
+      {{ {} }}
+      {%- elif device.client_id | default('') | length > 0 and peer.public_key | default('') | length > 0
+               and (peer.endpoint | default({})).host | default('') | length > 0 and (device.interface | default({})).addresses is defined -%}
+      {%-   set b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' -%}
+      {%-   set cid = device.client_id | replace('-', '+') | replace('_', '/') | replace('=', '') -%}
+      {%-   set reserved = [] -%}
+      {%-   for i in range(0, cid | length, 4) -%}
+      {%-     set chunk = cid[i:i + 4] -%}
+      {%-     set ns = namespace(v=0) -%}
+      {%-     for ch in chunk -%}
+      {%-       set ns.v = ns.v * 64 + b64.index(ch) -%}
+      {%-     endfor -%}
+      {%-     set count = (chunk | length * 6) // 8 -%}
+      {%-     set value = ns.v // (2 ** (chunk | length * 6 - count * 8)) -%}
+      {%-     for k in range(count) -%}
+      {%-       set _ = reserved.append((value // (256 ** (count - 1 - k))) % 256) -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   set addrs = device.interface.addresses -%}
+      {%-   set address = ([addrs.v4 ~ '/32'] if addrs.v4 | default('') else []) + ([addrs.v6 ~ '/128'] if addrs.v6 | default('') else []) -%}
+      {%-   set settings = {'mtu': panel_warp_mtu | int, 'secretKey': panel_warp_data.private_key, 'address': address,
+                           'workers': panel_warp_workers | int, 'domainStrategy': panel_warp_domain_strategy, 'reserved': reserved,
+                           'peers': [{'publicKey': peer.public_key, 'allowedIPs': panel_warp_allowed_ips, 'endpoint': peer.endpoint.host,
+                                      'keepAlive': 0}],
+                           'noKernelTun': panel_warp_no_kernel_tun | bool} -%}
+      {{ existing | combine({'protocol': 'wireguard', 'settings': (existing.settings | default({})) | combine(settings), 'tag': panel_warp_tag}) }}
+      {%- elif existing and existing.protocol | default('') == 'wireguard'
+               and (existing.settings | default({})).secretKey | default('') == panel_warp_data.private_key -%}
+      {{ existing | combine({'settings': existing.settings | combine(local)}) }}
+      {%- else -%}
+      {{ {} }}
+      {%- endif -%}
+  no_log: true
+
+- name: Say why there is no WARP outbound
+  ansible.builtin.set_fact:
+    panel_warp_problem: >-
+      {{ panel_warp_problem or ('check mode: the panel has no WARP registration yet, site.yml makes one' if ansible_check_mode
+         else 'the WARP device could not be read (' ~ panel_warp_config_problem | default('no registration') ~ ') and the Xray template has no '
+         ~ panel_warp_tag ~ " outbound with the registration's key") }}
+  when:
+    - panel_warp_enabled | bool
+    - panel_warp_outbound | length == 0
+
+- name: Plan the Xray template
+  ansible.builtin.set_fact:
+    panel_warp_wanted: >-
+      {%- set tpl = panel_xray_template -%}
+      {%- set rules = (tpl.routing | default({})).rules | default([]) -%}
+      {%- set others = [] -%}
+      {%- set ours = [] -%}
+      {%- for rule in rules -%}
+      {%-   set shape = rule | dict2items | rejectattr('key', 'in', ['type', 'ruleTag']) | items2dict -%}
+      {%-   if rule.ruleTag | default('') == panel_warp_rule_tag or shape == {'network': panel_warp_rule.network, 'outboundTag': panel_warp_tag} -%}
+      {%-     set _ = ours.append(rule) -%}
+      {%-   else -%}
+      {%-     set _ = others.append(rule) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set outbounds = tpl.outbounds | default([]) -%}
+      {%- set kept = [] -%}
+      {%- set ns = namespace(placed=false) -%}
+      {%- set referenced = others | selectattr('outboundTag', 'defined') | selectattr('outboundTag', 'equalto', panel_warp_tag) | list | length > 0 -%}
+      {%- for o in outbounds -%}
+      {%-   if o.tag | default('') != panel_warp_tag -%}
+      {%-     set _ = kept.append(o) -%}
+      {%-   elif panel_warp_outbound | length > 0 -%}
+      {%-     if not ns.placed -%}
+      {%-       set _ = kept.append(panel_warp_outbound) -%}
+      {%-       set ns.placed = true -%}
+      {%-     endif -%}
+      {%-   elif panel_warp_enabled | bool or referenced -%}
+      {%-     set _ = kept.append(o) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if panel_warp_outbound | length > 0 and not ns.placed -%}
+      {%-   set _ = kept.append(panel_warp_outbound) -%}
+      {%- endif -%}
+      {%- set new_rules = others + ([panel_warp_rule] if panel_warp_outbound | length > 0 else []) -%}
+      {{ tpl if new_rules == rules and kept == outbounds
+         else tpl | combine({'routing': (tpl.routing | default({})) | combine({'rules': new_rules}), 'outbounds': kept}) }}
+  no_log: true
+
+- name: Warn about WARP
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: WARP: {{ panel_warp_problem }}; no rule «tcp,udp -> {{ panel_warp_tag }}» in the Xray template, so the
+      clients' traffic leaves from this host directly. The next run tries again.
+  when:
+    - panel_warp_enabled | bool
+    - panel_warp_outbound | length == 0
+
+- name: "Show the plan: WARP"
+  ansible.builtin.debug:
+    msg: >-
+      WARP: {{ ('outbound ' ~ panel_warp_tag ~ ' (MTU ' ~ panel_warp_mtu ~ ') and the last rule «tcp,udp -> ' ~ panel_warp_tag ~ '»')
+               if panel_warp_outbound | length > 0 else ('no rule «tcp,udp -> ' ~ panel_warp_tag ~ '»') }}
+      in the Xray template{{ ' (as wanted)' if panel_warp_wanted == panel_xray_template else '' }}
+
+- name: Save the Xray template and restart xray
+  ansible.builtin.include_tasks: xray_template_save.yml
+  vars:
+    panel_xray_new: "{{ panel_warp_wanted }}"
+    panel_xray_old: "{{ panel_xray_template }}"
+    panel_xray_change: >-
+      {{ 'WARP outbound and rule' if panel_warp_outbound | length > 0 else 'WARP rule taken out' }}
+  when:
+    - panel_warp_wanted != panel_xray_template
+    - not ansible_check_mode

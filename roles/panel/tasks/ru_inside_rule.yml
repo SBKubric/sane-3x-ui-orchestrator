@@ -62,79 +62,15 @@
       {{ 1 if panel_ru_inside_rule_wanted | bool else 0 }}{{ ' (as wanted)' if panel_ru_inside_wanted == panel_ru_inside_template else '' }}
 
 - name: Save the Xray template and restart xray
+  ansible.builtin.include_tasks: xray_template_save.yml
+  vars:
+    panel_xray_new: "{{ panel_ru_inside_wanted }}"
+    panel_xray_old: "{{ panel_ru_inside_template }}"
+    panel_xray_form: "{{ panel_ru_inside_form }}"
+    panel_xray_change: "{{ 'ru-inside rule' if panel_ru_inside_rule_wanted | bool else 'ru-inside rule taken out' }}"
   when:
     - panel_ru_inside_wanted != panel_ru_inside_template
     - not ansible_check_mode
-  block:
-    - name: Save the Xray template
-      ansible.builtin.uri:
-        url: "{{ panel_api_url }}panel/xray/update"
-        method: POST
-        headers:
-          Cookie: "{{ panel_api_cookie }}"
-          X-Requested-With: XMLHttpRequest
-        body_format: form-urlencoded
-        body:
-          xraySetting: "{{ panel_ru_inside_wanted | to_json(ensure_ascii=false) }}"
-          outboundTestUrl: "{{ panel_ru_inside_form.outboundTestUrl | default('') }}"
-          hiddifyCompat: "{{ panel_ru_inside_form.hiddifyCompat | default(false) | bool | string | lower }}"
-        ca_path: "{{ panel_api_ca_path }}"
-        return_content: true
-      delegate_to: "{{ panel_api_host }}"
-      register: panel_ru_inside_saved
-      changed_when: true
-      no_log: true
-
-    - name: Require the Xray template saved
-      ansible.builtin.assert:
-        that:
-          - panel_ru_inside_saved.json.success | default(false) | bool
-        fail_msg: "POST panel/xray/update failed: HTTP {{ panel_ru_inside_saved.status | default('?') }} {{ panel_ru_inside_saved.json.msg | default('') }}"
-        quiet: true
-
-    - name: Restart xray on the new template
-      ansible.builtin.include_tasks: api.yml
-      vars:
-        panel_call_path: server/restartXrayService
-        panel_call_method: POST
-
-  rescue:
-    - name: Put the previous Xray template back
-      ansible.builtin.uri:
-        url: "{{ panel_api_url }}panel/xray/update"
-        method: POST
-        headers:
-          Cookie: "{{ panel_api_cookie }}"
-          X-Requested-With: XMLHttpRequest
-        body_format: form-urlencoded
-        body:
-          xraySetting: "{{ panel_ru_inside_template | to_json(ensure_ascii=false) }}"
-          outboundTestUrl: "{{ panel_ru_inside_form.outboundTestUrl | default('') }}"
-          hiddifyCompat: "{{ panel_ru_inside_form.hiddifyCompat | default(false) | bool | string | lower }}"
-        ca_path: "{{ panel_api_ca_path }}"
-        return_content: true
-      delegate_to: "{{ panel_api_host }}"
-      changed_when: true
-      no_log: true
-
-    - name: Restart xray on the previous template
-      ansible.builtin.uri:
-        url: "{{ panel_api_url }}panel/api/server/restartXrayService"
-        method: POST
-        headers:
-          Cookie: "{{ panel_api_cookie }}"
-        ca_path: "{{ panel_api_ca_path }}"
-        return_content: true
-      delegate_to: "{{ panel_api_host }}"
-      changed_when: true
-      failed_when: false
-      no_log: true
-
-    - name: Stop on the failed restart
-      ansible.builtin.fail:
-        msg: >-
-          xray did not restart with the {{ 'ru-inside rule' if panel_ru_inside_rule_wanted | bool else 'ru-inside rule taken out' }};
-          the previous template is back: {{ ansible_failed_result.msg | default('') }}
 
 - name: Restart xray on the new list
   ansible.builtin.include_tasks: api.yml

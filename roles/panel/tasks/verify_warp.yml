@@ -1,0 +1,59 @@
+---
+# verify.yml on the panel host, with the api_login session: the WARP outbound (WireGuard, noKernelTun) and our rule
+# «tcp,udp -> warp» as the last routing rule of the panel's Xray template; then the host's own
+# www.cloudflare.com/cdn-cgi/trace, reported. The host itself is expected to show warp=off: the rule routes only the
+# traffic that comes in through the panel's inbounds (VLESS, AmneziaWG through awg-tproxy-in), and that traffic, the
+# clients', shows warp=on and a Cloudflare address. No trace is a warning. Read-only.
+- name: Read the panel's Xray template
+  ansible.builtin.include_tasks: xray_template.yml
+
+- name: Find the WARP outbound and rule
+  ansible.builtin.set_fact:
+    panel_warp_verify_outbound: >-
+      {{ panel_xray_template.outbounds | default([]) | selectattr('tag', 'defined') | selectattr('tag', 'equalto', panel_warp_tag)
+         | first | default({}) | combine({'settings': {'secretKey': ''}}, recursive=true) }}
+    panel_warp_verify_last: >-
+      {%- set rules = (panel_xray_template.routing | default({})).rules | default([]) -%}
+      {%- set last = rules[-1] if rules else {} -%}
+      {%- set shape = last | dict2items | rejectattr('key', 'in', ['type', 'ruleTag']) | items2dict -%}
+      {{ last.ruleTag | default('') == panel_warp_rule_tag or shape == {'network': panel_warp_rule.network, 'outboundTag': panel_warp_tag} }}
+
+- name: Require the WARP outbound
+  ansible.builtin.assert:
+    that:
+      - panel_warp_verify_outbound.protocol | default('') == 'wireguard'
+      - panel_warp_verify_outbound.settings.noKernelTun | default(false) | bool
+    fail_msg: >-
+      {{ ("no " ~ panel_warp_tag ~ " outbound in the panel's Xray template") if panel_warp_verify_outbound.protocol is not defined
+         else ('the ' ~ panel_warp_tag ~ ' outbound is ' ~ panel_warp_verify_outbound.protocol ~ ' with noKernelTun '
+               ~ panel_warp_verify_outbound.settings.noKernelTun | default(false)) }}; run site.yml (its WARP step warns when
+      Cloudflare cannot register the panel)
+    quiet: true
+
+- name: Require the WARP rule last
+  ansible.builtin.assert:
+    that:
+      - panel_warp_verify_last | bool
+    fail_msg: "the rule «tcp,udp -> {{ panel_warp_tag }}» is not the last routing rule of the panel's Xray template; run site.yml"
+    quiet: true
+
+- name: Fetch cdn-cgi/trace from the panel host itself
+  ansible.builtin.uri:
+    url: "{{ panel_warp_trace_url }}"
+    return_content: true
+    timeout: 15
+  register: panel_warp_verify_trace
+  failed_when: false
+  when: panel_warp_trace_url | length > 0
+
+- name: Report WARP
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'WARNING: ' if trace_warp == '' else '' }}WARP: outbound {{ panel_warp_tag }} (wireguard, MTU
+      {{ panel_warp_verify_outbound.settings.mtu | default('?') }}, noKernelTun) and the rule «tcp,udp -> {{ panel_warp_tag }}» last;
+      {{ ('no cdn-cgi/trace from the panel host (' ~ panel_warp_verify_trace.msg | default('skipped') ~ ')') if trace_warp == ''
+         else ('the panel host itself: warp=' ~ trace_warp ~ ', ip=' ~ trace_ip ~ ' (the baseline; clients see warp=on)') }}
+  vars:
+    trace_body: "{{ panel_warp_verify_trace.content | default('') if panel_warp_verify_trace.status | default(0) == 200 else '' }}"
+    trace_warp: "{{ trace_body | regex_search('^warp=(\\S+)', '\\1', multiline=True) | default([''], true) | first }}"
+    trace_ip: "{{ trace_body | regex_search('^ip=(\\S+)', '\\1', multiline=True) | default(['?'], true) | first }}"

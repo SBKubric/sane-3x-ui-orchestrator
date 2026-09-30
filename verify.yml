@@ -9,6 +9,11 @@
 #   panel      (front_mode only443) every hop behind its front: 443/https in the chain registry
 #   panel      geosite:ru-inside: the rule in the Xray template, the list in xray's asset folder (a warning when
 #              its last good check is older than panel_ru_inside_max_age_days), the daily timer active
+#   panel      WARP: the warp outbound (WireGuard, noKernelTun) and the rule tcp,udp -> warp last in the Xray template;
+#              the panel host's own cdn-cgi/trace reported (warp=off there is the baseline: the rule routes the traffic
+#              that comes in through the inbounds, and the clients see warp=on)
+#   panel      AmneziaWG: routeViaXray on and the TPROXY inbound (awg-tproxy-in) in the config xray runs; a warning
+#              otherwise (its clients would leave directly, past ru-inside and WARP)
 #   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port (443 behind the

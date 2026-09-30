@@ -1,0 +1,45 @@
+---
+# verify.yml on the panel host, with the api_login session: the AmneziaWG server routes its clients through xray
+# (routeViaXray, tasks/awg_server.yml), and the config xray runs has the panel's synthetic TPROXY inbound for it, so the
+# Xray template's routing (ru-inside, WARP) applies to AmneziaWG. Either missing is a warning: the tunnel works, its
+# traffic just leaves the host directly. Read-only.
+- name: Read the AmneziaWG server
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: awg/server
+    panel_call_method: GET
+
+- name: Keep what verify needs of the AmneziaWG server
+  ansible.builtin.set_fact:
+    panel_awg_verify: >-
+      {{ {'enable': panel_call.obj.enable | default(false) | bool, 'route': panel_call.obj.routeViaXray | default(false) | bool,
+          'tag': panel_call.obj.xrayInboundTag | default('', true) or 'awg-tproxy-in',
+          'port': panel_call.obj.xrayTproxyPort | default(0, true) | int or 12345} }}
+
+- name: Read the config xray runs
+  ansible.builtin.slurp:
+    src: "{{ panel_xray_config_file }}"
+  register: panel_awg_verify_config
+  failed_when: false
+  when: panel_awg_verify.route
+
+- name: Find the AmneziaWG TPROXY inbound in xray's config
+  ansible.builtin.set_fact:
+    panel_awg_verify_inbound: >-
+      {{ ((panel_awg_verify_config.content | b64decode | from_json).inbounds | default([]) if panel_awg_verify_config.content is defined else [])
+         | selectattr('tag', 'defined') | selectattr('tag', 'equalto', panel_awg_verify.tag) | selectattr('protocol', 'equalto', 'dokodemo-door')
+         | selectattr('port', 'equalto', panel_awg_verify.port) | list }}
+  when: panel_awg_verify.route
+
+- name: Report the AmneziaWG route
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'WARNING: ' if not panel_awg_verify.route or panel_awg_verify_inbound | default([]) | length == 0 else '' }}AmneziaWG:
+      {{ ('routeViaXray is off: its clients leave the host directly, past ru-inside and WARP; run site.yml'
+          ~ (' (awg_route_via_xray is false)' if not panel_awg_route_via_xray | bool else ''))
+         if not panel_awg_verify.route else
+         ('routeViaXray on, but ' ~ panel_xray_config_file ~ ' has no dokodemo-door inbound ' ~ panel_awg_verify.tag ~ ' on '
+          ~ panel_awg_verify.port ~ ' (xray not restarted yet?): TPROXY sends the traffic nowhere')
+         if panel_awg_verify_inbound | default([]) | length == 0 else
+         ('routeViaXray on, xray inbound ' ~ panel_awg_verify.tag ~ ' (TPROXY, port ' ~ panel_awg_verify.port
+          ~ "): its clients follow the Xray template's routing") }}{{ '' if panel_awg_verify.enable else ' (the server is disabled)' }}

@@ -1,0 +1,80 @@
+---
+# Saves a new Xray template through the panel (POST <base>panel/xray/update, with the rest of the form as it was:
+# outboundTestUrl, hiddifyCompat) and restarts xray (panel/api/server/restartXrayService). If either fails, the previous
+# template goes back, xray is restarted on it and the run stops. Nothing is sent when the template is unchanged or in
+# check mode. Inputs: panel_xray_new (the template to save), panel_xray_old (the one read), panel_xray_form (the form
+# read with it, tasks/xray_template.yml), panel_xray_change (what the new template does, for the failure message).
+- name: Save the Xray template and restart xray
+  when:
+    - panel_xray_new != panel_xray_old
+    - not ansible_check_mode
+  block:
+    - name: Save the Xray template
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/xray/update"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        body_format: form-urlencoded
+        body:
+          xraySetting: "{{ panel_xray_new | to_json(ensure_ascii=false) }}"
+          outboundTestUrl: "{{ panel_xray_form.outboundTestUrl | default('') }}"
+          hiddifyCompat: "{{ panel_xray_form.hiddifyCompat | default(false) | bool | string | lower }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      register: panel_xray_saved
+      changed_when: true
+      no_log: true
+
+    - name: Require the Xray template saved
+      ansible.builtin.assert:
+        that:
+          - panel_xray_saved.json.success | default(false) | bool
+        fail_msg: "POST panel/xray/update failed: HTTP {{ panel_xray_saved.status | default('?') }} {{ panel_xray_saved.json.msg | default('') }}"
+        quiet: true
+
+    - name: Restart xray on the new template
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: server/restartXrayService
+        panel_call_method: POST
+
+  rescue:
+    - name: Put the previous Xray template back
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/xray/update"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        body_format: form-urlencoded
+        body:
+          xraySetting: "{{ panel_xray_old | to_json(ensure_ascii=false) }}"
+          outboundTestUrl: "{{ panel_xray_form.outboundTestUrl | default('') }}"
+          hiddifyCompat: "{{ panel_xray_form.hiddifyCompat | default(false) | bool | string | lower }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      changed_when: true
+      no_log: true
+
+    - name: Restart xray on the previous template
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/api/server/restartXrayService"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+      delegate_to: "{{ panel_api_host }}"
+      changed_when: true
+      failed_when: false
+      no_log: true
+
+    - name: Stop on the failed restart
+      ansible.builtin.fail:
+        msg: >-
+          xray did not restart with the {{ panel_xray_change }}; the previous template is back:
+          {{ ansible_failed_result.msg | default('') }}
