@@ -1,0 +1,36 @@
+---
+# Reads the panel's Xray template (POST <base>panel/xray/, the page Xray settings reads) with the api_login session.
+# Facts: panel_xray_form (the whole answer: xraySetting, outboundTestUrl, hiddifyCompat, ...) and panel_xray_template
+# (xraySetting, the template itself). Used by tasks/ru_inside_template.yml and tasks/warp.yml.
+# no_log: the template carries the private keys of WARP/NordVPN outbounds.
+- name: Read the panel's Xray template
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/xray/"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_xray_read
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Require the Xray template
+  ansible.builtin.assert:
+    that:
+      - panel_xray_read.status | default(0) == 200
+      - panel_xray_read.json.success | default(false) | bool
+    fail_msg: >-
+      POST panel/xray/ failed: HTTP {{ panel_xray_read.status | default('?') }}
+      {{ panel_xray_read.json.msg | default(panel_xray_read.msg | default('')) }}
+    quiet: true
+
+- name: Keep the Xray template
+  ansible.builtin.set_fact:
+    panel_xray_form: "{{ panel_xray_read.json.obj | from_json }}"
+    panel_xray_template: "{{ (panel_xray_read.json.obj | from_json).xraySetting }}"
+  no_log: true

@@ -24,7 +24,16 @@ template in the panel's wrapper (obj = a JSON string {xraySetting, inboundTags, 
 hiddifyCompat}); POST panel/xray/update takes the form (xraySetting, outboundTestUrl: empty = the default URL,
 hiddifyCompat: empty = unchanged), refuses JSON that does not parse and pins the api rule first (EnsureStatsRouting);
 POST panel/api/server/restartXrayService fails the way xray does on a routing rule whose ext: file is missing from
-the asset folder or lacks the category. Test hook: POST /test/panel/xray (template, assetDir, restartFails).
+the asset folder or lacks the category, or on two outbounds with one tag (xray: "existing tag found"). Test hook:
+POST /test/panel/xray (template, assetDir, restartFails).
+
+And the panel's WARP (web/service/warp.go, POST panel/xray/warp/<action>): data answers the stored registration (a
+JSON string {access_token, device_id, license_key, private_key}, empty when there is none); reg takes the form
+privateKey/publicKey, registers with a stand-in of api.cloudflareclient.com and answers {data, config} (config = the
+Cloudflare device: id, token, account.license, config.client_id/peers/interface); config answers the device again;
+license takes the form license and stores it; del clears the registration. Cloudflare out of reach is a refusal
+(success false, "(<error>)"), and an answer without account.license is success with an empty obj, as RegWarp has it.
+Test hook: POST /test/panel/warp (data, device, fail: "" | "network" | "empty" | "config", badLicense).
 """
 
 import ipaddress
@@ -55,6 +64,22 @@ DEFAULT_XRAY_TEMPLATE = {
     "metrics": {"tag": "metrics_out", "listen": "127.0.0.1:11111"},
 }
 DEFAULT_OUTBOUND_TEST_URL = "https://www.google.com/generate_204"
+
+# api.cloudflareclient.com's device (POST/GET /v0a2158/reg), as the panel passes it through.
+DEFAULT_WARP_DEVICE = {
+    "id": "t.0f5d2c1e-3b1a-4d9e-9c7a-2b8f6e4d1a90", "type": "a", "model": "x-ui", "name": "real",
+    "token": "cf-token-3c9d", "warp_enabled": False, "waitlist_enabled": False,
+    "account": {"id": "a1b2c3", "account_type": "free", "warp_plus": False, "premium_data": 0, "quota": 0,
+                "license": "free-lic-0001"},
+    "config": {
+        "client_id": "8/+A",
+        "peers": [{"public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                   "endpoint": {"v4": "162.159.192.1:0", "v6": "[2606:4700:d0::a29f:c001]:0",
+                                "host": "engage.cloudflareclient.com:2408"}}],
+        "interface": {"addresses": {"v4": "172.16.0.2", "v6": "2606:4700:110:8a36:df92:102a:9602:fa18"}},
+        "services": {"http_proxy": "172.16.0.1:2480"},
+    },
+}
 
 BASE = "/base/"
 USER, PASSWORD = "admin", "secret-pass"
@@ -376,6 +401,7 @@ class Panel:
         self.inbounds = []
         self.next_id = 1
         self.x25519 = list(seed.get("x25519", []))
+        self.x25519_next = list(seed.get("x25519Next", []))
         self.targets = seed.get("targets")
         self.xray_template = json.dumps(seed.get("xrayTemplate", DEFAULT_XRAY_TEMPLATE))
         self.outbound_test_url = DEFAULT_OUTBOUND_TEST_URL
@@ -383,6 +409,10 @@ class Panel:
         self.xray_asset_dir = seed.get("xrayAssetDir")
         self.xray_restart_fails = False
         self.xray_restarts = 0
+        self.warp = seed.get("warp", "")
+        self.warp_device = json.loads(json.dumps(seed.get("warpDevice", DEFAULT_WARP_DEVICE)))
+        self.warp_fail = ""
+        self.warp_bad_license = ""
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
                     "h1": "1-100", "endpoint": "10.0.0.1"}
@@ -533,7 +563,9 @@ class Panel:
         self._ports_changed()
 
     def new_x25519(self):
-        pair = {"privateKey": "x25519-private-" + secrets.token_hex(8), "publicKey": "x25519-public-" + secrets.token_hex(8)}
+        # xray x25519 prints base64url without padding; x25519Next seeds the next pairs.
+        pair = self.x25519_next.pop(0) if self.x25519_next else {"privateKey": "x25519-private-" + secrets.token_hex(8),
+                                                                  "publicKey": "x25519-public-" + secrets.token_hex(8)}
         self.x25519.append(pair)
         return pair
 
@@ -644,6 +676,10 @@ class Panel:
         self.xray_restarts += 1
         if self.xray_restart_fails:
             raise Refusal("xray", "Failed to restart xray-core")
+        tags = [o.get("tag") for o in json.loads(self.xray_template).get("outbounds", []) if o.get("tag")]
+        for tag in tags:
+            if tags.count(tag) > 1:
+                raise Refusal("xray", f"failed to add outbound handler > existing tag found: {tag}")
         for rule in json.loads(self.xray_template).get("routing", {}).get("rules", []):
             for entry in rule.get("domain", []):
                 if not entry.startswith("ext:"):
@@ -656,12 +692,51 @@ class Panel:
                     if category.upper().encode() not in f.read().upper():
                         raise Refusal("xray", f"list not found in {name}: {category}")
 
+    # --- WARP -------------------------------------------------------------------------------------------------
+    def _cloudflare(self, url):
+        if self.warp_fail == "network":
+            raise Refusal("warp", f'Post "{url}": dial tcp 162.159.192.1:443: i/o timeout')
+
+    def warp_action(self, action, raw):
+        """The obj of POST panel/xray/warp/<action> (a string, as the panel answers it)."""
+        form = parse_qs(raw, keep_blank_values=True)
+        if action == "data":
+            return self.warp
+        if action == "del":
+            self.warp = ""
+            return ""
+        if action == "reg":
+            self._cloudflare("https://api.cloudflareclient.com/v0a2158/reg")
+            if self.warp_fail == "empty":
+                return ""  # RegWarp: no account.license in the answer -> "", nil
+            data = {"access_token": self.warp_device["token"], "device_id": self.warp_device["id"],
+                    "license_key": self.warp_device["account"]["license"],
+                    "private_key": form.get("privateKey", [""])[0]}
+            self.warp_device["key"] = form.get("publicKey", [""])[0]
+            self.warp = json.dumps(data, indent=2)
+            return json.dumps({"data": data, "config": self.warp_device}, indent=2)
+        data = json.loads(self.warp)  # config and license on an empty registration: json.Unmarshal fails
+        if action == "config":
+            self._cloudflare(f"https://api.cloudflareclient.com/v0a2158/reg/{data['device_id']}")
+            if self.warp_fail == "config":
+                return json.dumps({"success": False, "errors": [{"code": 1000, "message": "Unauthorized"}]})
+            return json.dumps(self.warp_device)
+        if action == "license":
+            self._cloudflare(f"https://api.cloudflareclient.com/v0a2158/reg/{data['device_id']}/account")
+            license_key = form.get("license", [""])[0]
+            if license_key == self.warp_bad_license:
+                raise Refusal("warp", "[100 Invalid license]")
+            data["license_key"] = license_key
+            self.warp = json.dumps(data, indent=2)
+            return self.warp
+        return ""
+
     def state(self):
         return {"inbounds": [dict(i) for i in self.inbounds], "awg": dict(self.awg), "ports": self.ports(),
                 "x25519": list(self.x25519), "nginx": dict(self.nginx), "confirmDeadline": self.confirm_deadline,
                 "settings": dict(self.settings), "xrayTemplate": json.loads(self.xray_template),
                 "outboundTestUrl": self.outbound_test_url, "hiddifyCompat": self.hiddify_compat,
-                "xrayRestarts": self.xray_restarts}
+                "xrayRestarts": self.xray_restarts, "warp": self.warp, "warpDevice": self.warp_device}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
@@ -754,6 +829,15 @@ class Handler(BaseHTTPRequestHandler):
                 reg.panel.outbound_test_url = seed.get("outboundTestUrl", reg.panel.outbound_test_url)
                 reg.panel.hiddify_compat = seed.get("hiddifyCompat", reg.panel.hiddify_compat)
                 return self._send(200, {"ok": True})
+            if path == "/test/panel/warp":
+                seed = json.loads(raw or "{}")
+                if "data" in seed:
+                    reg.panel.warp = json.dumps(seed["data"], indent=2) if seed["data"] else ""
+                if "device" in seed:
+                    reg.panel.warp_device = seed["device"]
+                reg.panel.warp_fail = seed.get("fail", reg.panel.warp_fail)
+                reg.panel.warp_bad_license = seed.get("badLicense", reg.panel.warp_bad_license)
+                return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
@@ -803,8 +887,13 @@ class Handler(BaseHTTPRequestHandler):
                     if method == "POST" and route == "update":
                         reg.panel.xray_update(raw)
                         return self._send(200, {"success": True, "msg": "Settings modified", "obj": None})
+                    if method == "POST" and route.startswith("warp/"):
+                        return self._send(200, {"success": True, "msg": "",
+                                                "obj": reg.panel.warp_action(route[len("warp/"):], raw)})
                 except Refusal as err:
                     return self._send(200, {"success": False, "msg": str(err), "obj": None})
+                except ValueError as err:  # json.Unmarshal of an empty registration
+                    return self._send(200, {"success": False, "msg": f" ({err})", "obj": ""})
                 return self._send(404, None, raw=b"404 page not found")
             prefix = BASE + "panel/api/"
             if not path.startswith(prefix) or COOKIE not in (self.headers.get("Cookie") or ""):

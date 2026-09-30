@@ -1,6 +1,7 @@
 ---
 # Role panel: install/update by tag, self-signed TLS, account from the vault, Telegram and monitoring
-# through the x-ui CLI, geosite:ru-inside dropped by the Xray template, inbounds from panel_inbounds through the API,
+# through the x-ui CLI, geosite:ru-inside dropped by the Xray template, the rest of the clients' traffic through WARP,
+# inbounds from panel_inbounds through the API,
 # the «only 443» front (front_mode); leaves panel_url, panel_ca_pem and (with monitoring) panel_mon_token as facts.
 - name: Check role inputs
   ansible.builtin.assert:
@@ -49,6 +50,10 @@
 # Early: a reinstall above (install.sh removes xray's asset folder) gets the list's link back right away.
 - name: Drop traffic to geosite:ru-inside
   ansible.builtin.include_tasks: ru_inside.yml
+
+# After the ru-inside rule: the WARP rule goes after every rule the template has.
+- name: Client traffic through WARP
+  ansible.builtin.include_tasks: warp.yml
 
 # Before the hops play (site.yml order): hops that join afterwards find the relayed ports in the chain
 # document; hops already joined pick up the new revision on their next poll.

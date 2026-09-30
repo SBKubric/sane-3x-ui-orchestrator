@@ -1,0 +1,40 @@
+---
+# One call of the panel's WARP (POST <base>panel/xray/warp/<panel_warp_action>, web/controller/xray_setting.go) with the
+# api_login session; panel_warp_body is its form (optional). Result: panel_warp_call (the uri result; json is the
+# {success, msg, obj} envelope, obj a JSON string). Only data fails here (the panel does not answer); the calls that
+# reach api.cloudflareclient.com leave success and obj to the caller.
+# reg and license change the registration: changed when the panel says success. data and config only read.
+# no_log: the registration carries the WARP private key and Cloudflare's access token.
+- name: "Call the panel's WARP: {{ panel_warp_action }}"
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/xray/warp/{{ panel_warp_action }}"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: form-urlencoded
+    body: "{{ panel_warp_body | default({}) }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    timeout: "{{ panel_warp_timeout | int }}"
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_warp_call
+  failed_when: false
+  changed_when:
+    - panel_warp_action in ['reg', 'license']
+    - panel_warp_call.json.success | default(false) | bool
+    - panel_warp_call.json.obj | default('', true) | length > 0
+  check_mode: false
+  no_log: true
+
+- name: "Require an answer from the panel's WARP: {{ panel_warp_action }}"
+  ansible.builtin.assert:
+    that:
+      - panel_warp_call.status | default(0) == 200
+      - panel_warp_call.json is defined
+    fail_msg: >-
+      POST panel/xray/warp/{{ panel_warp_action }} failed: HTTP {{ panel_warp_call.status | default('?') }}
+      {{ panel_warp_call.msg | default('') }}
+    quiet: true
+  when: panel_warp_action == 'data'

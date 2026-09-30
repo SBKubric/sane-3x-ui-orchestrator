@@ -1,0 +1,16 @@
+---
+# Role panel's WARP (tasks/warp.yml) or its check (tasks/verify_warp.yml) against mock_panel.py (see test_warp.py).
+- name: Panel WARP
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Log in to the panel (verify.yml has done it before its checks)
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+      when: panel_test_tasks == 'verify_warp'
+
+    - name: Run the task file under test
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: "{{ panel_test_tasks }}"

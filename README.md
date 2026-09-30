@@ -71,6 +71,9 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `acme_production` | `false` = Let's Encrypt staging for mon-server (default); hops always use production LE |
 | `mon_auto_approve` | approve mon-client pairing requests through the mon-server admin API |
 | `front_mode` | `only443` (default) or `off`: the profile «only 443» on the panel and every hop, see [Front: only 443](#front-only-443) |
+| `warp_enabled` | `true` (default): the panel's clients leave through Cloudflare WARP, see [WARP](#warp); `false` takes our rule and outbound out |
+| `warp_mtu` | MTU of the WARP outbound (default `1280`) |
+| `warp_license` | WARP+ license key, optional (default empty: the free account); keep it in the vault |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
 panel's chain registry:
@@ -123,9 +126,11 @@ skipped when the host already matches, so a second run reports `changed=0`.
 6. **geosite ru-inside** (`panel_ru_inside_enabled`, on by default): the list of sites reachable only from inside
    Russia, kept fresh on the box by a daily timer, and a routing rule in the panel's Xray template that drops the
    clients' traffic to them, see [Blocking ru-inside](#blocking-ru-inside).
-7. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
+7. **WARP** (`warp_enabled`, on by default): the panel's own WARP registration, a WireGuard outbound `warp` and a last
+   routing rule that sends the rest of the clients' traffic through it, see [WARP](#warp).
+8. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
    hops play, so hops that join in the same run find the relayed ports in the chain document.
-8. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
+9. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
    fail2ban, `webListen` 127.0.0.1 and `chainPanelHost`, then the panel's nginx front with its firewall, see
    [Front: only 443](#front-only-443).
 
@@ -301,6 +306,46 @@ On the panel host (`tasks/ru_inside.yml`):
 file name, schedule and limits are `panel_ru_inside_*` in `roles/panel/defaults/main.yml`. `verify.yml` checks the
 rule, the list and the timer, and warns when the list's last good check is older than `panel_ru_inside_max_age_days`
 (3).
+
+### WARP
+
+The clients' traffic leaves the panel through Cloudflare WARP instead of the server's own address (orchestrator#41;
+how the panel's built-in WARP works: SBKubric/sane-3x-ui#6). Only the panel: the hops relay TCP/UDP to it. On the panel
+host (`tasks/warp.yml`), through the panel's API on 127.0.0.1:
+
+- **Registration.** `POST <base>panel/xray/warp/data` reads the panel's registration. An existing one is reused, never
+  replaced. Without one the role takes an X25519 pair from the panel (`GET panel/api/server/getNewX25519Cert`, the
+  base64url of `xray x25519` turned into WireGuard's base64) and registers it with `warp/reg` (the panel calls
+  `api.cloudflareclient.com`). With `warp_license` set and different from the registration's key, `warp/license` sets
+  it; a refused key is a `WARNING` and the free account stays. On later runs `warp/config` reads the device
+  (addresses, `client_id`, peer) from Cloudflare.
+- **Outbound.** `warp` (WireGuard), built the way the panel's WARP modal builds it (`warp_modal.html`): `secretKey`
+  from the registration, `address` v4/32 and v6/128, `reserved` = the bytes of `client_id`, peer
+  `engage.cloudflareclient.com:2408` with `0.0.0.0/0, ::/0`, `domainStrategy: ForceIP`, `workers: 2`; and on top
+  `mtu: 1280` (`warp_mtu`; the modal writes 1420) and `noKernelTun: true` (a kernel TUN under root drops UDP,
+  SBKubric/sane-3x-ui#131). An existing `warp` outbound is converged in place (keys the role does not set stay), a
+  second one is dropped. When Cloudflare does not answer `warp/config`, an existing outbound with the registration's
+  key keeps its peer data and only the MTU, `noKernelTun` and `domainStrategy` are converged.
+- **The rule.** `{"type": "field", "ruleTag": "3ax-warp", "network": "tcp,udp", "outboundTag": "warp"}`, the last
+  routing rule: every rule before it stays where it is (`api`, [ru-inside](#blocking-ru-inside) → `blocked`,
+  `geoip:private` → `blocked`, `bittorrent` → `blocked`, the owner's own), and whatever none of them matched goes to
+  WARP, AmneziaWG through `awg-tproxy-in` included. The rule is found by its `ruleTag`, or by its shape when the panel's
+  routing editor dropped the tag, and there is exactly one. The template is saved and xray restarted the way the
+  ru-inside rule is; a failed restart puts the previous template back and stops the run.
+- **Failures.** A registration that fails (Cloudflare out of reach, or an answer without an account) writes no rule:
+  xray would send the traffic into an outbound that is not there. The run goes on with a `WARNING` and the clients'
+  traffic leaves directly; a rule left from before without an outbound to go with it is taken out. The next run tries
+  again.
+
+`warp_enabled: false` takes our rule out and the `warp` outbound with it, unless another rule still points at `warp`;
+the registration stays in the panel (Xray settings → WARP). `verify.yml` requires the outbound (WireGuard,
+`noKernelTun`) and our rule last, and reports `https://www.cloudflare.com/cdn-cgi/trace` fetched from the panel host
+itself: `warp=off` and the server's address there is the expected baseline, because the rule routes only what comes in
+through the panel's inbounds; the clients see `warp=on` and a Cloudflare address. Check that from a client:
+
+```sh
+curl -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='    # through a VLESS or AmneziaWG client
+```
 
 ### Panel API from other roles
 
@@ -674,7 +719,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -695,7 +740,8 @@ to look; the first group that fails ends the run.
 
 Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
 git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
-`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id` (see `vault.yml.example`).
+`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` (see
+`vault.yml.example`).
 
 ```sh
 cp group_vars/all/vault.yml.example group_vars/all/vault.yml
@@ -835,6 +881,15 @@ the category keeping the old one with a warning, no list anywhere leaving the te
 out, a failed restart putting the old template back, `panel_ru_inside_enabled: false`; the script as the timer and
 `ExecStartPre` run it (restart only on a new list, the check time, the link after a reinstall); the ru-inside check of
 `verify.yml` (fresh, old list, no rule, no file);
+`tests/panel/test_warp.py`: WARP against the same mock (its `panel/xray/warp/*` with a stand-in of
+`api.cloudflareclient.com`) — a fresh panel registered with the panel's X25519 pair as WireGuard keys, the outbound as
+the WARP modal builds it with MTU 1280 and `noKernelTun`, the rule last, one restart; idempotent (the registration
+reused, `changed=0`); the rules before it and their order kept, a rule the UI stripped of its tag not doubled, the
+modal's outbound converged in place, a second `warp` outbound dropped; `warp_enabled: false` taking out ours only (the
+outbound kept while another rule points at it); a failed registration (out of reach, no account) writing no rule with
+a warning and a stale rule taken out; Cloudflare out of reach on a registered panel keeping the outbound; the WARP+
+license set once, a refused one warned about; check mode; a failed restart putting the old template back; the WARP
+check of `verify.yml` (converged, no outbound, rule not last, no trace);
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -855,6 +910,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/hop/test_neighbour_script.py &&
   python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
   python3 tests/panel/test_panel_front.py && python3 tests/panel/test_ru_inside.py &&
+  python3 tests/panel/test_warp.py &&
   python3 tests/monserver/test_settings.py &&
   python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py'
 ```

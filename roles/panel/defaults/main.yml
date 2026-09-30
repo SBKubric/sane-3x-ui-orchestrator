@@ -12,6 +12,9 @@
 #
 # Inputs from the inventory (group_vars/all, optional):
 #   front_mode         only443 (default) | off: the profile «only 443» (tasks/front.yml, README "Front: only 443")
+#   warp_enabled       true (default): client traffic leaves through Cloudflare WARP (tasks/warp.yml, README "WARP")
+#   warp_license       WARP+ license key (default empty: the free account)
+#   warp_mtu           MTU of the WARP outbound (default 1280)
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
 #   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver; only with monitoring)
@@ -189,6 +192,37 @@ panel_ru_inside_rule:
   ruleTag: "{{ panel_ru_inside_rule_tag }}"
   domain: ["ext:{{ panel_ru_inside_file }}:{{ panel_ru_inside_category }}"]
   outboundTag: "{{ panel_ru_inside_outbound }}"
+
+# WARP (tasks/warp.yml, README "WARP"): the panel's built-in Cloudflare WARP registration (POST <base>panel/xray/warp/
+# data|reg|config|license, web/service/warp.go), a WireGuard outbound tagged `warp` in the Xray template built from it
+# the way the panel's WARP modal builds it (warp_modal.html collectConfig), and one last routing rule that sends all
+# remaining client traffic (tcp,udp; AmneziaWG through awg-tproxy-in too) to it. The rules before it stay as they are.
+# An existing registration is reused, never replaced. A registration that fails (Cloudflare out of reach) writes no
+# rule: xray would send the traffic into an outbound that is not there. false = our rule and the `warp` outbound are
+# taken out (the outbound stays while another rule points at it); the registration stays in the panel.
+panel_warp_enabled: "{{ warp_enabled | default(true) }}"
+# WARP+ license key; empty = the free account the registration gets.
+panel_warp_license: "{{ warp_license | default('') }}"
+# Cloudflare's clients use 1280 (the modal writes 1420, SBKubric/sane-3x-ui#6).
+panel_warp_mtu: "{{ warp_mtu | default(1280) }}"
+# Outbound settings kept as the modal has them; noKernelTun: gVisor TUN, a kernel TUN under root drops UDP (sane-3x-ui#131).
+panel_warp_tag: warp
+panel_warp_domain_strategy: ForceIP
+panel_warp_workers: 2
+panel_warp_no_kernel_tun: true
+panel_warp_allowed_ips: ["0.0.0.0/0", "::/0"]
+# Seconds the panel may take to reach api.cloudflareclient.com (the panel's client has no timeout of its own).
+panel_warp_timeout: 60
+# The rule is found by its ruleTag, or by its shape when the panel's routing editor has dropped the tag.
+panel_warp_rule_tag: 3ax-warp
+panel_warp_rule:
+  type: field
+  ruleTag: "{{ panel_warp_rule_tag }}"
+  network: tcp,udp
+  outboundTag: "{{ panel_warp_tag }}"
+# verify.yml fetches it from the panel host itself: warp=off there is the baseline (the rule applies to traffic that
+# comes in through the inbounds, not to the host's own); the clients see warp=on. Empty = no fetch.
+panel_warp_trace_url: https://www.cloudflare.com/cdn-cgi/trace
 
 # Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
 panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"
