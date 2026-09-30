@@ -347,8 +347,9 @@ INBOUND_FIELDS = {"id": int, "up": int, "down": int, "total": int, "allTime": in
 UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "trafficReset", "listen", "port", "protocol",
                  "settings", "streamSettings", "sniffing", "followChain")
 AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
-              "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str, "routeViaXray": bool,
-              "xrayInboundTag": str, "xrayTproxyPort": int}
+              "privateKey": str, "publicKey": str, "jc": int, "jmin": int, "jmax": int, "s1": int, "s2": int, "s3": int,
+              "s4": int, "h1": str, "h2": str, "h3": str, "h4": str, "i1": str, "i2": str, "i3": str, "i4": str, "i5": str,
+              "endpoint": str, "routeViaXray": bool, "xrayInboundTag": str, "xrayTproxyPort": int}
 
 
 def bind(raw, fields):
@@ -418,9 +419,15 @@ class Panel:
         self.warp_bad_license = ""
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
-                    "h1": "1-100", "endpoint": "10.0.0.1", "routeViaXray": False, "xrayInboundTag": "awg-tproxy-in",
-                    "xrayTproxyPort": 12345}
+                    "jmin": 49, "jmax": 180, "s1": 40, "s2": 120, "s3": 20, "s4": 16,
+                    "h1": "1-100", "h2": "200-300", "h3": "400-500", "h4": "600-700",
+                    # What the panel seeds a new server with (tunnel.GenerateObfuscation20): random I1, I2-I5 its own.
+                    "i1": "<r 153>", "i2": "<b 0xc30000000108><r 20>", "i3": "<b 0x000100002112a442><r 16>",
+                    "i4": "<b 0x16feff00000000000000><r 30>", "i5": "<t><r 40>", "endpoint": "10.0.0.1",
+                    "routeViaXray": False, "xrayInboundTag": "awg-tproxy-in", "xrayTproxyPort": 12345}
         self.awg.update(seed.get("awg", {}))
+        # AWG peers (GET awg/clients): users and the monitoring probe peers alike.
+        self.awg_clients = list(seed.get("awgClients", []))
         for inbound in seed.get("inbounds", []):
             self._store(dict(inbound))
 
@@ -954,6 +961,8 @@ class Handler(BaseHTTPRequestHandler):
             return panel.new_x25519()
         if method == "GET" and route == "awg/server":
             return dict(panel.awg)
+        if method == "GET" and route == "awg/clients":
+            return [dict(c) for c in panel.awg_clients]
         if method == "GET" and route == "nginx/settings":
             return panel.nginx_settings()
         if method == "GET" and route == "nginx/status":

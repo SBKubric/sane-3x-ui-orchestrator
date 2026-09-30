@@ -95,6 +95,8 @@ Panel inbounds (`inventories/<profile>/group_vars/panel.yml`), see [Inbounds](#i
 | Variable | Meaning |
 |---|---|
 | `panel_inbounds` | inbounds of the panel, matched by `remark`; missing ones are added, declared fields that differ are updated, others are left alone |
+| `awg_mimic_protocol` | `quic` (default), `dns`, `sip`, `none` or `custom`: what the AmneziaWG handshake looks like, see [AmneziaWG protocol mimicry](#amneziawg-protocol-mimicry) |
+| `awg_mimic_custom`, `awg_obfuscation`, `awg_obfuscation_apply` | own I1-I5 for `custom`; explicit `jc`/`jmin`/`jmax`/`s1`-`s4`/`h1`-`h4`; `true` = change a server in use too |
 
 Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`, `mon_gomemlimit`; group
 `monclient`: `mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
@@ -181,6 +183,8 @@ The converge, on the panel host (`POST <base>login`, then `panel/api/...`):
    template's routing ([ru-inside](#blocking-ru-inside), [WARP](#warp)) applies to AmneziaWG as it does to VLESS. A
    change of it bounces `awg0` (connected clients reconnect) and the role restarts xray right away, so the inbound is
    there when the TPROXY rules point at it (the panel's own restart job would take up to 30 s).
+   The same save carries I1-I5 (and `awg_obfuscation`) on a new server, see
+   [AmneziaWG protocol mimicry](#amneziawg-protocol-mimicry).
 3. **Per entry**, matched by `remark`:
    - missing, xray: `POST inbounds/add` with `settings` (`clients: []` added), `streamSettings`, `sniffing` as
      JSON strings. With `streamSettings.security: reality` and no `realitySettings.privateKey`, the keys come
@@ -270,6 +274,68 @@ mon-client path (`xray:<id>` and `awg:0`).
 Knobs in `roles/panel/defaults/main.yml`: `panel_public_ip` (default IPv4 from facts; set it in
 `host_vars` behind NAT), `panel_cert_sans`, `panel_cert_valid_days`, `panel_tls_dir`,
 `panel_install_ref`/`panel_install_url`, `panel_install_timeout`.
+
+### AmneziaWG protocol mimicry
+
+Before every handshake an AmneziaWG client sends the special junk packets I1-I5, one UDP datagram each (then its
+`Jc` junk packets, then the handshake). The panel gives a new server a random `I1 = <r N>`; the role replaces I1-I5
+with the start of a real protocol, so the first packet of a session reads as that protocol to a classifier
+(orchestrator#42). The receiver drops these packets unread; the panel writes the server's values into every
+client `.conf`, and the client is the one that sends them.
+
+| Variable | Meaning |
+|---|---|
+| `awg_mimic_protocol` | `quic` (default): a QUIC v1 Initial, 1200 bytes; `dns`: a DNS answer, 44 bytes; `sip`: a SIP REGISTER, 383 bytes; `none`: the panel's own I1-I5; `custom`: `awg_mimic_custom` |
+| `awg_mimic_custom` | `{i1: ..., i2: ...}` for `custom`: `i1` required, unset ones empty. Tags only: `<b 0xHEX>`, `<r N>`, `<rc N>`, `<rd N>`, one `<t>`; no `<c>` |
+| `awg_obfuscation` | optional `{jc, jmin, jmax, s1, s2, s3, s4, h1, h2, h3, h4}`; an unset field keeps the panel's value (the panel checks them on save: `jmin <= jmax`, S1-S4 at least 12 with header protection) |
+| `awg_obfuscation_apply` | `true`: change a server in use too (default `false`) |
+
+The templates are in `roles/panel/vars/awg_mimic.yml`, each byte explained. Their random parts are tags
+(`<r N>` random bytes, `<rd N>` random digits), drawn on every send, so the stored strings stay the same and a
+second run changes nothing. `quic`: long header `0xc3` (Initial), version 1, an 8-byte random connection ID, no
+token, a Length that matches, and 1182 random bytes where the protected payload goes (RFC 9000 §17.2.2; a client
+Initial is at least 1200 bytes, §14.1). `dns`: the AmneziaVPN client's own default I1 (an answer for icloud.com)
+with a random transaction id, TTL and address, where AmneziaVPN keeps the last two fixed (amnezia-client#2857).
+`sip`: a REGISTER with random branch, tag and Call-ID, after the community's generator
+(voidwaifu/Special-Junk-Packet-List). A QUIC Initial that decrypts to a real ClientHello for a chosen SNI (made
+by SagePtr's mini QUIC generator) goes in through `custom`.
+
+**When.** Every issued `.conf` carries the server's values, so the role sets them only while nobody has one: in
+the run that finds no AWG inbound in the panel (the role is about to add it) and no AWG clients (`GET
+awg/clients`, which lists the monitoring probe peers too). They go with the save of the AWG server (step 2 of the
+converge), before the inbound exists. A server in use that differs gets a `WARNING` with its I1 and the desired
+one, and keeps its values. With `awg_obfuscation_apply: true` the role changes it as well and prints a `NOTE`:
+every `.conf` issued so far has to be replaced (the AWG page's button that sends the configs through the bot,
+`POST panel/api/awg/server/notify`, or by hand); the monitoring probes get theirs from the panel by themselves.
+The save bounces the interface. A client with an old `.conf` still connects when only I1-I5 or `jc`/`jmin`/`jmax`
+changed (the receiver does not check them), but sends the old packets; a change of S1-S4 or H1-H4 cuts it off
+until it has the new `.conf`.
+
+```sh
+# the stand's existing server, once, then send the new configs from the panel
+ansible-playbook -i inventories/stand-full site.yml --tags panel -e awg_obfuscation_apply=true
+```
+
+verify.yml warns (never fails) when the server's I1 is empty or is not the chosen template (with `none`
+nothing is checked).
+
+Compatibility of I1-I5. The kernel module and amneziawg-go do not parse the same tags, so the templates use only
+what both take (`<rd N>` in `sip` only):
+
+| Component | I1-I5 | `<b>` `<r>` `<t>` | `<rc>` `<rd>` | `<c>` |
+|---|---|---|---|---|
+| amneziawg kernel module (panel host) | v1.0.20251004 and newer | yes | yes | yes |
+| amneziawg-tools (`awg`, `awg-quick`) | v1.0.20250901 and newer (passes the strings to the module) | | | |
+| amneziawg-go (mon-client, the AmneziaWG apps, AmneziaVPN) | v0.2.13 and newer (2025-07) | yes (one `<t>` per packet before v0.2.16) | v0.2.16 and newer (2025-12) | v0.2.13-v0.2.15 only; refused since v0.2.16 |
+| mon-client (sane-3x-ui-monitoring) | amneziawg-go v3.1.20260828 | yes | yes | no |
+| AmneziaVPN | 4.8.8.1 and newer (2025-07); its macOS desktop app was reported not to take I1 | yes | with amneziawg-go v0.2.16 inside | no |
+| the panel (sane-3x-ui) | stores and renders I1-I5, bounces the interface on a change; does not check the tags | | | |
+
+The panel already puts an I1 (its own `<r N>`) into every `.conf`, so the mimicry narrows the clients only by
+`<rd N>` in `sip`. Sources: the tag parsers (`device/obf*.go` of amneziawg-go, `src/junk.c` of the kernel module,
+`src/config.c` of amneziawg-tools, at the tags above), `client/core/utils/constants/protocolConstants.h` of
+amnezia-client, bivlked/amneziawg-installer `ADVANCED.en.md` (field reports), voidwaifu/Special-Junk-Packet-List,
+SagePtr/mini_quic_generator.
 
 ### Blocking ru-inside
 
@@ -727,7 +793,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -900,6 +966,11 @@ outbound kept while another rule points at it); a failed registration (out of re
 a warning and a stale rule taken out; Cloudflare out of reach on a registered panel keeping the outbound; the WARP+
 license set once, a refused one warned about; check mode; a failed restart putting the old template back; the WARP
 check of `verify.yml` (converged, no outbound, rule not last, no trace);
+`tests/panel/test_awg_mimic.py`: the AmneziaWG mimicry — the templates byte by byte (a 1200-byte QUIC Initial, a
+DNS answer, a SIP REGISTER; tags both parsers take), then against the same mock a new server getting the QUIC template
+with its first save before the inbound, `dns`, `sip`, `custom` and `awg_obfuscation`, `none` keeping the panel's
+packets, check mode, a server in use (its inbound, or clients without one) warned and left alone, the apply flag
+changing it with the note, idempotency, malformed inputs refused before the login, and the verify warning;
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -921,6 +992,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/hop/test_hop_role.py && python3 tests/panel/test_panel_inbounds.py &&
   python3 tests/panel/test_panel_front.py && python3 tests/panel/test_ru_inside.py &&
   python3 tests/panel/test_warp.py &&
+  python3 tests/panel/test_awg_mimic.py &&
   python3 tests/monserver/test_settings.py &&
   python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py'
 ```

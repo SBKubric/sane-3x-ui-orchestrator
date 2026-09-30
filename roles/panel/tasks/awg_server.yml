@@ -7,7 +7,9 @@
 # which also moves the AWG inbound record to the port and bumps the chain revision, so the hops relay the new UDP
 # port. A new routeViaXray makes the panel bounce the interface (its PostUp swaps NAT for the TPROXY rules) and ask
 # for an xray restart, which its job does within 30 s; the role restarts xray right away, so the synthetic
-# dokodemo-door inbound is there when the TPROXY rules send traffic to it. Result: fact panel_awg_port.
+# dokodemo-door inbound is there when the TPROXY rules send traffic to it. The same save carries the protocol mimicry
+# I1-I5 and awg_obfuscation where awg_obfuscation.yml allows it (a new server, or awg_obfuscation_apply): one
+# read-modify-write of the whole server, so no field of one converge is lost to the other. Result: fact panel_awg_port.
 - name: Read the AmneziaWG server
   ansible.builtin.include_tasks: api.yml
   vars:
@@ -19,6 +21,9 @@
     panel_awg_server: "{{ panel_call.obj }}"
     panel_awg_port: "{{ panel_awg_want.port | default(panel_call.obj.listenPort) | int }}"
   no_log: true
+
+- name: AmneziaWG obfuscation and protocol mimicry
+  ansible.builtin.include_tasks: awg_obfuscation.yml
 
 # The inbound record carries the server's port; one that lags behind (made in the UI, which sends a random
 # port) is brought in line by the same save.
@@ -32,6 +37,7 @@
       {{ (panel_awg_server.enable | bool) != (panel_awg_want.enable | default(true) | bool)
          or panel_awg_server.listenPort | int != panel_awg_port | int
          or panel_awg_route_changed | bool
+         or panel_awg_obf_patch | length > 0
          or (panel_inbounds_current | selectattr('protocol', 'equalto', 'amneziawg') | map(attribute='port')
              | reject('equalto', panel_awg_port | int) | list | length > 0) }}
 
@@ -41,7 +47,8 @@
       AmneziaWG server: {{ 'save' if panel_awg_drift | bool else 'ok' }}
       (enable {{ panel_awg_server.enable | bool | lower }} -> {{ panel_awg_want.enable | default(true) | bool | lower }},
       port {{ panel_awg_server.listenPort }} -> {{ panel_awg_port }},
-      route via xray {{ panel_awg_server.routeViaXray | default(false) | bool | lower }} -> {{ panel_awg_route_via_xray | bool | lower }})
+      route via xray {{ panel_awg_server.routeViaXray | default(false) | bool | lower }} -> {{ panel_awg_route_via_xray | bool | lower }}{{
+      (', obfuscation ' ~ panel_awg_obf_patch.keys() | join(' ')) if panel_awg_obf_patch | length > 0 else '' }})
 
 - name: Save the AmneziaWG server
   ansible.builtin.include_tasks: api.yml
@@ -50,7 +57,7 @@
     panel_call_method: POST
     panel_call_body: >-
       {{ panel_awg_server | combine({'enable': panel_awg_want.enable | default(true) | bool, 'listenPort': panel_awg_port | int,
-                                     'routeViaXray': panel_awg_route_via_xray | bool}) }}
+                                     'routeViaXray': panel_awg_route_via_xray | bool}, panel_awg_obf_patch) }}
   when:
     - panel_awg_drift | bool
     - not ansible_check_mode

@@ -1,0 +1,32 @@
+---
+# verify.yml on the panel (with an amneziawg entry in panel_inbounds and awg_mimic_protocol other than none): the AWG
+# server's I1 is set and is the one the inventory asks for (the chosen protocol's template, or awg_mimic_custom.i1).
+# Anything else is a WARNING, never a failure: a server that had clients before the mimicry keeps its own I1 until
+# awg_obfuscation_apply (README "AmneziaWG protocol mimicry"). Read-only.
+- name: Log in to the panel
+  ansible.builtin.include_tasks: api_login.yml
+
+- name: AmneziaWG obfuscation from the inventory
+  ansible.builtin.include_tasks: awg_mimic_want.yml
+
+- name: Read the AmneziaWG server
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: awg/server
+    panel_call_method: GET
+
+- name: Compare the AmneziaWG server's I1 with awg_mimic_protocol
+  ansible.builtin.set_fact:
+    panel_verify_awg_i1: "{{ panel_call.obj.i1 | default('', true) }}"
+  no_log: true
+
+- name: Report the AmneziaWG protocol mimicry
+  ansible.builtin.debug:
+    msg: >-
+      {%- if panel_verify_awg_i1 == panel_awg_mimic_want.i1 -%}
+      AmneziaWG mimicry: I1 is the {{ panel_awg_mimic_protocol }} template
+      {%- else -%}
+      WARNING: AmneziaWG mimicry: the server's I1 is {{ ("'" ~ panel_verify_awg_i1 ~ "'") if panel_verify_awg_i1 else 'empty' }},
+      not the {{ panel_awg_mimic_protocol }} template '{{ panel_awg_mimic_want.i1 }}' (a server that had clients keeps
+      its own until site.yml runs with awg_obfuscation_apply=true)
+      {%- endif -%}

@@ -72,6 +72,10 @@
     fail_msg: "panel_inbounds: {{ panel_inbounds_problems | join('; ') }}"
     quiet: true
 
+- name: AmneziaWG obfuscation from the inventory
+  ansible.builtin.include_tasks: awg_mimic_want.yml
+  when: panel_inbounds | selectattr('protocol', 'equalto', 'amneziawg') | list | length > 0
+
 - name: Converge the inbounds
   when: panel_inbounds | length > 0
   block:

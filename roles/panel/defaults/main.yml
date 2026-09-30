@@ -117,6 +117,18 @@ panel_inbound_default_sniffing:
   ipsExcluded: []
   domainsExcluded: []
 
+# AmneziaWG protocol mimicry through the special junk packets I1-I5 (tasks/awg_obfuscation.yml, README "AmneziaWG
+# protocol mimicry"; templates in vars/awg_mimic.yml), from the inventory:
+#   awg_mimic_protocol     quic (default) | dns | sip | none (the panel's own I1-I5) | custom (awg_mimic_custom)
+#   awg_mimic_custom       {i1: ..., i2: ...}: the packets for custom (i1 required, the rest default to empty)
+#   awg_obfuscation        optional {jc, jmin, jmax, s1..s4, h1..h4}; unset fields keep the panel's values
+#   awg_obfuscation_apply  true: also change an existing server (its clients' .conf files then need replacing)
+# Set only on a server the role finds new (no AWG inbound, no AWG clients); otherwise a WARNING, no change.
+panel_awg_mimic_protocol: "{{ awg_mimic_protocol | default('quic') }}"
+panel_awg_mimic_custom: "{{ awg_mimic_custom | default({}) }}"
+panel_awg_obfuscation: "{{ awg_obfuscation | default({}) }}"
+panel_awg_obfuscation_apply: "{{ awg_obfuscation_apply | default(false) }}"
+
 # The profile «only 443» (SBKubric/sane-3x-ui ADR 0005, tasks/front.yml). only443: the panel's own pages listen on
 # 127.0.0.1 (the admin comes through an SSH tunnel), and nginx on 443 publishes the subscriptions, the chain poll,
 # /mon/v1, <base>login and <base>panel/api/ with the box's Let's Encrypt IP certificate; the firewall leaves 443/tcp,
