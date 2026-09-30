@@ -133,7 +133,7 @@ class PanelInboundsTest(unittest.TestCase):
         stream = json.loads(vless["streamSettings"])
         reality = stream["realitySettings"]
         self.assertEqual((stream["network"], stream["security"]), ("xhttp", "reality"))
-        self.assertEqual(stream["xhttpSettings"], {"path": "/", "host": "", "mode": "auto"})
+        self.assertEqual(stream["xhttpSettings"], {"path": "/api/v1/client-sync", "host": "", "mode": "auto"})
         self.assertNotIn("tcpSettings", stream)
         self.assertTrue(vless["followChain"], "the stand's inbound follows the chain")
         self.assertEqual(reality["privateKey"], keys["privateKey"])
@@ -180,7 +180,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(after["id"], before["id"], "migrated in place, not re-added")
         stream = json.loads(after["streamSettings"])
         self.assertEqual((stream["network"], stream["security"]), ("xhttp", "reality"))
-        self.assertEqual(stream["xhttpSettings"], {"path": "/", "host": "", "mode": "auto"})
+        self.assertEqual(stream["xhttpSettings"], {"path": "/api/v1/client-sync", "host": "", "mode": "auto"})
         self.assertNotIn("tcpSettings", stream, "the TCP transport settings go with the TCP transport")
         reality = stream["realitySettings"]
         self.assertEqual((reality["privateKey"], reality["settings"]["publicKey"], reality["shortIds"]),
