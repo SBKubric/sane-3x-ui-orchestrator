@@ -347,7 +347,8 @@ INBOUND_FIELDS = {"id": int, "up": int, "down": int, "total": int, "allTime": in
 UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "trafficReset", "listen", "port", "protocol",
                  "settings", "streamSettings", "sniffing", "followChain")
 AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
-              "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str}
+              "privateKey": str, "publicKey": str, "jc": int, "h1": str, "endpoint": str, "routeViaXray": bool,
+              "xrayInboundTag": str, "xrayTproxyPort": int}
 
 
 def bind(raw, fields):
@@ -409,13 +410,16 @@ class Panel:
         self.xray_asset_dir = seed.get("xrayAssetDir")
         self.xray_restart_fails = False
         self.xray_restarts = 0
+        self.xray_need_restart = False
+        self.awg_bounces = 0
         self.warp = seed.get("warp", "")
         self.warp_device = json.loads(json.dumps(seed.get("warpDevice", DEFAULT_WARP_DEVICE)))
         self.warp_fail = ""
         self.warp_bad_license = ""
         self.awg = {"kind": "awg", "id": 1, "enable": False, "interfaceName": "awg0", "listenPort": 38810, "mtu": 1420,
                     "privateKey": "awg-private-" + secrets.token_hex(8), "publicKey": "awg-public", "jc": 5,
-                    "h1": "1-100", "endpoint": "10.0.0.1"}
+                    "h1": "1-100", "endpoint": "10.0.0.1", "routeViaXray": False, "xrayInboundTag": "awg-tproxy-in",
+                    "xrayTproxyPort": 12345}
         self.awg.update(seed.get("awg", {}))
         for inbound in seed.get("inbounds", []):
             self._store(dict(inbound))
@@ -556,6 +560,11 @@ class Panel:
         # SaveServer stores what it is given: a body without the keys would wipe them (a re-key in effect).
         if body.get("privateKey") != self.awg["privateKey"] or body.get("publicKey") != self.awg["publicKey"]:
             raise Refusal("awg_keys", "the save would replace the server keys")
+        # SaveServer: a new routeViaXray (or its tag/port) bounces the interface and asks for an xray restart, which the
+        # panel's 30 s job does unless someone restarts xray first.
+        if any(body.get(k, self.awg[k]) != self.awg[k] for k in ("routeViaXray", "xrayInboundTag", "xrayTproxyPort")):
+            self.awg_bounces += 1
+            self.xray_need_restart = True
         self.awg.update(body)
         for inbound in self.inbounds:
             if inbound["protocol"] == "amneziawg":
@@ -674,6 +683,7 @@ class Panel:
 
     def xray_restart(self):
         self.xray_restarts += 1
+        self.xray_need_restart = False
         if self.xray_restart_fails:
             raise Refusal("xray", "Failed to restart xray-core")
         tags = [o.get("tag") for o in json.loads(self.xray_template).get("outbounds", []) if o.get("tag")]
@@ -736,7 +746,8 @@ class Panel:
                 "x25519": list(self.x25519), "nginx": dict(self.nginx), "confirmDeadline": self.confirm_deadline,
                 "settings": dict(self.settings), "xrayTemplate": json.loads(self.xray_template),
                 "outboundTestUrl": self.outbound_test_url, "hiddifyCompat": self.hiddify_compat,
-                "xrayRestarts": self.xray_restarts, "warp": self.warp, "warpDevice": self.warp_device}
+                "xrayRestarts": self.xray_restarts, "warp": self.warp, "warpDevice": self.warp_device,
+                "xrayNeedRestart": self.xray_need_restart, "awgBounces": self.awg_bounces}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,

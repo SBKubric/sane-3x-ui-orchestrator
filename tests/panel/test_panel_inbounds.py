@@ -94,6 +94,7 @@ class PanelInboundsTest(unittest.TestCase):
         run = subprocess.run(["ansible-playbook", "-vvv", "-i", str(HERE / "inventory.yml"), str(playbook),
                               "-e", f"@{vars_file}", *extra], env=env, capture_output=True, text=True, check=False)
         out = run.stdout + run.stderr
+        self.last_out = out
         self.assertEqual(run.returncode, expect_rc, out[-6000:])
         panel = self.panel()
         secrets = [pair["privateKey"] for pair in panel["x25519"]] + [panel["awg"]["privateKey"]]
@@ -122,7 +123,8 @@ class PanelInboundsTest(unittest.TestCase):
         revision = self.state()["revision"]
         self.play()
         self.assertEqual([(m, p) for m, p, _ in self.writes],
-                         [("POST", "awg/server"), ("POST", "inbounds/add"), ("POST", "inbounds/add")])
+                         [("POST", "awg/server"), ("POST", "server/restartXrayService"), ("POST", "inbounds/add"),
+                          ("POST", "inbounds/add")])
         panel = self.panel()
         self.assertEqual(len(panel["x25519"]), 1, "Reality keys come from the panel, once")
         keys = panel["x25519"][0]
@@ -286,9 +288,66 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertEqual(self.writes[0][2]["privateKey"], self.panel()["awg"]["privateKey"], "the save keeps the keys")
         self.assertTrue(self.panel()["awg"]["enable"])
 
+    def test_awg_traffic_is_routed_through_xray(self):
+        # A fresh panel's AWG server leaves its clients' traffic to the kernel (NAT): routeViaXray is switched on, so
+        # xray's routing (ru-inside, WARP) applies to AmneziaWG too.
+        self.play()
+        awg_save = next(body for m, p, body in self.writes if p == "awg/server")
+        self.assertIs(awg_save["routeViaXray"], True)
+        self.assertEqual((awg_save["xrayInboundTag"], awg_save["xrayTproxyPort"]), ("awg-tproxy-in", 12345),
+                         "the TPROXY inbound's tag and port stay as the panel has them")
+        self.assertEqual(self.panel()["awgBounces"], 1)
+        paths = [p for _, p, _ in self.writes]
+        self.assertEqual(paths[:2], ["awg/server", "server/restartXrayService"],
+                         "xray gets its TPROXY inbound right away, not on the panel's 30 s job")
+        self.assertFalse(self.panel()["xrayNeedRestart"])
+        self.assertIn("route via xray false -> true", re.sub(r"\s+", " ", self.last_out))
+        self.assert_idempotent()
+
+    def test_awg_route_via_xray_switched_off_by_hand_is_switched_on(self):
+        self.converge_fresh()
+        post("/test/panel/reset", {"inbounds": [{k: v for k, v in i.items() if k != "id"} for i in self.panel()["inbounds"]],
+                                   "awg": dict(self.panel()["awg"], routeViaXray=False, xrayTproxyPort=12399)})
+        self.play()
+        self.assertEqual([(m, p) for m, p, _ in self.writes], [("POST", "awg/server"), ("POST", "server/restartXrayService")])
+        self.assertTrue(self.panel()["awg"]["routeViaXray"])
+        self.assertEqual(self.panel()["awg"]["xrayTproxyPort"], 12399, "the owner's TPROXY port stays")
+
+    def test_awg_route_via_xray_false_leaves_the_kernel_route(self):
+        self.play("-e", "awg_route_via_xray=false")
+        self.assertFalse(self.panel()["awg"]["routeViaXray"])
+        self.assertNotIn("server/restartXrayService", [p for _, p, _ in self.writes])
+        out = self.play("-e", "awg_route_via_xray=false")
+        self.assertEqual(self.writes, [])
+        self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
+
+    def xray_config(self, inbounds):
+        path = self.tmp / "config.json"
+        path.write_text(json.dumps({"inbounds": inbounds, "outbounds": []}))
+        return "panel_xray_config_file=" + str(path)
+
+    def test_verify_awg_reports_the_route_through_xray(self):
+        self.play()
+        tproxy = {"listen": "::", "port": 12345, "protocol": "dokodemo-door", "tag": "awg-tproxy-in",
+                  "settings": {"network": "tcp,udp", "followRedirect": True}, "streamSettings": {"sockopt": {"tproxy": "tproxy"}}}
+        out = re.sub(r"\s+", " ", self.play("-e", self.xray_config([tproxy]), playbook=HERE / "verify_awg.yml"))
+        self.assertIn("AmneziaWG: routeViaXray on, xray inbound awg-tproxy-in (TPROXY, port 12345): its clients follow", out)
+        self.assertNotIn("WARNING", out)
+        self.assertEqual(self.writes, [])
+
+        out = re.sub(r"\s+", " ", self.play("-e", self.xray_config([]), playbook=HERE / "verify_awg.yml"))
+        self.assertIn("WARNING: AmneziaWG: routeViaXray on, but", out)
+        self.assertIn("has no dokodemo-door inbound awg-tproxy-in on 12345", out)
+
+    def test_verify_awg_warns_when_route_via_xray_is_off(self):
+        self.play("-e", "awg_route_via_xray=false")
+        out = re.sub(r"\s+", " ", self.play("-e", self.xray_config([]), playbook=HERE / "verify_awg.yml"))
+        self.assertIn("WARNING: AmneziaWG: routeViaXray is off: its clients leave the host directly, past ru-inside and WARP", out)
+
     def test_awg_port_defaults_to_the_panels(self):
         self.play(inbounds=[{"remark": "awg", "protocol": "amneziawg"}])
-        self.assertEqual([(m, p) for m, p, _ in self.writes], [("POST", "awg/server"), ("POST", "inbounds/add")])
+        self.assertEqual([(m, p) for m, p, _ in self.writes],
+                         [("POST", "awg/server"), ("POST", "server/restartXrayService"), ("POST", "inbounds/add")])
         self.assertEqual(self.inbounds()["awg"]["port"], 38810)
         self.assertEqual(self.panel()["awg"]["listenPort"], 38810)
         self.assert_idempotent(inbounds=[{"remark": "awg", "protocol": "amneziawg"}])

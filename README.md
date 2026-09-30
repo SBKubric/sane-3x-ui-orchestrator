@@ -74,6 +74,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `warp_enabled` | `true` (default): the panel's clients leave through Cloudflare WARP, see [WARP](#warp); `false` takes our rule and outbound out |
 | `warp_mtu` | MTU of the WARP outbound (default `1280`) |
 | `warp_license` | WARP+ license key, optional (default empty: the free account); keep it in the vault |
+| `awg_route_via_xray` | `true` (default): the AmneziaWG server's `routeViaXray`, so AWG clients go through xray's routing (ru-inside, WARP); `false` = the kernel NATs them out directly |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
 panel's chain registry:
@@ -170,10 +171,16 @@ The converge, on the panel host (`POST <base>login`, then `panel/api/...`):
    `amneziawg` entry while the panel's AWG inbound has another remark (one per panel). Malformed entries
    (missing fields, unknown fields, wrong types) are refused before the login.
 2. **AmneziaWG server** (with an `amneziawg` entry). The panel keeps one server and makes it with its keys,
-   obfuscation and a random port (install.sh already reads it). `GET awg/server`; when `enable` or the port
-   differs, or the AWG inbound record lags behind the server's port, `POST awg/server` with the server as
-   read plus `enable`/`listenPort` — the keys are sent back unchanged, never regenerated. The save
-   brings the interface up, moves the AWG inbound record to the port and bumps the chain revision.
+   obfuscation and a random port (install.sh already reads it). `GET awg/server`; when `enable`, the port or
+   `routeViaXray` differs, or the AWG inbound record lags behind the server's port, `POST awg/server` with the
+   server as read plus `enable`/`listenPort`/`routeViaXray` — the keys are sent back unchanged, never regenerated.
+   The save brings the interface up, moves the AWG inbound record to the port and bumps the chain revision.
+   `routeViaXray` (`awg_route_via_xray`, default `true`) sends the AWG clients' traffic into xray instead of the
+   kernel's NAT: the panel's PostUp TPROXYs everything that comes in on `awg0` to its synthetic dokodemo-door inbound
+   (`xrayInboundTag`/`xrayTproxyPort`, `awg-tproxy-in` on 12345 by default, kept as the panel has them), so the Xray
+   template's routing ([ru-inside](#blocking-ru-inside), [WARP](#warp)) applies to AmneziaWG as it does to VLESS. A
+   change of it bounces `awg0` (connected clients reconnect) and the role restarts xray right away, so the inbound is
+   there when the TPROXY rules point at it (the panel's own restart job would take up to 30 s).
 3. **Per entry**, matched by `remark`:
    - missing, xray: `POST inbounds/add` with `settings` (`clients: []` added), `streamSettings`, `sniffing` as
      JSON strings. With `streamSettings.security: reality` and no `realitySettings.privateKey`, the keys come
@@ -329,7 +336,8 @@ host (`tasks/warp.yml`), through the panel's API on 127.0.0.1:
 - **The rule.** `{"type": "field", "ruleTag": "3ax-warp", "network": "tcp,udp", "outboundTag": "warp"}`, the last
   routing rule: every rule before it stays where it is (`api`, [ru-inside](#blocking-ru-inside) → `blocked`,
   `geoip:private` → `blocked`, `bittorrent` → `blocked`, the owner's own), and whatever none of them matched goes to
-  WARP, AmneziaWG through `awg-tproxy-in` included. The rule is found by its `ruleTag`, or by its shape when the panel's
+  WARP, AmneziaWG through `awg-tproxy-in` included (that takes the AWG server's `routeViaXray`, which role panel switches
+  on with `awg_route_via_xray`, see [Inbounds](#inbounds)). The rule is found by its `ruleTag`, or by its shape when the panel's
   routing editor dropped the tag, and there is exactly one. The template is saved and xray restarted the way the
   ru-inside rule is; a failed restart puts the previous template back and stops the run.
 - **Failures.** A registration that fails (Cloudflare out of reach, or an answer without an account) writes no rule:
@@ -719,7 +727,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -860,11 +868,13 @@ limits, every filter, the ranking, the handshake check and the confirmation of t
 pinned download; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
 the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
 idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
-field updated without re-keying, port and enable, the AWG server switched off by hand, unlisted inbounds
+field updated without re-keying, port and enable, the AWG server switched off by hand, `routeViaXray` switched on
+(with an xray restart, idempotent, switched back on after the UI, off with `awg_route_via_xray: false`), unlisted inbounds
 left alone, check mode, refusals, no private key or cookie in `-vvv` output, the TCP + Vision inbound migrated to
 XHTTP in place (keys, client ids/emails/subIds kept, Vision flow cleared, `tcpSettings` dropped), `followChain` taking
 the active edge's neighbour and not fought afterwards, the flag waiting for a neighbour target; and the targets play of
-`verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target;
+`verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target; the AmneziaWG route
+step of `verify.yml` (the TPROXY inbound in xray's config, a warning without it or with `routeViaXray` off);
 `tests/panel/test_panel_front.py`: the «only 443» front against the same mock and local fakes — only443 applied
 with subscriptions/panel behind 443, the firewall and 80 kept in `firewallExtra`, then confirmed, idempotent, the
 relocated inbound left alone by the inbounds converge, the owner's firewall ports kept, blockers refused, a pending

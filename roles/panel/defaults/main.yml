@@ -15,6 +15,7 @@
 #   warp_enabled       true (default): client traffic leaves through Cloudflare WARP (tasks/warp.yml, README "WARP")
 #   warp_license       WARP+ license key (default empty: the free account)
 #   warp_mtu           MTU of the WARP outbound (default 1280)
+#   awg_route_via_xray true (default): AmneziaWG clients' traffic goes through xray's routing (tasks/awg_server.yml)
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
 #   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver; only with monitoring)
@@ -95,6 +96,13 @@ panel_inbounds: []
 panel_inbound_xray_keys: [remark, protocol, port, enable, listen, total, expiryTime, trafficReset, followChain, settings, streamSettings,
                           sniffing]
 panel_inbound_awg_keys: [remark, protocol, port, enable]
+# routeViaXray of the AmneziaWG server (tasks/awg_server.yml): true = the clients' traffic goes through xray (TPROXY
+# into the panel's synthetic dokodemo-door inbound, tag and port as the panel has them, awg-tproxy-in:12345 by
+# default) and xray's routing applies to it (ru-inside, WARP); false = the kernel NATs it out directly. A change
+# bounces the AWG interface (connected clients reconnect) and restarts xray.
+panel_awg_route_via_xray: "{{ awg_route_via_xray | default(true) }}"
+# The config xray runs (written by the panel with the synthetic inbounds): verify.yml looks for the TPROXY inbound there.
+panel_xray_config_file: "{{ panel_bin | dirname }}/bin/config.json"
 # Transport settings of streamSettings, one per network; those of another network than the declared one are dropped.
 panel_inbound_transport_keys: [tcpSettings, rawSettings, kcpSettings, wsSettings, httpSettings, httpupgradeSettings, splithttpSettings,
                                xhttpSettings, grpcSettings, quicSettings]
