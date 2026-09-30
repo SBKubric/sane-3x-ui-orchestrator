@@ -1,0 +1,72 @@
+---
+# The AmneziaWG obfuscation the inventory asks for (panel_awg_mimic_want from awg_mimic_want.yml: I1-I5 of the
+# chosen protocol, awg_obfuscation's fields) against the server as read (panel_awg_server, awg_server.yml).
+# Every client .conf carries the server's values, so a change strands the clients that already have one:
+#   - a new server (no AWG inbound in the panel yet, which the role is about to add, and no AWG clients, not even
+#     a monitoring probe peer) takes them with the save of awg_server.yml, before anyone gets a .conf;
+#   - an existing server that differs gets a WARNING and keeps its values;
+#   - with awg_obfuscation_apply true it takes them too, with a NOTE that the issued .conf files need replacing.
+# Result: fact panel_awg_obf_patch, the fields awg_server.yml adds to its save (empty: nothing to change).
+- name: Compare the AmneziaWG obfuscation with the inventory
+  ansible.builtin.set_fact:
+    panel_awg_obf_diff: >-
+      {%- set out = [] -%}
+      {%- for key, value in panel_awg_mimic_want.items() -%}
+      {%-   if panel_awg_server[key] | default('', true) | string != value | string -%}
+      {%-     set _ = out.append(key) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+    panel_awg_obf_has_inbound: >-
+      {{ panel_inbounds_current | selectattr('protocol', 'equalto', 'amneziawg') | list | length > 0 }}
+
+# Only asked when it decides something: a difference and no AWG inbound yet.
+- name: Count the AmneziaWG clients
+  when:
+    - panel_awg_obf_diff | length > 0
+    - not panel_awg_obf_has_inbound | bool
+  block:
+    - name: List the AmneziaWG clients
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: awg/clients
+        panel_call_method: GET
+
+    - name: Keep the number of AmneziaWG clients
+      ansible.builtin.set_fact:
+        panel_awg_obf_clients: "{{ panel_call.obj | default([], true) | length }}"
+
+- name: Decide on the AmneziaWG obfuscation
+  ansible.builtin.set_fact:
+    panel_awg_obf_new: "{{ panel_awg_obf_new_ }}"
+    panel_awg_obf_patch: >-
+      {{ dict(panel_awg_obf_diff | zip(panel_awg_obf_diff | map('extract', panel_awg_mimic_want)))
+         if panel_awg_obf_diff | length > 0 and (panel_awg_obf_new_ | bool or panel_awg_obfuscation_apply | bool) else {} }}
+  vars:
+    panel_awg_obf_new_: >-
+      {{ panel_awg_obf_diff | length > 0 and not panel_awg_obf_has_inbound | bool
+         and panel_awg_obf_clients | default(0) | int == 0 }}
+
+- name: Warn that the existing AmneziaWG server keeps its obfuscation
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the AmneziaWG server is in use ({{ 'its AWG inbound exists' if panel_awg_obf_has_inbound | bool
+      else panel_awg_obf_clients ~ ' AWG client(s)' }}), so its obfuscation stays as it is: {{ panel_awg_obf_diff | join(', ') }}
+      differ from awg_mimic_protocol {{ panel_awg_mimic_protocol }}{{ ' / awg_obfuscation' if panel_awg_obfuscation | length > 0 else '' }}.
+      Current I1: '{{ panel_awg_server.i1 | default('', true) }}'; desired I1: '{{ panel_awg_mimic_want.i1 | default('(unchanged)') }}'.
+      Set awg_obfuscation_apply=true to change it; every issued .conf must then be replaced.
+  when:
+    - panel_awg_obf_diff | length > 0
+    - panel_awg_obf_patch | length == 0
+
+- name: Note that the issued AmneziaWG configs need replacing
+  ansible.builtin.debug:
+    msg: >-
+      NOTE: awg_obfuscation_apply changes the obfuscation of an AmneziaWG server in use
+      ({{ panel_awg_obf_diff | join(', ') }}; I1 '{{ panel_awg_server.i1 | default('', true) }}' ->
+      '{{ panel_awg_mimic_want.i1 | default('(unchanged)') }}'). Every .conf issued so far must be replaced: send the
+      new ones through the bot (the AWG page's send-configs button, POST panel/api/awg/server/notify, which runs
+      SendAwgConfigsToClients) or hand them out again. The monitoring probes take theirs from the panel by themselves.
+  when:
+    - panel_awg_obf_patch | length > 0
+    - not panel_awg_obf_new | bool

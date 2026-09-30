@@ -1,0 +1,10 @@
+---
+# The AmneziaWG mimicry step of verify.yml alone, against mock_panel.py (see test_awg_mimic.py).
+- name: Verify the AmneziaWG protocol mimicry
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Compare the AWG server's I1 with awg_mimic_protocol
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: verify_awg_mimic

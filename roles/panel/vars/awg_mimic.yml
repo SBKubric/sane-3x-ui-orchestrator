@@ -1,0 +1,75 @@
+---
+# Protocol templates for the AmneziaWG special junk packets I1-I5 (orchestrator#42, README "AmneziaWG protocol
+# mimicry"), loaded by tasks/awg_mimic_want.yml. The initiator of a handshake (the client; a mon-client probe) sends
+# I1..I5, each as one UDP datagram, before its junk packets and the handshake itself; the receiver drops them
+# unread, so only the client's copy matters, and the panel writes the server's values into every client .conf.
+# Each packet is a list of tags joined without separators:
+#   <b 0xHEX>  these bytes        <r N>   N random bytes     <rd N>  N random ASCII digits    <t>  unix time, 4 bytes
+# Random parts are drawn on every send, so the stored strings never change (a second run has nothing to do).
+# Only tags that the Linux kernel module and amneziawg-go (mon-client, the AmneziaVPN and AmneziaWG apps) both
+# parse: no <c> (packet counter; amneziawg-go refuses it), and <rd N> only in sip (amneziawg-go from v0.2.16).
+# A packet a template leaves out is sent empty (no line in the .conf).
+panel_awg_mimic_templates:
+  # A QUIC v1 Initial as a browser sends it (RFC 9000 §17.2.2, §14.1): long header 0xc3 (Initial, 4-byte
+  # packet number), version 1, an 8-byte random Destination Connection ID, no Source Connection ID, no token,
+  # Length 1182 as a 2-byte varint (0x449e), then the packet number and the protected payload, which are
+  # random bytes to anyone without the keys. 1200 bytes in all: the minimum a client Initial is padded to.
+  quic:
+    i1:
+      - "<b 0xc30000000108>"
+      - "<r 8>"
+      - "<b 0x0000449e>"
+      - "<r 1182>"
+  # A DNS answer, the shape of the AmneziaVPN client's own default I1 (amnezia-client protocolConstants.h,
+  # defaultSpecialJunk1): random transaction id, flags 0x8580 (response, authoritative, recursion), one question
+  # and one answer for icloud.com A IN. The TTL (up to 65535 s) and the address are random here, where the
+  # AmneziaVPN default has them fixed (amnezia-client#2857: one fixed packet is one DPI signature). 44 bytes.
+  dns:
+    i1:
+      - "<r 2>"
+      - "<b 0x8580000100010000000006>"
+      # icloud . com, type A, class IN, then the answer: name pointer 0xc00c, type A, class IN, TTL 0x0000....
+      - "<b 0x69636c6f756403636f6d0000010001c00c000100010000>"
+      - "<r 2>"
+      # RDLENGTH 4, then a random IPv4 address.
+      - "<b 0x0004>"
+      - "<r 4>"
+  # A SIP REGISTER over UDP (RFC 3261), the community's pick for SIP (voidwaifu/Special-Junk-Packet-List):
+  # random branch, tag and Call-ID as digits. 383 bytes. Needs <rd N>: amneziawg-go v0.2.16 or newer on the clients.
+  sip:
+    i1:
+      # REGISTER sip:sip.linphone.org SIP/2.0\r\n
+      - "<b 0x5245474953544552207369703a7369702e6c696e70686f6e652e6f7267205349502f322e300d0a>"
+      # Via: SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK<digits>\r\n
+      - "<b 0x5669613a205349502f322e302f554450203139322e3136382e312e3130303a353036303b72706f72743b6272616e63683d7a39684734624b>"
+      - "<rd 10>"
+      - "<b 0x0d0a>"
+      # Max-Forwards: 70\r\n
+      - "<b 0x4d61782d466f7277617264733a2037300d0a>"
+      # From: <sip:user@sip.linphone.org>;tag=<digits>\r\n
+      - "<b 0x46726f6d3a203c7369703a75736572407369702e6c696e70686f6e652e6f72673e3b7461673d>"
+      - "<rd 10>"
+      - "<b 0x0d0a>"
+      # To: <sip:user@sip.linphone.org>\r\n
+      - "<b 0x546f3a203c7369703a75736572407369702e6c696e70686f6e652e6f72673e0d0a>"
+      # Call-ID: <digits>\r\n
+      - "<b 0x43616c6c2d49443a20>"
+      - "<rd 24>"
+      - "<b 0x0d0a>"
+      # CSeq: 1 REGISTER\r\n
+      - "<b 0x435365713a20312052454749535445520d0a>"
+      # Contact: <sip:user@192.168.1.100:5060>\r\n
+      - "<b 0x436f6e746163743a203c7369703a75736572403139322e3136382e312e3130303a353036303e0d0a>"
+      # User-Agent: Linphone/5.2.5 (belle-sip/5.2.0)\r\n
+      - "<b 0x557365722d4167656e743a204c696e70686f6e652f352e322e35202862656c6c652d7369702f352e322e30290d0a>"
+      # Expires: 3600\r\n
+      - "<b 0x457870697265733a20333630300d0a>"
+      # Content-Length: 0\r\n\r\n
+      - "<b 0x436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+
+# The special junk packets and the obfuscation fields the role may set (awg_mimic_*, awg_obfuscation).
+panel_awg_mimic_keys: [i1, i2, i3, i4, i5]
+panel_awg_obfuscation_int_keys: [jc, jmin, jmax, s1, s2, s3, s4]
+panel_awg_obfuscation_h_keys: [h1, h2, h3, h4]
+# One special junk packet: tags only, each one both the kernel module and amneziawg-go parse.
+panel_awg_mimic_packet_re: '^(<(b 0x([0-9a-fA-F]{2})+|r [0-9]+|rc [0-9]+|rd [0-9]+|t)>)*$'

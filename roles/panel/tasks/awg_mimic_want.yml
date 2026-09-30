@@ -1,0 +1,95 @@
+---
+# The AmneziaWG obfuscation the inventory asks for (awg_mimic_protocol, awg_mimic_custom, awg_obfuscation), checked
+# and resolved without touching the panel. Result: fact panel_awg_mimic_want, the server fields to set (i1..i5 for a
+# protocol or custom, all five, empty ones included; plus the declared awg_obfuscation fields), empty for none
+# without overrides. Used by awg_obfuscation.yml (through inbounds.yml, before the login) and verify_awg_mimic.yml.
+- name: Load the AmneziaWG mimicry templates
+  ansible.builtin.include_vars:
+    file: awg_mimic.yml
+
+- name: Check the AmneziaWG mimicry inputs
+  ansible.builtin.set_fact:
+    panel_awg_mimic_problems: >-
+      {%- set out = [] -%}
+      {%- set proto = panel_awg_mimic_protocol -%}
+      {%- if proto not in (panel_awg_mimic_templates.keys() | list) + ['none', 'custom'] -%}
+      {%-   set _ = out.append('awg_mimic_protocol must be one of ' ~ ((panel_awg_mimic_templates.keys() | list) + ['none', 'custom']) | join(', ')
+                               ~ ', not ' ~ proto) -%}
+      {%- endif -%}
+      {%- set custom = panel_awg_mimic_custom -%}
+      {%- if custom is not mapping -%}
+      {%-   set _ = out.append('awg_mimic_custom must be a mapping of i1..i5') -%}
+      {%- elif proto == 'custom' -%}
+      {%-   set extra = custom.keys() | reject('in', panel_awg_mimic_keys) | list -%}
+      {%-   if extra -%}
+      {%-     set _ = out.append('awg_mimic_custom takes i1..i5, not ' ~ extra | join(', ')) -%}
+      {%-   endif -%}
+      {%-   if custom.i1 | default('', true) | string | length == 0 -%}
+      {%-     set _ = out.append('awg_mimic_protocol custom needs awg_mimic_custom.i1') -%}
+      {%-   endif -%}
+      {%-   for key in panel_awg_mimic_keys -%}
+      {%-     set packet = custom[key] | default('', true) -%}
+      {%-     if packet is not string -%}
+      {%-       set _ = out.append('awg_mimic_custom.' ~ key ~ ' must be a string') -%}
+      {%-     elif '<c>' in packet -%}
+      {%-       set _ = out.append('awg_mimic_custom.' ~ key ~ ': no <c> (amneziawg-go, in mon-client and the apps, refuses it)') -%}
+      {%-     elif packet is not match(panel_awg_mimic_packet_re) -%}
+      {%-       set _ = out.append('awg_mimic_custom.' ~ key ~ ' must be tags only, without spaces between them:'
+                                   ~ ' <b 0xHEX> (even number of digits), <r N>, <rc N>, <rd N>, <t>') -%}
+      {%-     elif packet.count('<t>') > 1 -%}
+      {%-       set _ = out.append('awg_mimic_custom.' ~ key ~ ': one <t> per packet (amneziawg-go before v0.2.16 refuses more)') -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- set obf = panel_awg_obfuscation -%}
+      {%- if obf is not mapping -%}
+      {%-   set _ = out.append('awg_obfuscation must be a mapping') -%}
+      {%- else -%}
+      {%-   set extra = obf.keys() | reject('in', panel_awg_obfuscation_int_keys + panel_awg_obfuscation_h_keys) | list -%}
+      {%-   if extra -%}
+      {%-     set _ = out.append('awg_obfuscation takes ' ~ (panel_awg_obfuscation_int_keys + panel_awg_obfuscation_h_keys) | join(', ')
+                                 ~ ', not ' ~ extra | join(', ') ~ ' (I1-I5 come from awg_mimic_protocol)') -%}
+      {%-   endif -%}
+      {%-   for key in panel_awg_obfuscation_int_keys if obf[key] is defined -%}
+      {%-     if not (obf[key] is integer and obf[key] is not boolean and obf[key] >= 0) -%}
+      {%-       set _ = out.append('awg_obfuscation.' ~ key ~ ' must be a non-negative integer') -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   for key in panel_awg_obfuscation_h_keys if obf[key] is defined -%}
+      {%-     if obf[key] is boolean or obf[key] | string is not match('^[0-9]+(-[0-9]+)?$') -%}
+      {%-       set _ = out.append('awg_obfuscation.' ~ key ~ ' must be a number or a low-high range') -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- if panel_awg_obfuscation_apply is not boolean and panel_awg_obfuscation_apply | string | lower not in ['true', 'false'] -%}
+      {%-   set _ = out.append('awg_obfuscation_apply must be true or false') -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Refuse malformed AmneziaWG mimicry inputs
+  ansible.builtin.assert:
+    that:
+      - panel_awg_mimic_problems | length == 0
+    fail_msg: "AmneziaWG obfuscation: {{ panel_awg_mimic_problems | join('; ') }}"
+    quiet: true
+
+- name: Resolve the AmneziaWG obfuscation to set
+  ansible.builtin.set_fact:
+    panel_awg_mimic_want: >-
+      {%- set want = {} -%}
+      {%- if panel_awg_mimic_protocol == 'custom' -%}
+      {%-   for key in panel_awg_mimic_keys -%}
+      {%-     set _ = want.update({key: panel_awg_mimic_custom[key] | default('', true) | string}) -%}
+      {%-   endfor -%}
+      {%- elif panel_awg_mimic_protocol != 'none' -%}
+      {%-   for key in panel_awg_mimic_keys -%}
+      {%-     set _ = want.update({key: panel_awg_mimic_templates[panel_awg_mimic_protocol][key] | default([]) | join('')}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- for key in panel_awg_obfuscation_int_keys if panel_awg_obfuscation[key] is defined -%}
+      {%-   set _ = want.update({key: panel_awg_obfuscation[key] | int}) -%}
+      {%- endfor -%}
+      {%- for key in panel_awg_obfuscation_h_keys if panel_awg_obfuscation[key] is defined -%}
+      {%-   set _ = want.update({key: panel_awg_obfuscation[key] | string}) -%}
+      {%- endfor -%}
+      {{ want }}

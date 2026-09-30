@@ -2,7 +2,8 @@
 # verify.yml on the panel host: version, API login with the vault account, the chain registry against
 # group hops (every hop joined, behind its front on 443/https when its front_mode is only443, the active edge
 # is the one with hop_active), geosite:ru-inside (the rule, the list and its age, the timer) and WARP (the outbound, the
-# last rule, the host's own cdn-cgi/trace), and the AmneziaWG server's routeViaXray (a warning when off). Read-only.
+# last rule, the host's own cdn-cgi/trace), and the AmneziaWG server's routeViaXray (a warning when off) and its I1
+# against awg_mimic_protocol (verify_awg_mimic.yml, a warning). Read-only.
 - name: Read the panel version
   ansible.builtin.command:
     argv: ["{{ panel_bin }}", "-v"]
@@ -134,3 +135,9 @@
 - name: Check the AmneziaWG route through xray
   ansible.builtin.include_tasks: verify_awg.yml
   when: panel_inbounds | default([]) | selectattr('protocol', 'defined') | selectattr('protocol', 'equalto', 'amneziawg') | list | length > 0
+
+- name: Check the AmneziaWG protocol mimicry
+  ansible.builtin.include_tasks: verify_awg_mimic.yml
+  when:
+    - panel_inbounds | default([]) | selectattr('protocol', 'defined') | selectattr('protocol', 'equalto', 'amneziawg') | list | length > 0
+    - panel_awg_mimic_protocol != 'none'
