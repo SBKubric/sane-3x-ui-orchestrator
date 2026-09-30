@@ -15,6 +15,7 @@
 #   warp_enabled       true (default): client traffic leaves through Cloudflare WARP (tasks/warp.yml, README "WARP")
 #   warp_license       WARP+ license key (default empty: the free account)
 #   warp_mtu           MTU of the WARP outbound (default 1280)
+#   warp_domain_strategy  domainStrategy of the WARP outbound (default ForceIPv4)
 #   awg_route_via_xray true (default): AmneziaWG clients' traffic goes through xray's routing (tasks/awg_server.yml)
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
@@ -227,7 +228,10 @@ panel_warp_license: "{{ warp_license | default('') }}"
 panel_warp_mtu: "{{ warp_mtu | default(1280) }}"
 # Outbound settings kept as the modal has them; noKernelTun: gVisor TUN, a kernel TUN under root drops UDP (sane-3x-ui#131).
 panel_warp_tag: warp
-panel_warp_domain_strategy: ForceIP
+# ForceIPv4, not the modal's ForceIP: with ForceIP xray may resolve engage.cloudflareclient.com to its IPv6
+# address, and on a host without IPv6 the handshake then fails ("network unreachable") and all client traffic
+# stops (seen on the stand 2026-09-30 after an xray restart). warp_domain_strategy overrides it.
+panel_warp_domain_strategy: "{{ warp_domain_strategy | default('ForceIPv4') }}"
 panel_warp_workers: 2
 panel_warp_no_kernel_tun: true
 panel_warp_allowed_ips: ["0.0.0.0/0", "::/0"]
