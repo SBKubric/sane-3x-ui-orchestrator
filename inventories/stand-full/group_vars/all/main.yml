@@ -2,7 +2,7 @@
 # Release tag of SBKubric/sane-3x-ui for the panel and every hop (install.sh <xui_version>).
 # Monitoring contract 3: the panel and mon-server must speak the same contract, bump both tags together.
 # The «only 443» front needs v1.9.0-chain.12 or later (SBKubric/sane-3x-ui#142-#149, #154, #155).
-xui_version: v1.9.0-chain.19
+xui_version: v1.9.0-chain.20
 # Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3 = main b66b795).
 mon_version: v1.9.0-chain.13
 # The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
@@ -16,3 +16,6 @@ mon_auto_approve: true
 # The project's domain at DNSExit (map #52): the subscription showcase answers sub.<dns_zone> (group showcase, role
 # showcase); the A record is written through the DNSExit API when the vault has dnsexit_api_key. Not set on the stand.
 # dns_zone: example.com
+# Real addresses live only in the vault: vault_hosts maps the inventory hostname to its public address.
+# Without an entry the host is reached through its ssh alias (host_alias, else the inventory hostname).
+ansible_host: "{{ (vault_hosts | default({}))[inventory_hostname] | default(host_alias | default(inventory_hostname)) }}"
