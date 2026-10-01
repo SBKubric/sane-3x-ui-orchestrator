@@ -26,6 +26,4 @@ mon_auto_approve: true
 # vpn_name: vpn.example.com
 # vpn_name_ttl: 5
 # domain_expiry: "2027-05-01"
-# Real addresses live only in the vault: vault_hosts maps the inventory hostname to its public address.
-# Without an entry the host is reached through its ssh alias (host_alias, else the inventory hostname).
-ansible_host: "{{ (vault_hosts | default({}))[inventory_hostname] | default(host_alias | default(inventory_hostname)) }}"
+# Real addresses live only in the vault (vault_hosts); each host in hosts.yml picks its own entry.

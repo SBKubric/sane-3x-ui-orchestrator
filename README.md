@@ -64,10 +64,12 @@ monitoring groups. Neither stand profile has a showcase yet (an example entry is
 | `inventories/stand-chain` | panel, hops | panel + proxy chain only |
 | `inventories/stand-full` | panel, hops, monserver, monclient | panel + chain + monitoring |
 
-No addresses or secrets are committed. A host's address is `vault_hosts[<inventory hostname>]` from the
-vault (see [Vault](#vault)); a host without an entry is reached by its ssh alias (`host_alias`, else the inventory
-hostname) from `~/.ssh/config`. Public addresses used in the chain come from facts (default IPv4) unless
-overridden in `host_vars`.
+No addresses or secrets are committed. A host's address is its `vault_hosts` entry from the vault (see
+[Vault](#vault)): every host in `hosts.yml` sets `ansible_host: "{{ (vault_hosts | default({}))['<host>'] | default('<ssh
+alias>') }}"` with its own key spelled out, and falls back to its ssh alias from `~/.ssh/config`. Not
+`vault_hosts[inventory_hostname]` in group vars: a delegated task (`delegate_to: real`) templates the delegated
+host's `ansible_host` with the delegating host's `inventory_hostname` and would connect to the wrong box. Public
+addresses used in the chain come from facts (default IPv4) unless overridden in `host_vars`.
 
 ### Variables
 
