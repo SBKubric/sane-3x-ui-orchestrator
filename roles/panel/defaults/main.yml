@@ -17,6 +17,8 @@
 #   warp_mtu           MTU of the WARP outbound (default 1280)
 #   warp_domain_strategy  domainStrategy of the WARP outbound (default ForceIPv4)
 #   awg_route_via_xray true (default): AmneziaWG clients' traffic goes through xray's routing (tasks/awg_server.yml)
+#   dns_zone, sub_public_url, vpn_name, vpn_name_ttl, domain_expiry   the panel's domain settings (tasks/domain.yml,
+#                      README "Domain: public subscription address and VPN name"); dnsexit_api_key from the vault
 #
 # Facts the role leaves for later plays (read via hostvars[groups['panel'][0]]):
 #   panel_mon_token    token from `x-ui setting -showMonToken`        (role monserver; only with monitoring)
@@ -247,6 +249,37 @@ panel_warp_rule:
 # verify.yml fetches it from the panel host itself: warp=off there is the baseline (the rule applies to traffic that
 # comes in through the inbounds, not to the host's own); the clients see warp=on. Empty = no fetch.
 panel_warp_trace_url: https://www.cloudflare.com/cdn-cgi/trace
+
+# The domain (map #52, tasks/domain.yml, README "Domain: public subscription address and VPN name"): settings of the
+# panel's Subscription tab (SBKubric/sane-3x-ui docs/spec/users.md §14, §15). An empty value leaves its setting as the
+# panel has it (clearing one is done in the panel's form).
+# subPublicURL, the origin of every subscription link the panel hands out, saved through the settings form (no CLI
+# flag): https://<showcase_domain> (default sub.<dns_zone>) when group showcase has a host and dns_zone is set;
+# sub_public_url overrides it. Compared the way the panel stores it (lower case, no trailing /, no default port).
+panel_sub_public_url: >-
+  {{ sub_public_url | default(('https://' ~ (hostvars[groups['showcase'][0]].showcase_domain | default('sub.' ~ dns_zone)))
+     if (groups['showcase'] | default([]) | length > 0 and dns_zone | default('') | length > 0) else '') }}
+# The VPN name (DNS name the panel keeps on the active edge through DNSExit, e.g. vpn.example.com), its record's TTL in
+# minutes (1-1440, applied with the name) and the domain's registration expiry date (YYYY-MM-DD, renewal reminders),
+# through `x-ui setting -vpnName/-vpnNameTtl/-domainExpiry`.
+panel_vpn_name: "{{ vpn_name | default('') }}"
+panel_vpn_name_ttl: "{{ vpn_name_ttl | default(5) }}"
+panel_domain_expiry: "{{ domain_expiry | default('') }}"
+# DNSExit API key (the vault's dnsexit_api_key, as role showcase's), through `x-ui setting -dnsExitApiKey`. The panel
+# shows it only masked, so the sha256 of the key last applied is kept on the box: the key is set again when the vault's
+# differs from it or the panel has none.
+panel_dnsexit_api_key: "{{ dnsexit_api_key | default('') }}"
+panel_dnsexit_key_state: "{{ panel_etc_dir }}/3ax-dnsexit-key.sha256"
+# verify.yml (tasks/verify_vpn_name.yml): the VPN name's A record read from DNSExit's nameservers (role showcase's
+# files/dnsexit.py --check-only, on the controller) against the active edge's address in the chain registry; a
+# mismatch is a WARNING (the panel moves the record at most once in 4 minutes, and resolvers keep the old answer for
+# vpnNameTtl minutes).
+panel_vpn_name_zone: >-
+  {{ dns_zone if dns_zone | default('') | length > 0 and (panel_vpn_name | lower | regex_replace('\.$', '')).endswith('.' ~ dns_zone)
+     else panel_vpn_name | lower | regex_replace('\.$', '') | regex_replace('^[^.]*\.', '') }}
+panel_vpn_name_nameservers: [ns1.dnsexit.com, ns2.dnsexit.com, ns3.dnsexit.com, ns4.dnsexit.com]
+panel_vpn_name_dns_state: "{{ playbook_dir }}/.cache/dnsexit/state.json"
+panel_vpn_name_dns_command: ["{{ ansible_playbook_python }}", "{{ role_path }}/../showcase/files/dnsexit.py"]
 
 # Monitoring endpoint (/mon/v1) is opened only when the profile has a mon-server.
 panel_monitoring: "{{ groups['monserver'] | default([]) | length > 0 }}"

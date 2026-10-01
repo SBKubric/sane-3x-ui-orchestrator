@@ -1,0 +1,64 @@
+---
+# verify.yml on the panel host, with vpn_name set: the VPN name's A record, read from DNSExit's nameservers (role
+# showcase's files/dnsexit.py --check-only on the controller: an authoritative answer, no cache), against the address of
+# the active edge in the chain registry. Only warnings: after an edge switch the panel moves the record at most once in
+# 4 minutes (DNSExit's limit), and resolvers keep the old answer for vpnNameTtl minutes. Read-only; needs api_login.
+- name: Read the chain registry for the active edge
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/api/chain/list"
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_vpn_name_chain
+  failed_when: false
+  no_log: true
+
+- name: Find the active edge's address
+  ansible.builtin.set_fact:
+    panel_vpn_name_check:
+      name: "{{ panel_vpn_name | string | trim | lower | regex_replace('\\.$', '') }}"
+      edge: "{{ panel_vpn_name_chain.json.obj.activeEdge | default('', true) }}"
+      address: >-
+        {{ panel_vpn_name_chain.json.obj.hops | default([], true)
+           | selectattr('name', 'equalto', panel_vpn_name_chain.json.obj.activeEdge | default('', true))
+           | map(attribute='host') | first | default('') }}
+
+- name: Warn about a VPN name without an active edge to compare
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: VPN name {{ panel_vpn_name_check.name }}: {{
+      ('the chain registry did not answer (HTTP ' ~ panel_vpn_name_chain.status | default('?') ~ ')')
+      if not panel_vpn_name_chain.json.success | default(false) | bool
+      else 'the chain registry has no active edge' if not panel_vpn_name_check.edge
+      else 'the active edge ' ~ panel_vpn_name_check.edge ~ " is at '" ~ panel_vpn_name_check.address
+           ~ "', not an IPv4 address: compare the record by hand" }}
+  when: panel_vpn_name_check.address is not match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+
+- name: Read the VPN name's record and compare it
+  when: panel_vpn_name_check.address is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+  block:
+    - name: Read the VPN name at DNSExit's nameservers
+      ansible.builtin.command:
+        argv: >-
+          {{ panel_vpn_name_dns_command
+             + ['--zone', panel_vpn_name_zone, '--name', panel_vpn_name_check.name, '--content', panel_vpn_name_check.address,
+                '--nameservers', panel_vpn_name_nameservers | join(','), '--state', panel_vpn_name_dns_state, '--check-only'] }}
+      delegate_to: localhost
+      become: false
+      register: panel_vpn_name_dns
+      changed_when: false
+      failed_when: false
+
+    - name: Show the VPN name
+      ansible.builtin.debug:
+        msg: >-
+          {%- set answer = panel_vpn_name_dns.stdout | default('{}') | from_json if panel_vpn_name_dns.stdout | default('') is match('^\{') else {} -%}
+          {%- set ok = answer.action | default('') == 'none' and panel_vpn_name_dns.rc == 0 -%}
+          {{ '' if ok else 'WARNING: ' }}VPN name: {{ answer.message | default(panel_vpn_name_dns.stderr | default('no answer'), true) }};
+          the active edge {{ panel_vpn_name_check.edge }} is {{ panel_vpn_name_check.address }}{{ '' if ok else
+          '. After an edge switch the panel moves the record at most once in 4 minutes and resolvers keep the old answer'
+          ~ ' for vpnNameTtl minutes; still wrong later: the panel log and the notify channel say why (DNSExit key, the'
+          ~ ' record must exist at DNSExit)' }}

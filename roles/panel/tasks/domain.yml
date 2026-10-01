@@ -1,0 +1,192 @@
+---
+# The domain settings of the panel's Subscription tab (map #52, SBKubric/sane-3x-ui docs/spec/users.md §14, §15):
+#   subPublicURL   through the settings form (no CLI flag): panel/setting/all is read and sent back to
+#                  panel/setting/update with only it changed (update zeroes a field it is not given; the DNSExit API
+#                  key comes back as its mask, which the save keeps)
+#   dnsExitApiKey, vpnName, vpnNameTtl, domainExpiry   through `x-ui setting -<key> <value>`, the way the spec names for
+#                  orchestrator; the panel reads them on its next tick, no restart
+# An empty variable leaves its setting alone; a setting is written only when it differs. The API key is never shown by
+# the panel (a mask), so the sha256 of the key last applied is kept on the box (panel_dnsexit_key_state).
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Normalise the domain settings
+  ansible.builtin.set_fact:
+    panel_domain_wanted:
+      subPublicURL: >-
+        {{ panel_sub_public_url | string | trim | lower | regex_replace('/$', '')
+           | regex_replace('^(https://[^/]+):443$', '\1') | regex_replace('^(http://[^/]+):80$', '\1') }}
+      vpnName: "{{ panel_vpn_name | string | trim | lower | regex_replace('\\.$', '') }}"
+      vpnNameTtl: "{{ panel_vpn_name_ttl | string | trim }}"
+      domainExpiry: "{{ panel_domain_expiry | string | trim }}"
+
+- name: Check the public subscription address
+  ansible.builtin.assert:
+    that:
+      - >-
+        panel_domain_wanted.subPublicURL == ''
+        or panel_domain_wanted.subPublicURL
+           is match('^https?://([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])(:[0-9]{1,5})?$')
+    fail_msg: >-
+      the public subscription address '{{ panel_domain_wanted.subPublicURL }}' (sub_public_url, or https://<showcase_domain>)
+      must be http(s)://host[:port] with no path
+    quiet: true
+
+- name: Check the VPN name and its TTL
+  ansible.builtin.assert:
+    that:
+      - >-
+        panel_domain_wanted.vpnName == ''
+        or (panel_domain_wanted.vpnName is match('^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+            and panel_domain_wanted.vpnName is not match('^[0-9.]+$'))
+      - >-
+        panel_domain_wanted.vpnName == ''
+        or (panel_domain_wanted.vpnNameTtl is match('^[0-9]+$') and 1 <= panel_domain_wanted.vpnNameTtl | int <= 1440)
+    fail_msg: >-
+      vpn_name '{{ panel_vpn_name }}' must be a DNS name such as vpn.example.com (two labels or more, letters, digits,
+      hyphens inside, not an IP address), and vpn_name_ttl '{{ panel_vpn_name_ttl }}' minutes 1-1440
+    quiet: true
+
+- name: Check the domain expiry date
+  ansible.builtin.assert:
+    that:
+      - >-
+        panel_domain_wanted.domainExpiry == ''
+        or panel_domain_wanted.domainExpiry is match('^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$')
+    fail_msg: "domain_expiry '{{ panel_domain_expiry }}' must be a date YYYY-MM-DD"
+    quiet: true
+
+- name: Read the panel's settings form
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_domain_form
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Require the settings form
+  ansible.builtin.assert:
+    that:
+      - panel_domain_form.status | default(0) == 200
+      - panel_domain_form.json.success | default(false) | bool
+    fail_msg: "POST panel/setting/all failed: HTTP {{ panel_domain_form.status | default('?') }} {{ panel_domain_form.json.msg | default('') }}"
+    quiet: true
+
+- name: Read the fingerprint of the DNSExit API key last applied
+  ansible.builtin.slurp:
+    src: "{{ panel_dnsexit_key_state }}"
+  register: panel_domain_key_state
+  failed_when: false
+  when: panel_dnsexit_api_key | length > 0
+
+- name: Compare the domain settings
+  ansible.builtin.set_fact:
+    panel_domain_current:
+      subPublicURL: "{{ panel_domain_form.json.obj.subPublicURL | default('') }}"
+      vpnName: "{{ panel_domain_form.json.obj.vpnName | default('') }}"
+      vpnNameTtl: "{{ panel_domain_form.json.obj.vpnNameTtl | default(5) | string }}"
+      domainExpiry: "{{ panel_domain_form.json.obj.domainExpiry | default('') }}"
+    panel_domain_key_drift: >-
+      {{ panel_dnsexit_api_key | length > 0
+         and (panel_domain_form.json.obj.dnsExitApiKey | default('') | length == 0
+              or (panel_domain_key_state.content | default('') | b64decode | trim) != panel_dnsexit_api_key | hash('sha256')) }}
+
+- name: Decide the domain settings to write
+  ansible.builtin.set_fact:
+    panel_domain_url_drift: >-
+      {{ panel_domain_wanted.subPublicURL | length > 0 and panel_domain_wanted.subPublicURL != panel_domain_current.subPublicURL }}
+    panel_domain_flags: >-
+      {%- set w = panel_domain_wanted -%}
+      {%- set c = panel_domain_current -%}
+      {%- set out = [] -%}
+      {%- if w.vpnName and w.vpnName != c.vpnName -%}{%- set _ = out.extend(['-vpnName', w.vpnName]) -%}{%- endif -%}
+      {%- if w.vpnName and w.vpnNameTtl | int != c.vpnNameTtl | int -%}{%- set _ = out.extend(['-vpnNameTtl', w.vpnNameTtl | int | string]) -%}{%- endif -%}
+      {%- if w.domainExpiry and w.domainExpiry != c.domainExpiry -%}{%- set _ = out.extend(['-domainExpiry', w.domainExpiry]) -%}{%- endif -%}
+      {{ out }}
+
+- name: "Show the plan: domain settings"
+  ansible.builtin.debug:
+    msg: >-
+      {%- set w = panel_domain_wanted -%}
+      {%- set c = panel_domain_current -%}
+      {%- set out = [] -%}
+      {%- for key, managed in [('subPublicURL', w.subPublicURL), ('vpnName', w.vpnName), ('vpnNameTtl', w.vpnName),
+                               ('domainExpiry', w.domainExpiry)] if managed -%}
+      {%-   set same = (w[key] | int == c[key] | int) if key == 'vpnNameTtl' else w[key] == c[key] -%}
+      {%-   set _ = out.append(key ~ ' "' ~ c[key] ~ '"' ~ (' (as wanted)' if same else ' -> "' ~ w[key] ~ '"')) -%}
+      {%- endfor -%}
+      {%- if panel_dnsexit_api_key | length > 0 -%}
+      {%-   set _ = out.append('dnsExitApiKey: set from the vault' if panel_domain_key_drift else 'dnsExitApiKey (as wanted)') -%}
+      {%- endif -%}
+      panel domain settings: {{ out | join(', ') if out else 'none in the inventory (left as the panel has them)' }}
+
+- name: Save the public subscription address
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/update"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    body_format: json
+    body: "{{ panel_domain_form.json.obj | combine({'subPublicURL': panel_domain_wanted.subPublicURL}) }}"
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_domain_saved
+  failed_when: false
+  when:
+    - panel_domain_url_drift | bool
+    - not ansible_check_mode
+  changed_when: true
+  no_log: true
+
+- name: Require the public subscription address saved
+  ansible.builtin.assert:
+    that:
+      - panel_domain_saved.json.success | default(false) | bool
+    fail_msg: >-
+      POST panel/setting/update (subPublicURL '{{ panel_domain_wanted.subPublicURL }}') failed:
+      HTTP {{ panel_domain_saved.status | default('?') }} {{ panel_domain_saved.json.msg | default('') }}
+    quiet: true
+  when: panel_domain_saved is not skipped
+
+# After the form save: the form read above still holds the old VPN name settings.
+- name: Set the VPN name, DNSExit API key and domain expiry
+  ansible.builtin.command:
+    argv: >-
+      {{ [panel_bin, 'setting'] + (['-dnsExitApiKey', panel_dnsexit_api_key] if panel_domain_key_drift | bool else [])
+         + panel_domain_flags }}
+  register: panel_domain_cli
+  failed_when: false
+  changed_when: true
+  when: panel_domain_key_drift | bool or panel_domain_flags | length > 0
+  no_log: true
+
+- name: Require the VPN name settings stored
+  ansible.builtin.assert:
+    that:
+      - panel_domain_cli.rc | default(1) == 0
+    fail_msg: "x-ui setting refused the domain settings: {{ panel_domain_cli.stdout | default('') }} {{ panel_domain_cli.stderr | default('') }}"
+    quiet: true
+  when: panel_domain_cli is not skipped
+
+- name: Remember the fingerprint of the DNSExit API key
+  ansible.builtin.copy:
+    content: "{{ panel_dnsexit_api_key | hash('sha256') }}\n"
+    dest: "{{ panel_dnsexit_key_state }}"
+    mode: "0600"
+  when:
+    - panel_domain_key_drift | bool
+    - panel_domain_cli is not skipped

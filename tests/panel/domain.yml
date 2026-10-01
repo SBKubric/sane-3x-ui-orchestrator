@@ -1,0 +1,17 @@
+---
+# Role panel's domain settings (tasks/domain.yml) or the VPN name step of verify.yml (tasks/verify_vpn_name.yml) against
+# mock_panel.py, a fake x-ui and a stand-in for DNSExit's nameserver (see test_domain.py).
+- name: Panel domain settings
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Log in to the panel (verify.yml has done it before its checks)
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+      when: panel_test_tasks == 'verify_vpn_name'
+
+    - name: Run the task file under test
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: "{{ panel_test_tasks }}"

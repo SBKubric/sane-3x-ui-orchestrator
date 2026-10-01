@@ -30,7 +30,8 @@ roles/
                        verify.yml's «only 443» check from the controller
   panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, geosite
                        ru-inside dropped (tasks/ru_inside.yml + files/ru_inside.py, the daily refresh), inbounds
-                       from panel_inbounds, the «only 443» front (tasks/front.yml); tasks/api_login.yml is the
+                       from panel_inbounds, the domain settings (tasks/domain.yml: public subscription address,
+                       VPN name, DNSExit key), the «only 443» front (tasks/front.yml); tasks/api_login.yml is the
                        panel API login helper for other roles
   hop/                 chain registry converged with group hops through the panel API; install + join;
                        neighbour target of every edge (files/neighbour.py: scan + Reality handshake check)
@@ -42,7 +43,8 @@ roles/
 tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API, and
                        neighbour.py against a fake scanner, fake xray and local sites (CI)
 tests/panel/           role panel's inbounds, its «only 443» front, geosite ru-inside (with a local source of the
-                       list) and the targets part of verify.yml against the same mock and local fakes (CI)
+                       list), the domain settings and the targets part of verify.yml against the same mock and local
+                       fakes (CI)
 tests/monserver/       role monserver's Settings against a mock of mon-server's admin API, verify's probe links (CI)
 tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners (CI)
 tests/showcase/        role showcase with a real nginx against local edges, the mock panel API and a stand-in for
@@ -81,7 +83,11 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `warp_enabled` | `true` (default): the panel's clients leave through Cloudflare WARP, see [WARP](#warp); `false` takes our rule and outbound out |
 | `warp_mtu` | MTU of the WARP outbound (default `1280`) |
 | `warp_license` | WARP+ license key, optional (default empty: the free account); keep it in the vault |
-| `dns_zone` | the project's domain at DNSExit, e.g. `example.com` (not set on the stand); the showcase answers `sub.<dns_zone>`, see [Role showcase](#role-showcase) |
+| `dns_zone` | the project's domain at DNSExit, e.g. `example.com` (not set on the stand); the showcase answers `sub.<dns_zone>`, see [Role showcase](#role-showcase), and the panel's public subscription address becomes `https://sub.<dns_zone>` while group `showcase` has a host |
+| `sub_public_url` | the panel's public subscription address (`subPublicURL`), overriding `https://<showcase_domain>`; `http(s)://host[:port]`, no path. Empty = left as the panel has it. See [Domain](#domain-public-subscription-address-and-vpn-name) |
+| `vpn_name` | the VPN name, e.g. `vpn.example.com`: a DNS name the panel keeps on the active edge through DNSExit (the A record must already exist there); empty = left as the panel has it |
+| `vpn_name_ttl` | TTL of the VPN name's A record in minutes, 1-1440 (default `5`), applied with `vpn_name` |
+| `domain_expiry` | the domain's registration expiry date `YYYY-MM-DD` (quote it or not), for the panel's renewal reminders in the notify channel; empty = left as the panel has it |
 | `awg_route_via_xray` | `true` (default): the AmneziaWG server's `routeViaXray`, so AWG clients go through xray's routing (ru-inside, WARP); `false` = the kernel NATs them out directly |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
@@ -134,19 +140,21 @@ skipped when the host already matches, so a second run reports `changed=0`.
 5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
    if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
    The token is read back every run and never stored in the vault.
-6. **geosite ru-inside** (`panel_ru_inside_enabled`, on by default): the list of sites reachable only from inside
+6. **Domain** (each setting only when its variable is set): the public subscription address, the VPN name, the DNSExit
+   API key and the domain's expiry date, see [Domain](#domain-public-subscription-address-and-vpn-name).
+7. **geosite ru-inside** (`panel_ru_inside_enabled`, on by default): the list of sites reachable only from inside
    Russia, kept fresh on the box by a daily timer, and a routing rule in the panel's Xray template that drops the
    clients' traffic to them, see [Blocking ru-inside](#blocking-ru-inside).
-7. **WARP** (`warp_enabled`, on by default): the panel's own WARP registration, a WireGuard outbound `warp` and a last
+8. **WARP** (`warp_enabled`, on by default): the panel's own WARP registration, a WireGuard outbound `warp` and a last
    routing rule that sends the rest of the clients' traffic through it, see [WARP](#warp).
-8. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
+9. **Inbounds** from `panel_inbounds` through the panel API, see [Inbounds](#inbounds). This runs before the
    hops play, so hops that join in the same run find the relayed ports in the chain document.
-9. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
+10. **Front «only 443»** (`front_mode: only443`, the default), after the inbounds: the Let's Encrypt IP certificate,
    fail2ban, `webListen` 127.0.0.1 and `chainPanelHost`, then the panel's nginx front with its firewall, see
    [Front: only 443](#front-only-443).
 
 Secrets never reach the output: the tasks that carry the password, the Telegram token, the monitoring
-token or the session cookie are `no_log`. install.sh prints random credentials of its own; they are
+token, the DNSExit API key or the session cookie are `no_log`. install.sh prints random credentials of its own; they are
 replaced right after the install.
 
 Facts left on the panel host for later plays (`hostvars[groups['panel'][0]]`):
@@ -158,6 +166,37 @@ Facts left on the panel host for later plays (`hostvars[groups['panel'][0]]`):
 | `panel_mon_token` | monitoring bearer token (only with a `monserver` host) | monserver (`monToken`) |
 
 The facts exist only in a run that includes the panel play (`--tags panel` or a full run).
+
+### Domain: public subscription address and VPN name
+
+The panel side of map #52 (SBKubric/sane-3x-ui#224, #225; `xui_version` v1.9.0-chain.22 or later): settings of the
+panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 (`roles/panel/tasks/domain.yml`).
+
+| Setting | From | How |
+|---|---|---|
+| `subPublicURL` | `https://<showcase_domain>` (default `sub.<dns_zone>`) when group `showcase` has a host and `dns_zone` is set; `sub_public_url` overrides it | the settings form: `panel/setting/all` read, sent back to `panel/setting/update` with only this field changed (there is no CLI flag) |
+| `dnsExitApiKey` | the vault's `dnsexit_api_key` (the one role showcase uses) | `x-ui setting -dnsExitApiKey` |
+| `vpnName`, `vpnNameTtl` | `vpn_name`, `vpn_name_ttl` (default 5) | `x-ui setting -vpnName -vpnNameTtl` |
+| `domainExpiry` | `domain_expiry` | `x-ui setting -domainExpiry` |
+
+- **Empty or unset** variable: the setting stays as the panel has it (clear one in the panel's form). Nothing is
+  set on the stand.
+- **Idempotent:** each value is compared with the form the way the panel stores it (lower case, no trailing `/` or
+  `.`, no default port) and written only on a difference. The panel shows the API key only as `********`, so the
+  sha256 of the key last applied is kept on the panel box (`/etc/x-ui/3ax-dnsexit-key.sha256`): the key is set again
+  when the vault's differs or the panel has none (a key typed by hand is replaced once by the vault's). The key is
+  never printed (`no_log`).
+- **Checked before anything is written:** the address `http(s)://host[:port]` without a path, the VPN name a DNS name
+  (two labels or more, not an IP address), the TTL 1-1440, the date `YYYY-MM-DD`.
+- No restart: the panel reads these settings on its next tick. With a public address, the links the panel hands out
+  (bot, users page, `Profile-Web-Page-Url`) go through the showcase; with the VPN name and the key, the panel moves the
+  A record to the active edge on every switch (at most once in 4 minutes) and the VLESS links name it (host override
+  on). The record must already exist at DNSExit: the panel updates it, never creates it.
+- `verify.yml` (with `vpn_name`): the record at DNSExit's nameservers (role showcase's `files/dnsexit.py
+  --check-only`, on the controller) against the active edge's address in the chain registry; a mismatch is a
+  `WARNING`, not a failure (the 4-minute limit, resolvers' TTL).
+- TODO: the panel's setting for trusted front addresses (the showcase exempt from the edges' limits and bans,
+  [SBKubric/sane-3x-ui#228](https://github.com/SBKubric/sane-3x-ui/issues/228)) is not set by the role yet.
 
 ### Inbounds
 
@@ -765,7 +804,8 @@ address and passes every request on to the chain's edges. Runs after the hops in
 and 443 open, as an ssh alias in group `showcase` of the profile's `hosts.yml` (e.g. `subgateway`); `dns_zone: <your
 domain>` in `group_vars/all/main.yml`; `dnsexit_api_key` in the vault (or the A record set by hand); then
 `ansible-playbook -i inventories/<profile> site.yml --tags showcase,verify`. The panel's public address for
-subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase.
+subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase: role panel sets it to
+`https://sub.<dns_zone>` (`--tags panel`), see [Domain](#domain-public-subscription-address-and-vpn-name).
 
 **Before production:** the edges limit and ban by client address too, and every request through the showcase comes
 from the showcase's address: its traffic counts against one address on every edge (30 a minute), and ten unknown
@@ -864,7 +904,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -960,6 +1000,17 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `showcase`, `monserver`, `monclie
    ```
 7. **Admin access** to the panel's pages from then on: through an SSH tunnel, `ssh -L <panel_port>:127.0.0.1:<panel_port>
    real`, then `https://127.0.0.1:<panel_port><panel_base_path>`.
+8. **Domain** (optional, map #52): at DNSExit create the A records `sub.<domain>` (the showcase) and the VPN name, e.g.
+   `vpn.<domain>` (any address: the panel moves it to the active edge), and copy the account's API key into the vault as
+   `dnsexit_api_key`. In `inventories/<profile>/group_vars/all/main.yml` set `dns_zone`, `vpn_name`, `domain_expiry`
+   (and `vpn_name_ttl` if not 5); put the showcase host into group `showcase` (see [Role showcase](#role-showcase)).
+   Then
+   ```sh
+   ansible-playbook -i inventories/stand-full site.yml --tags panel,showcase,verify --ask-vault-pass
+   ```
+   The panel hands out subscription links on `https://sub.<domain>`, keeps the VPN name on the active edge, and reminds
+   about the renewal in the notify channel (30 and 7 days before, on the day). Renew the domain at DNSExit by hand and
+   bump `domain_expiry`. See [Domain](#domain-public-subscription-address-and-vpn-name).
 
 **An existing stand to «only 443»** (no wipe): bump `xui_version` to `v1.9.0-chain.10` (or later) and rerun `site.yml`.
 The panel is reinstalled with its database, the VLESS inbound moves to XHTTP in place (its clients keep their ids and
@@ -1044,6 +1095,13 @@ DNS answer, a SIP REGISTER; tags both parsers take), then against the same mock 
 with its first save before the inbound, `dns`, `sip`, `custom` and `awg_obfuscation`, `none` keeping the panel's
 packets, check mode, a server in use (its inbound, or clients without one) warned and left alone, the apply flag
 changing it with the note, idempotency, malformed inputs refused before the login, and the verify warning;
+`tests/panel/test_domain.py`: the domain settings against the same mock (its settings form with the DNSExit key masked),
+a fake `x-ui` storing what `x-ui setting` stores and `mock_dnsexit.py`'s nameserver — a fresh panel getting all of them
+(the form for the address, one CLI call for the rest) and an idempotent rerun, empty variables leaving the panel alone,
+the address from the showcase or `sub_public_url` and compared normalised, the rest of the form and the stored key kept
+by the save, a new or hand-set or cleared key applied once (never printed), TTL and date alone, an unquoted YAML date,
+bad values refused before any write, check mode, a CLI refusal; the VPN name check of `verify.yml` (on the active edge,
+elsewhere, no answer, no active edge);
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
