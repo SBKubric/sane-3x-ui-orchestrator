@@ -4,7 +4,8 @@ scanner, no xray, no network. Driven by files in $HOP_TEST_ROOT/neighbour/ (writ
 
     scan.json  {"<edge address>": {"target": "...", "serverName": "..."}}: what `find` finds (absent = nothing)
     good       one "<target> <server name>" per line: the pairs `check` passes
-    calls      appended by every call: "find <address>" or "check <target> <server name>"
+    dns.json   {"<server name>": ["<address>", ...]}: what `dns` resolves a name to (absent = does not resolve)
+    calls      appended by every call: "find <address>", "check <target> <server name>" or "dns <name> <address>"
 """
 
 import argparse
@@ -31,6 +32,9 @@ def main():
     check = sub.add_parser("check")
     check.add_argument("--target", required=True)
     check.add_argument("--server-name", required=True)
+    dns = sub.add_parser("dns")
+    dns.add_argument("--name", required=True)
+    dns.add_argument("--address", required=True)
     args, _ = parser.parse_known_args()
 
     if args.command == "net":
@@ -41,12 +45,24 @@ def main():
     with open(DIR / "calls", "a", encoding="utf-8") as calls:
         if args.command == "find":
             calls.write(f"find {args.address}\n")
+        elif args.command == "dns":
+            calls.write(f"dns {args.name} {args.address}\n")
         else:
             calls.write(f"check {args.target} {args.server_name}\n")
     if args.command == "find":
         found = json.loads(read("scan.json", "{}")).get(args.address)
         print(json.dumps({"found": found, "scanned": 254, "candidates": [found] if found else [],
                           "confirmed": [dict(found, ok=True, detail="3/3")] if found else []}))
+        return 0
+    if args.command == "dns":
+        network = args.address.rsplit(".", 1)[0] + ".0/24"
+        addresses = json.loads(read("dns.json", "{}")).get(args.name, [])
+        inside = [a for a in addresses if a.rsplit(".", 1)[0] == args.address.rsplit(".", 1)[0]]
+        detail = (f"{args.name} resolves to {', '.join(addresses)} in {network}" if inside else
+                  f"{args.name} resolves to {', '.join(addresses)}, outside {network}" if addresses else
+                  f"{args.name} does not resolve (NXDOMAIN)")
+        print(json.dumps({"name": args.name, "address": args.address, "network": network, "addresses": addresses,
+                          "ok": bool(inside), "detail": detail}))
         return 0
     good = {tuple(line.split()) for line in read("good", "").splitlines() if line.strip()}
     ok = (args.target, args.server_name) in good
