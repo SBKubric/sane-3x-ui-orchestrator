@@ -386,7 +386,7 @@ def reality_pair(target, server_name, server_port, client_port):
             "settings": {"vnext": [{"address": "127.0.0.1", "port": server_port, "users": [
                 {"id": CLIENT_ID, "flow": "xtls-rprx-vision", "encryption": "none"}]}]},
             "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
-                "serverName": server_name, "fingerprint": "chrome", "publicKey": REALITY_PUBLIC,
+                "serverName": server_name, "fingerprint": "firefox", "publicKey": REALITY_PUBLIC,
                 "shortId": SHORT_ID, "spiderX": "/"}}}],
     }
     return server, client
