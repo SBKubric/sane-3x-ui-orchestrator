@@ -13,3 +13,6 @@ front_mode: only443
 acme_production: false
 # Approve new mon-client pairing requests automatically through the mon-server admin API.
 mon_auto_approve: true
+# Real addresses live only in the vault: vault_hosts maps the inventory hostname to its public address.
+# Without an entry the host is reached through its ssh alias (host_alias, else the inventory hostname).
+ansible_host: "{{ (vault_hosts | default({}))[inventory_hostname] | default(host_alias | default(inventory_hostname)) }}"

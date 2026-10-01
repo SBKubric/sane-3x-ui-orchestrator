@@ -56,9 +56,10 @@ skipped. So the chain-only profile is the full one with empty monitoring groups.
 | `inventories/stand-chain` | panel, hops | panel + proxy chain only |
 | `inventories/stand-full` | panel, hops, monserver, monclient | panel + chain + monitoring |
 
-Inventory hostnames are ssh aliases (`real`, `bridge`, `proxy`, `monserver`, `monclient`); put them into
-`~/.ssh/config` with `HostName`, `User root` and the key. No addresses or secrets are committed; public
-addresses come from facts (default IPv4) unless overridden in `host_vars`.
+No addresses or secrets are committed. A host's address is `vault_hosts[<inventory hostname>]` from the
+vault (see [Vault](#vault)); a host without an entry is reached by its ssh alias (`host_alias`, else the inventory
+hostname) from `~/.ssh/config`. Public addresses used in the chain come from facts (default IPv4) unless
+overridden in `host_vars`.
 
 ### Variables
 
@@ -565,8 +566,8 @@ when all `hop_neighbour_check_tries` (3) fetches of `hop_neighbour_probe_url`
 (`https://www.cloudflare.com/cdn-cgi/trace`) through the tunnel succeed. xray is the panel's version,
 `hop_neighbour_xray_version` (`v26.3.27`).
 
-The run prints one line per edge, e.g. `neighbour target of proxy (170.168.112.0/24): 170.168.112.32:443
-(ru.zian.ru.net) from scan; scanned 253 addresses, 16 candidates, handshakes: 170.168.112.32:443 3/3 through
+The run prints one line per edge, e.g. `neighbour target of proxy (203.0.113.0/24): 203.0.113.32:443
+(www.example.net) from scan; scanned 253 addresses, 16 candidates, handshakes: 203.0.113.32:443 3/3 through
 the tunnel`. `verify.yml` shows each edge's target and warns (without failing) about an edge on the fallback
 or without a target. `hop_neighbour_enabled: false` leaves the registry fields alone.
 
@@ -814,8 +815,8 @@ to look; the first group that fails ends the run.
 
 Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
 git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
-`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` (see
-`vault.yml.example`).
+`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license`, and
+`vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
 
 ```sh
 cp group_vars/all/vault.yml.example group_vars/all/vault.yml
@@ -855,15 +856,16 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify
    pip install -r requirements.txt                          # ansible-core, ansible-lint
    ansible-galaxy collection install -r requirements.yml    # community.crypto, community.general
    ```
-2. **ssh.** Root access by key to every host of the profile, through the aliases in the inventory
-   (`real`, `bridge`, `proxy`, and for `stand-full` also `monserver`, `monclient`) in `~/.ssh/config`:
+2. **ssh.** Root access by key (`~/.ssh/id_rsa` or `--private-key`) to every host of the profile. Put the
+   addresses into the vault as `vault_hosts` (inventory hostname → IPv4), e.g.
+   ```yaml
+   vault_hosts:
+     real: 203.0.113.10
+     bridge: 203.0.113.11
    ```
-   Host bridge
-       HostName 203.0.113.10
-       User root
-       IdentityFile ~/.ssh/stand
-   ```
-   Check with `ansible -i inventories/stand-full all -m ansible.builtin.ping`.
+   A host left out of `vault_hosts` is reached by its ssh alias from `~/.ssh/config` instead.
+   Check with `ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass` (ad-hoc `ansible` does not
+   load the vault and falls back to the ssh aliases).
 3. **Vault.** `group_vars/all/vault.yml` (see [Vault](#vault)) and its password, as
    `--ask-vault-pass` or `--vault-password-file ~/.3ax-ui-vault-pass`. The examples below use
    `--ask-vault-pass`.
