@@ -169,7 +169,7 @@ The facts exist only in a run that includes the panel play (`--tags panel` or a 
 
 ### Domain: public subscription address and VPN name
 
-The panel side of map #52 (SBKubric/sane-3x-ui#224, #225; `xui_version` v1.9.0-chain.22 or later): settings of the
+The panel side of map #52 (SBKubric/sane-3x-ui#224, #225; `xui_version` v1.9.0-chain.23 or later): settings of the
 panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 (`roles/panel/tasks/domain.yml`).
 
 | Setting | From | How |
