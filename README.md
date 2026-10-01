@@ -15,7 +15,7 @@ mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric
 ansible.cfg            roles path, root over ssh, no default inventory
 requirements.txt       ansible-core + ansible-lint (pinned)
 requirements.yml       collections (pinned)
-site.yml               converge: common -> panel -> hops -> panel inbounds again -> showcase -> monserver -> monclient
+site.yml               converge: common -> panel -> hops -> panel inbounds again -> monserver -> monclient -> showcase
                        -> verify.yml
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
                        (steps: roles/<role>/tasks/wipe.yml)
@@ -197,7 +197,8 @@ panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 
   A record to the active edge on every switch (at most once in 4 minutes) and the VLESS links name it (host override
   on). The record must already exist at DNSExit: the panel updates it, never creates it.
 - `verify.yml` (with `vpn_name`): the record at DNSExit's nameservers (role showcase's `files/dnsexit.py
-  --check-only`, on the controller) against the active edge's address in the chain registry; a mismatch is a
+  --check-only`, on the controller; the zone's NS records found as for the showcase, see [Role showcase](#role-showcase)
+  item 3, or `panel_vpn_name_nameservers`) against the active edge's address in the chain registry; a mismatch is a
   `WARNING`, not a failure (the 4-minute limit, resolvers' TTL).
 - **Trusted front addresses** (`frontTrustedAddrs`, [SBKubric/sane-3x-ui#228](https://github.com/SBKubric/sane-3x-ui/issues/228),
   the panel's `docs/spec/proxy-chain.md` §5.12; orchestrator#57). The showcase calls the edges from one address on
@@ -799,9 +800,13 @@ address and passes every request on to the chain's edges. Runs after the hops in
    before every reload; a config it refuses stops the run and the running nginx keeps the old one.
 3. **DNS** (`showcase_dns_check`, default on). The A record `sub.<dns_zone>` → the showcase's IPv4 through
    `roles/showcase/files/dnsexit.py` on the controller. DNSExit's API cannot read records, so the record is read from
-   DNSExit's nameservers (`ns1`–`ns4.dnsexit.com`, a plain DNS query, no cache) and posted (`POST
-   https://api.dnsexit.com/dns/`, `add` with `overwrite`, TTL `showcase_dns_ttl` minutes) only when it differs, then
-   read back until the nameservers answer the new address. DNSExit allows one update in 4 minutes: the time of the
+   the zone's nameservers (a plain DNS query, no cache) and posted (`POST https://api.dnsexit.com/dns/`, `add` with
+   `overwrite`, TTL `showcase_dns_ttl` minutes) only when it differs, then read back until the nameservers answer the
+   new address. DNSExit serves different zones from different servers (a free `<name>.<their domain>` answers from
+   its parent's `ns11`/`ns13` while `ns1` says SERVFAIL, #64), so the nameservers are found through the controller's
+   resolvers (`/etc/resolv.conf`): the NS records of `dns_zone`, else of its parent, and so on. Only an authoritative
+   answer counts: SERVFAIL, REFUSED or an answer without the AA flag means that server did not answer, and the next
+   one is asked. `showcase_dns_nameservers` (and the panel's `panel_vpn_name_nameservers`) name the servers instead. DNSExit allows one update in 4 minutes: the time of the
    last post is kept in `.cache/dnsexit/state.json` next to the playbooks, and a post that comes sooner waits. The key
    (`dnsexit_api_key` in the vault) reaches the script on stdin, never in a command line or the output. Without a key
    the record is only read, and a mismatch is a `WARNING`: set it by hand. The record is never deleted.
@@ -832,6 +837,11 @@ domain>` in `group_vars/all/main.yml`; `dnsexit_api_key` in the vault (or the A 
 `ansible-playbook -i inventories/<profile> site.yml --tags showcase,verify`. The panel's public address for
 subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase: role panel sets it to
 `https://sub.<dns_zone>` (`--tags panel`), see [Domain](#domain-public-subscription-address-and-vpn-name).
+
+The showcase is the last play of `site.yml` and of `verify.yml` (#64). When every host of a play fails, Ansible ends
+the whole run, and the showcase is a single host that depends on services outside the installation (DNSExit, Let's
+Encrypt); last, a failing showcase leaves the panel, the hops and the monitoring converged and checked. Nothing before
+it needs it: role panel takes the showcase's address from the inventory.
 
 The edges limit and ban by client address too, and every request through the showcase comes from the showcase's
 address. Its traffic would count against one address on every edge (30 a minute), and ten unknown subscriptions in ten
@@ -935,9 +945,9 @@ to look; the first group that fails ends the run.
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
-| showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+| showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 
 ## Prerequisites
 
@@ -1128,7 +1138,7 @@ a fake `x-ui` storing what `x-ui setting` stores and `mock_dnsexit.py`'s nameser
 the address from the showcase or `sub_public_url` and compared normalised, the rest of the form and the stored key kept
 by the save, a new or hand-set or cleared key applied once (never printed), TTL and date alone, an unquoted YAML date,
 bad values refused before any write, check mode, a CLI refusal; the VPN name check of `verify.yml` (on the active edge,
-elsewhere, no answer, no active edge);
+elsewhere, no answer, no active edge, the zone's nameservers found by default);
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -1137,7 +1147,9 @@ a failing API login;
 `tests/showcase/test_dnsexit_script.py`: `dnsexit.py` against `tests/showcase/mock_dnsexit.py` (DNSExit's API and an
 authoritative nameserver) — a record already right (no post), wrong or missing (one post, read back), the zone apex, a
 refusal and a wrong key (the key never printed), the 4-minute limit across runs, a silent nameserver (the state
-decides), the next nameserver, `--check-only`, the key on stdin, bad arguments;
+decides), the next nameserver, SERVFAIL and answers without the AA flag taken for no answer, the zone's nameservers
+found through a resolver above the zone (a SERVFAIL server first, then the one serving it; a silent resolver; given
+nameservers skip the search), `--check-only`, the key on stdin, bad arguments;
 `tests/showcase/test_showcase_role.py`: role showcase with a real nginx started from a temp dir on free ports, HTTPS
 stand-ins for the edges, `mock_panel.py` and `mock_dnsexit.py` — the panel's paths (clash off), the edges active first,
 a redirect and an error walked past to the third edge with its headers, a down edge skipped, unknown subscriptions

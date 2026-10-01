@@ -4,10 +4,14 @@
     DNSEXIT_API_KEY=... dnsexit.py --zone example.com --name sub.example.com --content 203.0.113.10
 
 Runs on the controller, standard library only. DNSExit's API can write records but not read them, so the record is
-read from the zone's authoritative nameservers (--nameservers, DNSExit's own by default) with a plain DNS query: the
-answer of a nameserver, not of a cache. When it already holds exactly --content, nothing is posted. Otherwise the
-record is written with one POST to the API ("add" with "overwrite": the A records of the name are replaced) and the
-nameservers are asked again until they answer the new address (--wait seconds).
+read from the zone's authoritative nameservers with a plain DNS query: the answer of a nameserver, not of a cache.
+DNSExit serves different zones from different servers (orchestrator#64), so by default the nameservers are found
+through the resolvers (--resolvers, else /etc/resolv.conf): the NS records of --zone, else of its parent, and so on
+(a free <name>.<their domain> has none of its own). --nameservers names them instead. Only an authoritative answer
+counts: SERVFAIL, REFUSED or an answer without the AA flag means that server did not answer, and the next one is asked.
+When the record already holds exactly --content, nothing is posted. Otherwise the record is written with one POST to
+the API ("add" with "overwrite": the A records of the name are replaced) and the nameservers are asked again until they
+answer the new address (--wait seconds).
 
 DNSExit asks for at most one update in 4 minutes: the time of the last post is kept in --state, and a post that comes
 sooner waits out the rest (--min-interval). When no nameserver answers at all, --state decides: the same content posted
@@ -18,7 +22,8 @@ environment shows it) or from the environment (DNSEXIT_API_KEY), never from an a
 it (--check-only) only the nameservers are read.
 
 Prints one JSON object: name, type, wanted, current (the addresses, or null when no nameserver answered), nameserver
-(the one that answered), action (none | posted | mismatch | unknown), waited (seconds spent on the rate limit),
+(the one that answered), nameservers (those asked: given or found), nameservers_of (the domain whose NS records they
+are, null when given or not found), action (none | posted | mismatch | unknown), waited (seconds spent on the rate limit),
 message. Exit status: 0 done (or only read), 1 the API refused or the new address did not show up, 2 bad arguments.
 """
 
@@ -36,7 +41,10 @@ import urllib.request
 from pathlib import Path
 
 TYPE_A = 1
+TYPE_NS = 2
 CLASS_IN = 1
+FLAG_AA = 0x0400
+FLAG_RD = 0x0100
 
 
 def fail_args(message):
@@ -56,23 +64,32 @@ def encode_name(name):
     return out + b"\0"
 
 
-def skip_name(packet, offset):
-    """Offset just past the (possibly compressed) name at offset."""
+def read_name(packet, offset):
+    """(name, offset just past it) for the (possibly compressed) name at offset."""
+    labels, end, jumps = [], None, 0
     while True:
         if offset >= len(packet):
             raise ValueError("truncated name")
         length = packet[offset]
         if length & 0xC0 == 0xC0:
-            return offset + 2
+            if end is None:
+                end = offset + 2
+            jumps += 1
+            if jumps > 32:
+                raise ValueError("name compression loop")
+            offset = struct.unpack(">H", packet[offset:offset + 2])[0] & 0x3FFF
+            continue
         if length == 0:
-            return offset + 1
+            return ".".join(labels).lower(), end if end is not None else offset + 1
+        labels.append(packet[offset + 1:offset + 1 + length].decode("ascii", "replace"))
         offset += 1 + length
 
 
-def query_a(name, server, port, timeout):
-    """The A records of name as server answers them (no recursion asked), or raises OSError/ValueError."""
+def query(name, rtype, server, port, timeout, recursive=False):
+    """(rcode, flags, [(type, rdata offset, rdata length)], packet) of server's answer, or raises OSError/ValueError."""
     qid = random.randint(0, 0xFFFF)
-    packet = struct.pack(">HHHHHH", qid, 0, 1, 0, 0, 0) + encode_name(name) + struct.pack(">HH", TYPE_A, CLASS_IN)
+    packet = (struct.pack(">HHHHHH", qid, FLAG_RD if recursive else 0, 1, 0, 0, 0) + encode_name(name)
+              + struct.pack(">HH", rtype, CLASS_IN))
     family = socket.AF_INET6 if ":" in server else socket.AF_INET
     with socket.socket(family, socket.SOCK_DGRAM) as sock:
         sock.settimeout(timeout)
@@ -84,41 +101,101 @@ def query_a(name, server, port, timeout):
             if len(data) >= 12 and struct.unpack(">H", data[:2])[0] == qid:
                 break
     flags, qdcount, ancount = struct.unpack(">HHH", data[2:8])
-    rcode = flags & 0x000F
-    if rcode == 3:  # NXDOMAIN: the name has no records at all
-        return []
-    if rcode != 0:
-        raise ValueError(f"rcode {rcode}")
     offset = 12
     for _ in range(qdcount):
-        offset = skip_name(data, offset) + 4
-    addresses = []
+        offset = read_name(data, offset)[1] + 4
+    answers = []
     for _ in range(ancount):
-        offset = skip_name(data, offset)
-        rtype, rclass, _ttl, rdlength = struct.unpack(">HHIH", data[offset:offset + 10])
+        offset = read_name(data, offset)[1]
+        atype, aclass, _ttl, rdlength = struct.unpack(">HHIH", data[offset:offset + 10])
         offset += 10
-        rdata = data[offset:offset + rdlength]
+        if aclass == CLASS_IN:
+            answers.append((atype, offset, rdlength))
         offset += rdlength
-        if rtype == TYPE_A and rclass == CLASS_IN and rdlength == 4:
-            addresses.append(socket.inet_ntoa(rdata))
-    return sorted(set(addresses))
+    return flags & 0x000F, flags, answers, data
 
 
-def split_server(value):
+def query_a(name, server, port, timeout):
+    """The A records of name as the zone's server answers them (no recursion asked), or raises OSError/ValueError."""
+    rcode, flags, answers, data = query(name, TYPE_A, server, port, timeout)
+    if rcode != 0 and rcode != 3:  # SERVFAIL, REFUSED, ...: the server did not answer, not "no record"
+        raise ValueError(f"rcode {rcode}")
+    if not flags & FLAG_AA:  # not the zone's server (a referral, a cache): its "nothing" says nothing
+        raise ValueError("not authoritative")
+    if rcode == 3:  # NXDOMAIN from the zone's server: the name has no records at all
+        return []
+    return sorted({socket.inet_ntoa(data[at:at + 4]) for rtype, at, length in answers if rtype == TYPE_A and length == 4})
+
+
+def split_server(value, default_port=53):
     host, sep, port = value.rpartition(":")
     if sep and port.isdigit() and not host.endswith(":"):
         return host.strip("[]"), int(port)
-    return value.strip("[]"), 53
+    return value.strip("[]"), default_port
 
 
-def read_record(name, nameservers, timeout):
-    """(addresses, nameserver) from the first nameserver that answers, or (None, None)."""
-    for entry in nameservers:
+def system_resolvers(path="/etc/resolv.conf"):
+    """The nameserver lines of resolv.conf (127.0.0.1 without any, as the C library does)."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        lines = []
+    found = [line.split()[1] for line in lines if line.split()[:1] == ["nameserver"] and len(line.split()) > 1]
+    return found or ["127.0.0.1"]
+
+
+def ask_resolvers(name, rtype, resolvers, timeout):
+    """(rcode, answers, packet) from the first resolver that answers (NOERROR or NXDOMAIN), or None."""
+    for entry in resolvers:
         host, port = split_server(entry)
         try:
-            server = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)[0][4][0]
-            return query_a(name, server, port, timeout), entry
-        except (OSError, ValueError, IndexError, struct.error):
+            rcode, _flags, answers, data = query(name, rtype, host, port, timeout, recursive=True)
+        except (OSError, ValueError, IndexError, struct.error, UnicodeError):
+            continue
+        if rcode in (0, 3):
+            return rcode, answers, data
+    return None
+
+
+def address_of(host, resolvers, timeout):
+    """An IPv4 address for a nameserver: itself when it is one, else through the resolvers, else the system's."""
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    answer = ask_resolvers(host, TYPE_A, resolvers, timeout)
+    if answer:
+        rcode, answers, data = answer
+        for rtype, at, length in answers:
+            if rtype == TYPE_A and length == 4:
+                return socket.inet_ntoa(data[at:at + 4])
+    return socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_DGRAM)[0][4][0]
+
+
+def find_nameservers(zone, resolvers, timeout):
+    """(domain, [nameserver names]) serving zone: the NS records of zone, else of its parent, and so on up to a
+    two-label domain (a DNSExit zone such as <name>.<free domain> has none of its own: its parent's servers answer
+    for it). (None, []) when the resolvers do not answer or no domain on the way has NS records."""
+    labels = zone.split(".")
+    for start in range(0, max(1, len(labels) - 1)):
+        domain = ".".join(labels[start:])
+        answer = ask_resolvers(domain, TYPE_NS, resolvers, timeout)
+        if answer is None:
+            return None, []
+        rcode, answers, data = answer
+        names = sorted({read_name(data, at)[0] for rtype, at, _length in answers if rtype == TYPE_NS})
+        if names:
+            return domain, names
+    return None, []
+
+
+def read_record(name, nameservers, timeout, resolvers, default_port=53):
+    """(addresses, nameserver) from the first nameserver that answers for the zone, or (None, None)."""
+    for entry in nameservers:
+        host, port = split_server(entry, default_port)
+        try:
+            return query_a(name, address_of(host, resolvers, timeout), port, timeout), entry
+        except (OSError, ValueError, IndexError, struct.error, UnicodeError):
             continue
     return None, None
 
@@ -169,8 +246,13 @@ def main():
     parser.add_argument("--type", default="A", choices=["A"])
     parser.add_argument("--content", required=True, help="the address the record must hold")
     parser.add_argument("--ttl", type=int, default=60, help="minutes")
-    parser.add_argument("--nameservers", default="ns1.dnsexit.com,ns2.dnsexit.com,ns3.dnsexit.com,ns4.dnsexit.com",
-                        help="authoritative nameservers, comma separated, host[:port]")
+    parser.add_argument("--nameservers", default="",
+                        help="the zone's nameservers, comma separated, host[:port]; empty (the default) = found "
+                             "through the resolvers: the NS records of --zone, else of its parent, and so on")
+    parser.add_argument("--resolvers", default="",
+                        help="recursive resolvers that find the nameservers, comma separated, host[:port]; "
+                             "empty = the nameserver lines of /etc/resolv.conf")
+    parser.add_argument("--ns-port", type=int, default=53, help="the port of the nameservers found (the tests)")
     parser.add_argument("--state", required=True, help="file that remembers the last post")
     parser.add_argument("--min-interval", type=float, default=240, help="seconds between two posts (DNSExit: 4 min)")
     parser.add_argument("--wait", type=float, default=180, help="seconds to wait for the nameservers after a post")
@@ -191,21 +273,37 @@ def main():
         encode_name(name)
     except ValueError as err:
         fail_args(str(err))
-    nameservers = [n.strip() for n in args.nameservers.split(",") if n.strip()]
+    given = [n.strip() for n in args.nameservers.split(",") if n.strip()]
+    resolvers = [n.strip() for n in args.resolvers.split(",") if n.strip()] or system_resolvers()
     key = sys.stdin.readline().strip() if args.key_stdin else os.environ.get("DNSEXIT_API_KEY", "")
     if not args.check_only and not key:
         fail_args("DNSEXIT_API_KEY is empty; use --check-only to read the record only")
 
     result = {"name": name, "type": args.type, "wanted": content, "current": None, "nameserver": None,
-              "action": "none", "waited": 0, "message": ""}
+              "nameservers": given, "nameservers_of": None, "action": "none", "waited": 0, "message": ""}
 
     def finish(code, message, **extra):
         result.update(extra, message=message)
         print(json.dumps(result))
         sys.exit(code)
 
-    current, server = read_record(name, nameservers, args.timeout)
-    result["current"], result["nameserver"] = current, server
+    def lookup():
+        """(addresses, nameserver) as read_record, finding the zone's nameservers first unless they were given (and
+        again on the next call while they could not be found); the reason in silence when nobody answered."""
+        nonlocal silence
+        if not given and not result["nameservers"]:
+            result["nameservers_of"], result["nameservers"] = find_nameservers(zone, resolvers, args.timeout)
+        if not result["nameservers"]:
+            silence = f"could not find the nameservers of {zone} (resolvers: {', '.join(resolvers)})"
+            return None, None
+        current, server = read_record(name, result["nameservers"], args.timeout, resolvers,
+                                      53 if given else args.ns_port)
+        silence = f"no nameserver answered for {name} ({', '.join(result['nameservers'])})"
+        result["current"], result["nameserver"] = current, server
+        return current, server
+
+    silence = ""
+    current, server = lookup()
     record_key = f"{name} {args.type}"
     state = load_state(args.state)
 
@@ -213,10 +311,10 @@ def main():
         finish(0, f"{name} already points at {content} ({server})")
     if args.check_only:
         if current is None:
-            finish(0, f"no nameserver answered for {name} ({', '.join(nameservers)})", action="unknown")
+            finish(0, silence, action="unknown")
         finish(0, f"{name} points at {', '.join(current) or 'nothing'}, not {content} ({server})", action="mismatch")
     if current is None and state.get("records", {}).get(record_key, {}).get("content") == content:
-        finish(0, f"no nameserver answered for {name}; {content} was posted before, not posting again", action="unknown")
+        finish(0, f"{silence}; {content} was posted before, not posting again", action="unknown")
 
     wait = float(state.get("last_post", 0)) + args.min_interval - time.time()
     if wait > 0:
@@ -234,15 +332,14 @@ def main():
 
     deadline = time.monotonic() + args.wait
     while True:
-        current, server = read_record(name, nameservers, args.timeout)
-        result["current"], result["nameserver"] = current, server
+        current, server = lookup()
         if current == [content]:
             finish(0, f"{name} now points at {content} ({server})")
         if time.monotonic() >= deadline:
             break
         time.sleep(args.poll)
     if current is None:
-        finish(0, f"posted {name} -> {content}; no nameserver answered to confirm it")
+        finish(0, f"posted {name} -> {content}; no nameserver answered to confirm it ({silence})")
     finish(1, f"posted {name} -> {content}, but after {int(args.wait)} s {server} still answers "
               f"{', '.join(current) or 'nothing'}")
 
