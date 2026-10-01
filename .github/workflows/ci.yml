@@ -75,6 +75,9 @@ jobs:
       - name: verify.yml's «only 443» check (port scan, cover page, API login) on local listeners
         run: python3 tests/common/test_verify_front.py
 
+      - name: Role common's DNS check (dnscheck.py, dead nameservers dropped, systemd-resolved warned about) and its verify.yml step against local nameservers
+        run: python3 tests/common/test_dns.py
+
       - name: dnsexit.py (the showcase's DNS record) against a stand-in for DNSExit's API and nameserver
         run: python3 tests/showcase/test_dnsexit_script.py
 

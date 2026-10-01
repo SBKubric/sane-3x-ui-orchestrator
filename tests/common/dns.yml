@@ -1,0 +1,10 @@
+---
+# Role common's DNS check alone (see test_dns.py): a resolv.conf in a temp dir, nameservers on 127.0.0.x.
+- name: Check the host's DNS servers
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check and fix the resolver configuration
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: dns

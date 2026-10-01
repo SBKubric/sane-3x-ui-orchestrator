@@ -12,6 +12,9 @@
     success_msg: "{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} is supported"
     quiet: true
 
+- name: Check the host's DNS servers
+  ansible.builtin.import_tasks: dns.yml
+
 - name: Install base packages
   ansible.builtin.apt:
     name: "{{ common_packages }}"

@@ -26,8 +26,9 @@ inventories/
   stand-chain/         panel + hops; monserver/monclient empty
   stand-full/          panel + hops + monserver + monclient
 roles/
-  common/              supported OS check, base packages, time sync; tasks/verify_front.yml + files/portscan.py:
-                       verify.yml's «only 443» check from the controller
+  common/              supported OS check, the host's DNS servers (tasks/dns.yml + files/dnscheck.py), base packages,
+                       time sync; tasks/verify_front.yml + files/portscan.py: verify.yml's «only 443» check from the
+                       controller; tasks/verify_dns.yml: verify.yml's DNS lookup time
   panel/               install by tag, self-signed TLS, vault account, Telegram, monitoring token, geosite
                        ru-inside dropped (tasks/ru_inside.yml + files/ru_inside.py, the daily refresh), inbounds
                        from panel_inbounds, the domain settings (tasks/domain.yml: public subscription address,
@@ -46,7 +47,8 @@ tests/panel/           role panel's inbounds, its «only 443» front, geosite ru
                        list), the domain settings and the targets part of verify.yml against the same mock and local
                        fakes (CI)
 tests/monserver/       role monserver's Settings against a mock of mon-server's admin API, verify's probe links (CI)
-tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners (CI)
+tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners; the DNS
+                       check and verify's DNS step against local stand-in nameservers (CI)
 tests/showcase/        role showcase with a real nginx against local edges, the mock panel API and a stand-in for
                        DNSExit (API and nameserver); dnsexit.py on its own (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
@@ -117,6 +119,40 @@ Panel inbounds (`inventories/<profile>/group_vars/panel.yml`), see [Inbounds](#i
 
 Per mon-client (`host_vars`, optional): `mon_name`, `mon_region`, `mon_paths`, `mon_gomemlimit`; group
 `monclient`: `mon_xray_version`. Role-internal knobs live in each role's `defaults/main.yml`.
+
+## Role common
+
+Every host, first: the supported OS (Debian 12/13, Ubuntu 22.04/24.04), then its DNS servers, then the base packages
+and time sync.
+
+### DNS servers
+
+A dead first `nameserver` makes every lookup wait the libc's 5-second timeout before the next server is tried, and the
+panel's `install.sh` gives up on its reachability checks (`curl --connect-timeout 5`, the lookup included) — the stand
+lost an install to this after the hoster reinstalled a box (#62). So before anything is installed, `files/dnscheck.py`
+asks every `nameserver` of `/etc/resolv.conf` directly, all at once, for the root's NS records over UDP
+(`common_dns_probe_timeout` 2 s, `common_dns_probe_tries` 2; a server answers with NOERROR or NXDOMAIN, silence,
+SERVFAIL or REFUSED make it dead). Standard library only, nothing new on the controller or the host.
+
+| `/etc/resolv.conf` | When some servers are dead | When none answers |
+|---|---|---|
+| a plain file | the dead ones are dropped, `options timeout:1 attempts:2` set (`common_dns_options`; the file's other options kept), a `# 3ax-ui:` note on top; the first version is kept once in `/root/resolv.conf.orig` (`common_dns_backup`, never overwritten); `changed` only then | the answering servers of `common_dns_fallback` (default empty) replace them; without any: the run fails and says which server answered what |
+| systemd-resolved (its stub `127.0.0.53`, or a link to `/run/systemd/resolve/`) | its upstream servers (`/run/systemd/resolve/resolv.conf`, what `resolvectl dns` shows) are checked; a `WARNING`, nothing written | the run fails and names the drop-in to write by hand (`DNS=` in `/etc/systemd/resolved.conf.d/`) |
+| a link elsewhere (resolvconf, NetworkManager) | a `WARNING`, nothing written | the run fails |
+
+Decision for systemd-resolved: warn, do not edit. It fails over to the next upstream server and stays on the one
+that answers by itself, so a dead one costs a single timeout, not one per lookup; and its servers come from DHCP or
+netplan, which a drop-in of ours would silently override for good. `common_dns_fallback` is therefore not used under
+it.
+
+The hoster's DHCP client or cloud-init may write the plain file again: the next `site.yml` drops the dead servers
+again, and `verify.yml` warns about a slow lookup in between (one lookup the way the libc does it: the file's order,
+`timeout` and `attempts`; slower than `common_dns_slow_ms`, 1 s, or unanswered is a `WARNING`). Example:
+
+```yaml
+# inventories/<profile>/group_vars/all/main.yml (documentation addresses: use ones that answer from your boxes)
+common_dns_fallback: ["192.0.2.53", "198.51.100.53"]
+```
 
 ## Role panel
 
@@ -936,6 +972,7 @@ to look; the first group that fails ends the run.
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
 | showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
+| all (DNS) | one lookup the way the libc stub resolver does it (`roles/common/files/dnscheck.py time`: the `nameserver`s of `/etc/resolv.conf` in order, each waited for the file's `timeout`, `attempts` rounds; the root's NS records): slower than `common_dns_slow_ms` (1000 ms) or no answer is a `WARNING` naming the servers that did not answer, never a failure; see [DNS servers](#dns-servers). `verify_dns: false` skips it |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
 
 ## Prerequisites
@@ -1133,6 +1170,12 @@ elsewhere, no answer, no active edge);
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
 open, an old port still answering, a closed front, a closed ACME port (warning), the panel UI answering on the front,
 a failing API login;
+`tests/common/test_dns.py`: `dnscheck.py` and role common's DNS step against stand-in nameservers on `127.0.0.1`-`.4`
+(one answers, one is silent, one refuses) — all answering left alone, dead servers dropped with the options set and
+other options kept, the note not doubled, nothing answering, the fallback (asked only then, a dead one left out),
+systemd-resolved's stub and a link to its upstream list checked but not written, a link elsewhere left alone, bad
+arguments; through `ansible-playbook`: the backup kept once and an earlier one not overwritten, an idempotent rerun,
+check mode, the failure message, the fallback written, the warnings; verify's DNS step (slow, quick, no answer);
 `tests/showcase/test_dnsexit_script.py`: `dnsexit.py` against `tests/showcase/mock_dnsexit.py` (DNSExit's API and an
 authoritative nameserver) — a record already right (no post), wrong or missing (one post, read back), the zone apex, a
 refusal and a wrong key (the key never printed), the 4-minute limit across runs, a silent nameserver (the state
@@ -1164,7 +1207,8 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/panel/test_warp.py &&
   python3 tests/panel/test_awg_mimic.py &&
   python3 tests/monserver/test_settings.py &&
-  python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py &&
+  python3 tests/common/test_verify_front.py && python3 tests/common/test_dns.py &&
+  python3 tests/wipe/test_wipe.py &&
   python3 tests/showcase/test_dnsexit_script.py &&
   apt-get update -qq && apt-get install -y -qq nginx fail2ban curl openssl >/dev/null &&
   python3 tests/showcase/test_showcase_role.py'

@@ -35,6 +35,8 @@
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
 #   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path
 #              (mon_paths expanded over group hops: hops -> edge:/inner:<hop_name>), all UP, waiting up to 3 minutes
+#   all        DNS: one lookup the way the libc does it (resolv.conf order, timeout, attempts) slower than
+#              common_dns_slow_ms (1 s) or unanswered is a warning, no failure (verify_dns: false skips it)
 
 - name: Verify panel and chain registry
   hosts: panel
@@ -109,3 +111,14 @@
         name: panel
         tasks_from: verify_targets
       when: groups['monclient'] | default([]) | length > 0
+
+- name: Verify the hosts' DNS
+  hosts: all
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Time a lookup through the host's resolver configuration
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: verify_dns
+      when: verify_dns | default(true) | bool

@@ -1,0 +1,81 @@
+---
+# The host's DNS servers, before anything is installed (orchestrator#62): a dead first nameserver makes every lookup
+# wait the libc's 5 s timeout, and install.sh's reachability checks (curl --connect-timeout 5) give up on it.
+# files/dnscheck.py asks every nameserver directly. A plain /etc/resolv.conf is ours to fix: the dead servers are
+# dropped, common_dns_options set, common_dns_fallback written when none of its own answers, the first version kept in
+# common_dns_backup. systemd-resolved fails over to the next upstream and stays there by itself, and its upstreams come
+# from DHCP/netplan, so under it (and under another manager linking the file in) the dead ones are only warned about.
+# Nothing answering fails the run: nothing after this would install without DNS.
+- name: Ask each DNS server of the host
+  ansible.builtin.script:
+    cmd: >-
+      dnscheck.py check
+      --resolv-conf {{ common_dns_resolv_conf | quote }}
+      --upstream-conf {{ common_dns_resolved_upstream_conf | quote }}
+      --port {{ common_dns_port | int }}
+      --timeout {{ common_dns_probe_timeout | float }}
+      --tries {{ common_dns_probe_tries | int }}
+      --options {{ common_dns_options | join(',') | quote }}
+      --fallback {{ common_dns_fallback | join(',') | quote }}
+      --backup {{ common_dns_backup | quote }}
+  register: common_dns_check
+  changed_when: false
+  check_mode: false
+
+- name: Read the answers
+  ansible.builtin.set_fact:
+    common_dns: "{{ common_dns_check.stdout | from_json }}"
+
+- name: Require a DNS server that answers
+  ansible.builtin.assert:
+    that:
+      - common_dns.answering | length > 0
+    fail_msg: >-
+      {% set tried = (common_dns.servers + common_dns.fallback) | map(attribute='server') | zip(
+         (common_dns.servers + common_dns.fallback) | map(attribute='error')) | map('join', ': ') | join(', ') %}
+      {% if common_dns.mode == 'resolved' %}none of the upstream DNS servers of systemd-resolved answers
+      ({{ tried | default('none listed', true) }});
+      put a working one into a drop-in in /etc/systemd/resolved.conf.d/ (DNS=...) and restart systemd-resolved, or fix
+      the network configuration it comes from (common_dns_fallback is not used under systemd-resolved)
+      {%- else %}none of the DNS servers in {{ common_dns.resolv_conf }} answers ({{ tried | default('no nameserver line', true) }});
+      nothing would install without DNS: {{ 'fix the servers where the manager linking the file in takes them from' if common_dns.mode == 'managed'
+      else 'set common_dns_fallback to servers that answer from this box, or fix the file' }}{% endif %}
+    success_msg: "DNS servers that answer: {{ common_dns.answering | join(', ') }}"
+    quiet: true
+
+- name: Warn about dead DNS servers left in place
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ 'upstream DNS servers of systemd-resolved' if common_dns.mode == 'resolved'
+      else 'DNS servers in ' ~ common_dns.resolv_conf }} that do not answer: {{ common_dns.dead | join(', ') }}
+      ({{ 'systemd-resolved moves on to the next one by itself; they come from DHCP or netplan'
+      if common_dns.mode == 'resolved' else 'the file is a link another manager rewrites: fix it there' }})
+  when:
+    - common_dns.mode != 'file'
+    - common_dns.dead | length > 0
+
+- name: Drop the dead DNS servers
+  when: common_dns.content is not none
+  block:
+    - name: Keep the original resolver configuration
+      ansible.builtin.copy:
+        src: "{{ common_dns_resolv_conf }}"
+        dest: "{{ common_dns_backup }}"
+        remote_src: true
+        force: false
+        mode: "0644"
+
+    - name: Write the resolver configuration without them
+      ansible.builtin.copy:
+        dest: "{{ common_dns_resolv_conf }}"
+        content: "{{ common_dns.content }}"
+        mode: "0644"
+        # /etc/resolv.conf is bind-mounted in some containers: a rename onto it fails there.
+        unsafe_writes: true
+
+    - name: Report the dropped DNS servers
+      ansible.builtin.debug:
+        msg: >-
+          dropped the nameservers that did not answer: {{ common_dns.dead | join(', ') }};
+          kept: {{ common_dns.answering | join(', ') }}; options {{ common_dns_options | join(' ') }}
+          (the original is {{ common_dns_backup }})
