@@ -1,9 +1,11 @@
 ---
 # A second inventory source for test_domain.py: group showcase with one host, which makes role panel derive the public
-# subscription address https://<showcase_domain> (default sub.<dns_zone>). No task runs on it.
+# subscription address https://<showcase_domain> (default sub.<dns_zone>) and its frontTrustedAddrs the showcase's
+# address (its ansible_host, as vault_hosts gives it). No task runs on it.
 all:
   children:
     showcase:
       hosts:
         subgateway:
           ansible_connection: local
+          ansible_host: 198.51.100.10

@@ -63,7 +63,7 @@ jobs:
       - name: Role panel's AmneziaWG protocol mimicry (I1-I5 templates, new server vs in use, apply flag) and its verify.yml check against the mock panel API
         run: python3 tests/panel/test_awg_mimic.py
 
-      - name: Role panel's domain settings (public subscription address, VPN name, DNSExit key, domain expiry) and its verify.yml check
+      - name: Role panel's domain settings (public sub address, VPN name, DNSExit key, domain expiry, trusted front addresses) and verify.yml checks
         run: python3 tests/panel/test_domain.py
 
       - name: Probe links per path in verify.yml (mon-server)

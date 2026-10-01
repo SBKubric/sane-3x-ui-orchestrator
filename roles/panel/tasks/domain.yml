@@ -5,6 +5,9 @@
 #                  key comes back as its mask, which the save keeps)
 #   dnsExitApiKey, vpnName, vpnNameTtl, domainExpiry   through `x-ui setting -<key> <value>`, the way the spec names for
 #                  orchestrator; the panel reads them on its next tick, no restart
+#   frontTrustedAddrs   (orchestrator#57, SBKubric/sane-3x-ui#228, proxy-chain.md §5.12) the showcase's address
+#                  (front_trusted_showcase.yml) + front_trusted_addrs, through `x-ui setting -frontTrustedAddrs`; a new
+#                  list bumps the chain revision and the hops exempt it on their next poll
 # An empty variable leaves its setting alone; a setting is written only when it differs. The API key is never shown by
 # the panel (a mask), so the sha256 of the key last applied is kept on the box (panel_dnsexit_key_state).
 - name: Log in to the panel
@@ -12,6 +15,18 @@
     file: api_login.yml
     apply:
       check_mode: false
+
+- name: Find the showcase's address
+  ansible.builtin.include_tasks: front_trusted_showcase.yml
+
+# The showcase's address first, then front_trusted_addrs; a bad entry fails here, before anything is written. Managed
+# when there is something to set and the showcase (if any) has an address.
+- name: Normalise the front's trusted addresses
+  ansible.builtin.set_fact:
+    panel_front_trusted_wanted: "{{ [panel_front_trusted_showcase.address, panel_front_trusted_addrs] | front_trusted_addrs }}"
+    panel_front_trusted_managed: >-
+      {{ panel_front_trusted_showcase.address | length > 0
+         or (panel_front_trusted_showcase.host | length == 0 and panel_front_trusted_addrs | front_trusted_addrs | length > 0) }}
 
 - name: Normalise the domain settings
   ansible.builtin.set_fact:
@@ -83,6 +98,28 @@
     fail_msg: "POST panel/setting/all failed: HTTP {{ panel_domain_form.status | default('?') }} {{ panel_domain_form.json.msg | default('') }}"
     quiet: true
 
+- name: Require frontTrustedAddrs in the panel
+  ansible.builtin.assert:
+    that:
+      - "'frontTrustedAddrs' in panel_domain_form.json.obj"
+    fail_msg: >-
+      the panel has no frontTrustedAddrs setting (SBKubric/sane-3x-ui#228): xui_version must be v1.9.0-chain.23 or
+      later to exempt {{ panel_front_trusted_wanted | join(', ') }} from the fronts' limits and bans
+    quiet: true
+  when:
+    - panel_front_trusted_managed | bool
+    - not ansible_check_mode
+
+- name: Warn about a panel without frontTrustedAddrs (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the panel has no frontTrustedAddrs yet (it predates v1.9.0-chain.23): a real run installs xui_version
+      first, then sets {{ panel_front_trusted_wanted | join(',') }}
+  when:
+    - panel_front_trusted_managed | bool
+    - ansible_check_mode
+    - "'frontTrustedAddrs' not in panel_domain_form.json.obj"
+
 - name: Read the fingerprint of the DNSExit API key last applied
   ansible.builtin.slurp:
     src: "{{ panel_dnsexit_key_state }}"
@@ -97,6 +134,12 @@
       vpnName: "{{ panel_domain_form.json.obj.vpnName | default('') }}"
       vpnNameTtl: "{{ panel_domain_form.json.obj.vpnNameTtl | default(5) | string }}"
       domainExpiry: "{{ panel_domain_form.json.obj.domainExpiry | default('') }}"
+      frontTrustedAddrs: >-
+        {{ panel_domain_form.json.obj.frontTrustedAddrs | default('', true) | front_trusted_addrs(source='the panel') | join(',') }}
+    panel_front_trusted_drift: >-
+      {{ panel_front_trusted_managed | bool and 'frontTrustedAddrs' in panel_domain_form.json.obj
+         and panel_front_trusted_wanted | sort
+             != panel_domain_form.json.obj.frontTrustedAddrs | default('', true) | front_trusted_addrs(source='the panel') | sort }}
     panel_domain_key_drift: >-
       {{ panel_dnsexit_api_key | length > 0
          and (panel_domain_form.json.obj.dnsExitApiKey | default('') | length == 0
@@ -113,6 +156,7 @@
       {%- if w.vpnName and w.vpnName != c.vpnName -%}{%- set _ = out.extend(['-vpnName', w.vpnName]) -%}{%- endif -%}
       {%- if w.vpnName and w.vpnNameTtl | int != c.vpnNameTtl | int -%}{%- set _ = out.extend(['-vpnNameTtl', w.vpnNameTtl | int | string]) -%}{%- endif -%}
       {%- if w.domainExpiry and w.domainExpiry != c.domainExpiry -%}{%- set _ = out.extend(['-domainExpiry', w.domainExpiry]) -%}{%- endif -%}
+      {%- if panel_front_trusted_drift | bool -%}{%- set _ = out.extend(['-frontTrustedAddrs', panel_front_trusted_wanted | join(',')]) -%}{%- endif -%}
       {{ out }}
 
 - name: "Show the plan: domain settings"
@@ -128,6 +172,16 @@
       {%- endfor -%}
       {%- if panel_dnsexit_api_key | length > 0 -%}
       {%-   set _ = out.append('dnsExitApiKey: set from the vault' if panel_domain_key_drift else 'dnsExitApiKey (as wanted)') -%}
+      {%- endif -%}
+      {%- if panel_front_trusted_managed | bool -%}
+      {%-   set wanted = panel_front_trusted_wanted | join(',') -%}
+      {%-   set _ = out.append('frontTrustedAddrs "' ~ c.frontTrustedAddrs ~ '"'
+                               ~ (' -> "' ~ wanted ~ '"' if panel_front_trusted_drift | bool
+                                  or 'frontTrustedAddrs' not in panel_domain_form.json.obj else ' (as wanted)')) -%}
+      {%-   if panel_front_trusted_showcase.address | length > 0 -%}
+      {%-     set _ = out.append('the showcase ' ~ panel_front_trusted_showcase.host ~ ' at ' ~ panel_front_trusted_showcase.address
+                                 ~ ' (' ~ panel_front_trusted_showcase.from ~ ')') -%}
+      {%-   endif -%}
       {%- endif -%}
       panel domain settings: {{ out | join(', ') if out else 'none in the inventory (left as the panel has them)' }}
 
@@ -163,7 +217,7 @@
   when: panel_domain_saved is not skipped
 
 # After the form save: the form read above still holds the old VPN name settings.
-- name: Set the VPN name, DNSExit API key and domain expiry
+- name: Set the VPN name, DNSExit API key, domain expiry and trusted front addresses
   ansible.builtin.command:
     argv: >-
       {{ [panel_bin, 'setting'] + (['-dnsExitApiKey', panel_dnsexit_api_key] if panel_domain_key_drift | bool else [])
@@ -174,7 +228,7 @@
   when: panel_domain_key_drift | bool or panel_domain_flags | length > 0
   no_log: true
 
-- name: Require the VPN name settings stored
+- name: Require the CLI settings stored
   ansible.builtin.assert:
     that:
       - panel_domain_cli.rc | default(1) == 0

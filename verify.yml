@@ -17,6 +17,7 @@
 #   panel      AmneziaWG: the server's I1 against awg_mimic_protocol (a warning, no failure)
 #   panel      (with vpn_name) the VPN name's A record at DNSExit's nameservers is the active edge's address (a warning,
 #              no failure: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL)
+#   panel      (with a showcase) the showcase's address is among the panel's frontTrustedAddrs (a warning, no failure)
 #   hops       version; `x-ui chain status` fresh (answers as hop_name, not stale, next hop reachable,
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port (443 behind the

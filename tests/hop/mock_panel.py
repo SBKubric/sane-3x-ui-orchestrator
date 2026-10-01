@@ -37,7 +37,10 @@ Test hook: POST /test/panel/warp (data, device, fail: "" | "network" | "empty" |
 
 And the domain settings of the form (#224, #225): subPublicURL, vpnName, vpnNameTtl, domainExpiry and dnsExitApiKey,
 which panel/setting/all shows only as the mask "********" and a save of the mask keeps. Test hook: POST /test/panel/cli
-({flag: value}: what `x-ui setting -vpnName ...` stores, for a fake x-ui).
+({flag: value}: what `x-ui setting -vpnName ...` stores, for a fake x-ui). And the front's trusted addresses (#228,
+frontTrustedAddrs): the form shows them as stored, `x-ui setting -frontTrustedAddrs` stores them normalised the way
+web/entity/front_trusted.go does (comma-separated, masked networks, v4-mapped as v4, order kept, no repeats).
+POST /test/panel/reset {"without": [key, ...]} drops form keys (a panel from before a setting).
 """
 
 import ipaddress
@@ -99,6 +102,33 @@ class Refusal(Exception):
 
 class BadRequest(Exception):
     pass
+
+
+def normalize_front_trusted(raw):
+    """entity.NormalizeFrontTrustedAddrs: entries split on , ; space tab CR LF, each an address (v4-mapped as v4, not
+    unspecified) or a network (masked, /16 or narrower for IPv4, /32 for IPv6), order kept, no repeats, at most 64."""
+    out = []
+    for field in raw.replace(";", ",").replace("\t", ",").replace("\r", ",").replace("\n", ",").replace(" ", ",").split(","):
+        if not field:
+            continue
+        if "/" in field:
+            net = ipaddress.ip_network(field, strict=False)
+            if net.prefixlen < (16 if net.version == 4 else 32):
+                raise BadRequest(f"front trusted address {field!r} is too wide a network")
+            entry = str(net)
+        else:
+            if "%" in field:
+                raise BadRequest(f"front trusted address {field!r} is neither an IP address nor a network")
+            addr = ipaddress.ip_address(field)
+            addr = getattr(addr, "ipv4_mapped", None) or addr
+            if addr.is_unspecified:
+                raise BadRequest(f"front trusted address {field!r} is the unspecified address")
+            entry = str(addr)
+        if entry not in out:
+            out.append(entry)
+    if len(out) > 64:
+        raise BadRequest(f"at most 64 front trusted addresses, got {len(out)}")
+    return ",".join(out)
 
 
 class Registry:
@@ -397,7 +427,8 @@ class Panel:
                          "tgBotEnable": False, "tgBotToken": "", "tgBotChatId": "", "subEnable": True, "subPort": 2096,
                          "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
                          "timeLocation": "Local", "externalTrafficInformEnable": False,
-                         "subPublicURL": "", "dnsExitApiKey": "", "vpnName": "", "vpnNameTtl": 5, "domainExpiry": ""}
+                         "subPublicURL": "", "dnsExitApiKey": "", "vpnName": "", "vpnNameTtl": 5, "domainExpiry": "",
+                         "frontTrustedAddrs": ""}
     # entity.DnsExitApiKeyMask: what the form and the API show for a stored DNSExit API key.
     KEY_MASK = "********"
 
@@ -407,6 +438,8 @@ class Panel:
         self.nginx_warnings = []
         self.confirm_deadline = 0
         self.settings = dict(self.SETTINGS_DEFAULTS, **seed.get("settings", {}))
+        for key in seed.get("without", []):
+            self.settings.pop(key, None)
         self.inbounds = []
         self.next_id = 1
         self.x25519 = list(seed.get("x25519", []))
@@ -687,12 +720,14 @@ class Panel:
     def cli_settings(self, values):
         """What `x-ui setting -dnsExitApiKey/-vpnName/-vpnNameTtl/-domainExpiry` stores (the fake x-ui of the tests)."""
         for key, value in values.items():
-            if key not in ("dnsExitApiKey", "vpnName", "vpnNameTtl", "domainExpiry"):
+            if key not in ("dnsExitApiKey", "vpnName", "vpnNameTtl", "domainExpiry", "frontTrustedAddrs") or key not in self.settings:
                 raise BadRequest(f"no such flag -{key}")
             if key == "vpnNameTtl":
                 self.settings[key] = int(value)
             elif key == "vpnName":
                 self.settings[key] = value.strip().lower().rstrip(".")
+            elif key == "frontTrustedAddrs":
+                self.settings[key] = normalize_front_trusted(value)
             else:
                 self.settings[key] = value.strip()
 
