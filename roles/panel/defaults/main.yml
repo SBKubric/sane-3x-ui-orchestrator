@@ -133,6 +133,32 @@ panel_awg_mimic_custom: "{{ awg_mimic_custom | default({}) }}"
 panel_awg_obfuscation: "{{ awg_obfuscation | default({}) }}"
 panel_awg_obfuscation_apply: "{{ awg_obfuscation_apply | default(false) }}"
 
+# AmneziaWG 3.0 on the same server (tasks/awg_v3.yml, README "AmneziaWG 3.0"), set and gated like the mimicry above
+# (a new server takes it, a server in use gets a WARNING until awg_obfuscation_apply), from the inventory:
+#   awg_v3                      true (default): header protection, S1-S4 >= 12, the ranges below; false: the role
+#                               leaves the panel's 3.0 fields alone
+#   awg_header_protection_key   optional, vault: the key (awg genkey); without it the panel's stays, or the panel
+#                               makes one (POST awg/server/generate?std=3) when the server has none
+#   awg_v3_params               optional {contentPaddingAddition, rekeyAfterTime, rekeyTimeout, rejectAfterTime,
+#                               keepaliveTimeout, maxHandshakeAttempts}: "N" or "low-high" over panel_awg_v3_defaults
+# Skipped with a WARNING on a host whose kernel module does not take 3.0 (awg/server/status supportsV3 false).
+panel_awg_v3: "{{ awg_v3 | default(true) }}"
+panel_awg_header_protection_key: "{{ awg_header_protection_key | default('') }}"
+panel_awg_v3_params: "{{ awg_v3_params | default({}) }}"
+# The ranges, around WireGuard's own constants (120 s rekey, 5 s retry, 180 s reject, 10 s keepalive, 18 attempts);
+# the kernel draws a value inside each one per session. The rekey window stays below the reject one.
+panel_awg_v3_defaults:
+  contentPaddingAddition: "8-40"
+  rekeyAfterTime: "105-125"
+  rekeyTimeout: "4-7"
+  rejectAfterTime: "170-195"
+  keepaliveTimeout: "8-12"
+  maxHandshakeAttempts: "15-21"
+# verify.yml: where the panel writes the AWG server's <interface>.conf, and the client whose .conf is checked for
+# the server's key (awg_verify_client: its name or email; default: the first enabled AWG client).
+panel_awg_conf_dir: /etc/amnezia/amneziawg
+panel_awg_verify_client: "{{ awg_verify_client | default('') }}"
+
 # The profile «only 443» (SBKubric/sane-3x-ui ADR 0005, tasks/front.yml). only443: the panel's own pages listen on
 # 127.0.0.1 (the admin comes through an SSH tunnel), and nginx on 443 publishes the subscriptions, the chain poll,
 # /mon/v1, <base>login and <base>panel/api/ with the box's Let's Encrypt IP certificate; the firewall leaves 443/tcp,

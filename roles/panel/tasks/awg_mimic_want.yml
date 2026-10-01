@@ -3,6 +3,8 @@
 # and resolved without touching the panel. Result: fact panel_awg_mimic_want, the server fields to set (i1..i5 for a
 # protocol or custom, all five, empty ones included; plus the declared awg_obfuscation fields), empty for none
 # without overrides. Used by awg_obfuscation.yml (through inbounds.yml, before the login) and verify_awg_mimic.yml.
+# Also checks the AmneziaWG 3.0 inputs (awg_v3, awg_v3_params, awg_header_protection_key); awg_v3.yml resolves them
+# against the server.
 - name: Load the AmneziaWG mimicry templates
   ansible.builtin.include_vars:
     file: awg_mimic.yml
@@ -63,6 +65,46 @@
       {%- endif -%}
       {%- if panel_awg_obfuscation_apply is not boolean and panel_awg_obfuscation_apply | string | lower not in ['true', 'false'] -%}
       {%-   set _ = out.append('awg_obfuscation_apply must be true or false') -%}
+      {%- endif -%}
+      {#- AmneziaWG 3.0 (awg_v3.yml) -#}
+      {%- if panel_awg_v3 is not boolean and panel_awg_v3 | string | lower not in ['true', 'false'] -%}
+      {%-   set _ = out.append('awg_v3 must be true or false') -%}
+      {%- elif panel_awg_v3 | bool -%}
+      {%-   set params = panel_awg_v3_params -%}
+      {%-   if params is not mapping -%}
+      {%-     set _ = out.append('awg_v3_params must be a mapping') -%}
+      {%-   else -%}
+      {%-     set extra = params.keys() | reject('in', panel_awg_v3_range_keys) | list -%}
+      {%-     if extra -%}
+      {%-       set _ = out.append('awg_v3_params takes ' ~ panel_awg_v3_range_keys | join(', ') ~ ', not ' ~ extra | join(', ')) -%}
+      {%-     endif -%}
+      {%-     set ranges = {} -%}
+      {%-     for key in panel_awg_v3_range_keys -%}
+      {%-       set value = params[key] if params[key] is defined else panel_awg_v3_defaults[key] -%}
+      {%-       set text = value | string -%}
+      {%-       set ends = (text.split('-') | map('int') | list) if text is match(panel_awg_v3_range_re) else [] -%}
+      {%-       if value is boolean or not ends or ends | max > 65535 or ends | first > ends | last -%}
+      {%-         set _ = out.append('awg_v3_params.' ~ key ~ ' must be a number or a low-high range (0..65535), not ' ~ text) -%}
+      {%-       else -%}
+      {%-         set _ = ranges.update({key: ends}) -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     if ranges.rekeyAfterTime is defined and ranges.rejectAfterTime is defined
+                 and ranges.rekeyAfterTime | last >= ranges.rejectAfterTime | first -%}
+      {%-       set _ = out.append('awg_v3_params: rekeyAfterTime (up to ' ~ ranges.rekeyAfterTime | last ~ ') must stay below'
+                                   ~ ' rejectAfterTime (from ' ~ ranges.rejectAfterTime | first ~ '), or a session expires before its rekey') -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%-   if panel_awg_header_protection_key | string | trim | length > 0
+               and panel_awg_header_protection_key | string | trim is not match(panel_awg_v3_key_re) -%}
+      {%-     set _ = out.append('awg_header_protection_key must be base64 of 32 bytes (awg genkey)') -%}
+      {%-   endif -%}
+      {%-   if obf is mapping -%}
+      {%-     for key in ['s1', 's2', 's3', 's4'] if obf[key] is defined and obf[key] is integer and obf[key] < panel_awg_v3_min_padding -%}
+      {%-       set _ = out.append('awg_obfuscation.' ~ key ~ ' must be at least ' ~ panel_awg_v3_min_padding
+                                   ~ ' with awg_v3 (header protection carries its nonce in the padding)') -%}
+      {%-     endfor -%}
+      {%-   endif -%}
       {%- endif -%}
       {{ out }}
 

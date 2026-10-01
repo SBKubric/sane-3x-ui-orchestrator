@@ -71,5 +71,14 @@ panel_awg_mimic_templates:
 panel_awg_mimic_keys: [i1, i2, i3, i4, i5]
 panel_awg_obfuscation_int_keys: [jc, jmin, jmax, s1, s2, s3, s4]
 panel_awg_obfuscation_h_keys: [h1, h2, h3, h4]
+# AmneziaWG 3.0 (awg_v3): the one-sided ranges ("N" or "low-high", each end 0..65535, the panel's u16 range), and
+# the padding header protection needs in each of S1-S4 (its 12-byte nonce rides there; the kernel refuses less).
+panel_awg_v3_range_keys: [contentPaddingAddition, rekeyAfterTime, rekeyTimeout, rejectAfterTime, keepaliveTimeout, maxHandshakeAttempts]
+panel_awg_v3_range_re: '^[0-9]{1,5}(-[0-9]{1,5})?$'
+panel_awg_v3_min_padding: 12
+# A header protection key: base64 of 32 bytes, as awg genkey prints it.
+panel_awg_v3_key_re: '^[A-Za-z0-9+/]{43}=$'
+# Stands in for the key of a server that has none until the panel makes one (awg_obfuscation.yml); never saved.
+panel_awg_v3_new_key: "(a new key from the panel)"
 # One special junk packet: tags only, each one both the kernel module and amneziawg-go parse.
 panel_awg_mimic_packet_re: '^(<(b 0x([0-9a-fA-F]{2})+|r [0-9]+|rc [0-9]+|rd [0-9]+|t)>)*$'
