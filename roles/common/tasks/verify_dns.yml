@@ -1,0 +1,30 @@
+---
+# verify.yml, the host's DNS (orchestrator#62): one lookup the way the libc stub resolver does it (files/dnscheck.py
+# time: the nameservers of common_dns_resolv_conf in order, each waited for the file's timeout, its attempts rounds),
+# a warning when it takes longer than common_dns_slow_ms or nothing answers. Never fails.
+- name: Time a lookup through the host's resolver configuration
+  ansible.builtin.script:
+    cmd: >-
+      dnscheck.py time
+      --resolv-conf {{ common_dns_resolv_conf | quote }}
+      --port {{ common_dns_port | int }}
+  register: common_dns_time
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Report the lookup time
+  vars:
+    common_dns_lookup: "{{ common_dns_time.stdout | from_json if common_dns_time.rc | default(1) == 0 else {} }}"
+  ansible.builtin.debug:
+    msg: >-
+      {% if not common_dns_lookup %}WARNING: the DNS lookup on {{ inventory_hostname }} could not be timed:
+      {{ common_dns_time.stderr | default(common_dns_time.msg | default('')) | trim }}
+      {%- elif common_dns_lookup.answered_by is none %}WARNING: no DNS server in {{ common_dns_resolv_conf }} answered a
+      lookup on {{ inventory_hostname }} ({{ common_dns_lookup.elapsed_ms }} ms)
+      {%- elif common_dns_lookup.elapsed_ms | int > common_dns_slow_ms | int %}WARNING: a DNS lookup on
+      {{ inventory_hostname }} took {{ common_dns_lookup.elapsed_ms }} ms (more than {{ common_dns_slow_ms }} ms):
+      {% for t in common_dns_lookup.tries if not t.ok %}{{ t.server }} did not answer ({{ t.error }}), {% endfor %}{{
+      common_dns_lookup.answered_by }} did (role common drops dead servers from a plain resolv.conf on the next site.yml)
+      {%- else %}a DNS lookup on {{ inventory_hostname }} took {{ common_dns_lookup.elapsed_ms }} ms (answered by
+      {{ common_dns_lookup.answered_by }}){% endif %}

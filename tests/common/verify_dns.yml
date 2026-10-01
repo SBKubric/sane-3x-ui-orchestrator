@@ -1,0 +1,10 @@
+---
+# verify.yml's DNS step alone (see test_dns.py).
+- name: Verify the hosts' DNS
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Time a lookup through the host's resolver configuration
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: verify_dns

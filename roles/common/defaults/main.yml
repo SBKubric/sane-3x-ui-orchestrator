@@ -5,6 +5,27 @@ common_supported_os:
   Debian: ["12", "13"]
   Ubuntu: ["22.04", "24.04"]
 
+# The host's DNS servers (tasks/dns.yml, orchestrator#62), checked before anything is installed: every nameserver of
+# common_dns_resolv_conf is asked directly (files/dnscheck.py, the root's NS over UDP) and, when the file is a plain one,
+# the dead ones are dropped and common_dns_options set; the first version of the file is kept once in common_dns_backup.
+# Nothing answering fails the run. Under systemd-resolved (its stub 127.0.0.53) its upstream servers
+# (common_dns_resolved_upstream_conf) are checked and only warned about, as is a file another manager links in.
+common_dns_resolv_conf: /etc/resolv.conf
+common_dns_resolved_upstream_conf: /run/systemd/resolve/resolv.conf
+common_dns_backup: /root/resolv.conf.orig
+common_dns_port: 53
+# Per server: wait common_dns_probe_timeout seconds for an answer, common_dns_probe_tries times (all servers at once).
+common_dns_probe_timeout: 2
+common_dns_probe_tries: 2
+# Set in a rewritten file (other options of the file are kept): a dead server costs a second, not the libc's 5.
+common_dns_options: ["timeout:1", "attempts:2"]
+# Servers written into a plain file when none of its own answers (each asked first; the dead ones are left out),
+# e.g. ["192.0.2.53", "198.51.100.53"]. Empty: nothing answering fails the run. Not used under systemd-resolved.
+common_dns_fallback: []
+# verify.yml (tasks/verify_dns.yml): a lookup the way the libc does it (the file's order, timeout and attempts) slower
+# than this is a warning.
+common_dns_slow_ms: 1000
+
 # Base packages the later roles rely on (install.sh, release downloads, TLS).
 common_packages:
   - ca-certificates
