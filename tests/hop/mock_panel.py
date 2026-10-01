@@ -488,7 +488,7 @@ class Panel:
                          "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
                          "timeLocation": "Local", "externalTrafficInformEnable": False,
                          "subPublicURL": "", "dnsExitApiKey": "", "vpnName": "", "vpnNameTtl": 5, "domainExpiry": "",
-                         "frontTrustedAddrs": ""}
+                         "frontTrustedAddrs": "", "tgNotifyChatId": ""}
     # entity.DnsExitApiKeyMask: what the form and the API show for a stored DNSExit API key.
     KEY_MASK = "********"
 

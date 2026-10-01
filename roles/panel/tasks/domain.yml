@@ -1,8 +1,9 @@
 ---
 # The domain settings of the panel's Subscription tab (map #52, SBKubric/sane-3x-ui docs/spec/users.md §14, §15):
-#   subPublicURL   through the settings form (no CLI flag): panel/setting/all is read and sent back to
-#                  panel/setting/update with only it changed (update zeroes a field it is not given; the DNSExit API
-#                  key comes back as its mask, which the save keeps)
+#   subPublicURL, tgNotifyChatId (the notification channel, tg_channel_id)   through the settings form (no CLI
+#                  flag): panel/setting/all is read and sent back to panel/setting/update with only these changed
+#                  (update zeroes a field it is not given; the DNSExit API key comes back as its mask, which the
+#                  save keeps)
 #   dnsExitApiKey, vpnName, vpnNameTtl, domainExpiry   through `x-ui setting -<key> <value>`, the way the spec names for
 #                  orchestrator; the panel reads them on its next tick, no restart
 #   frontTrustedAddrs   (orchestrator#57, SBKubric/sane-3x-ui#228, proxy-chain.md §5.12) the showcase's address
@@ -37,6 +38,14 @@
       vpnName: "{{ panel_vpn_name | string | trim | lower | regex_replace('\\.$', '') }}"
       vpnNameTtl: "{{ panel_vpn_name_ttl | string | trim }}"
       domainExpiry: "{{ panel_domain_expiry | string | trim }}"
+      tgNotifyChatId: "{{ panel_tg_notify_chat_id | string | trim }}"
+
+- name: Check the notification channel
+  ansible.builtin.assert:
+    that:
+      - panel_domain_wanted.tgNotifyChatId == '' or panel_domain_wanted.tgNotifyChatId is match('^(-?[0-9]{5,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$')
+    fail_msg: "tg_channel_id '{{ panel_tg_notify_chat_id }}' must be a chat id such as -1001234567890 or a @username"
+    quiet: true
 
 - name: Check the public subscription address
   ansible.builtin.assert:
@@ -134,6 +143,7 @@
       vpnName: "{{ panel_domain_form.json.obj.vpnName | default('') }}"
       vpnNameTtl: "{{ panel_domain_form.json.obj.vpnNameTtl | default(5) | string }}"
       domainExpiry: "{{ panel_domain_form.json.obj.domainExpiry | default('') }}"
+      tgNotifyChatId: "{{ panel_domain_form.json.obj.tgNotifyChatId | default('') | string }}"
       frontTrustedAddrs: >-
         {{ panel_domain_form.json.obj.frontTrustedAddrs | default('', true) | front_trusted_addrs(source='the panel') | join(',') }}
     panel_front_trusted_drift: >-
@@ -147,8 +157,14 @@
 
 - name: Decide the domain settings to write
   ansible.builtin.set_fact:
-    panel_domain_url_drift: >-
-      {{ panel_domain_wanted.subPublicURL | length > 0 and panel_domain_wanted.subPublicURL != panel_domain_current.subPublicURL }}
+    panel_domain_form_changes: >-
+      {%- set w = panel_domain_wanted -%}
+      {%- set c = panel_domain_current -%}
+      {%- set out = {} -%}
+      {%- for key in ['subPublicURL', 'tgNotifyChatId'] if w[key] | length > 0 and w[key] != c[key] -%}
+      {%-   set _ = out.update({key: w[key]}) -%}
+      {%- endfor -%}
+      {{ out }}
     panel_domain_flags: >-
       {%- set w = panel_domain_wanted -%}
       {%- set c = panel_domain_current -%}
@@ -166,7 +182,7 @@
       {%- set c = panel_domain_current -%}
       {%- set out = [] -%}
       {%- for key, managed in [('subPublicURL', w.subPublicURL), ('vpnName', w.vpnName), ('vpnNameTtl', w.vpnName),
-                               ('domainExpiry', w.domainExpiry)] if managed -%}
+                               ('domainExpiry', w.domainExpiry), ('tgNotifyChatId', w.tgNotifyChatId)] if managed -%}
       {%-   set same = (w[key] | int == c[key] | int) if key == 'vpnNameTtl' else w[key] == c[key] -%}
       {%-   set _ = out.append(key ~ ' "' ~ c[key] ~ '"' ~ (' (as wanted)' if same else ' -> "' ~ w[key] ~ '"')) -%}
       {%- endfor -%}
@@ -185,7 +201,7 @@
       {%- endif -%}
       panel domain settings: {{ out | join(', ') if out else 'none in the inventory (left as the panel has them)' }}
 
-- name: Save the public subscription address
+- name: Save the settings form (public subscription address, notification channel)
   ansible.builtin.uri:
     url: "{{ panel_api_url }}panel/setting/update"
     method: POST
@@ -193,7 +209,7 @@
       Cookie: "{{ panel_api_cookie }}"
       X-Requested-With: XMLHttpRequest
     body_format: json
-    body: "{{ panel_domain_form.json.obj | combine({'subPublicURL': panel_domain_wanted.subPublicURL}) }}"
+    body: "{{ panel_domain_form.json.obj | combine(panel_domain_form_changes) }}"
     ca_path: "{{ panel_api_ca_path }}"
     return_content: true
     status_code: [200]
@@ -201,17 +217,17 @@
   register: panel_domain_saved
   failed_when: false
   when:
-    - panel_domain_url_drift | bool
+    - panel_domain_form_changes | length > 0
     - not ansible_check_mode
   changed_when: true
   no_log: true
 
-- name: Require the public subscription address saved
+- name: Require the settings form saved
   ansible.builtin.assert:
     that:
       - panel_domain_saved.json.success | default(false) | bool
     fail_msg: >-
-      POST panel/setting/update (subPublicURL '{{ panel_domain_wanted.subPublicURL }}') failed:
+      POST panel/setting/update ({{ panel_domain_form_changes.keys() | join(', ') }}) failed:
       HTTP {{ panel_domain_saved.status | default('?') }} {{ panel_domain_saved.json.msg | default('') }}
     quiet: true
   when: panel_domain_saved is not skipped

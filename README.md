@@ -181,8 +181,11 @@ skipped when the host already matches, so a second run reports `changed=0`.
    vault account; a failed login (user or password changed by hand) resets them with `x-ui setting`.
 4. **Telegram** (when `tg_bot_token`/`tg_chat_id` are set). Current values are read through the API
    (`POST <base>panel/setting/all`, read-only); on a difference `x-ui setting -tgbottoken -tgbotchatid
-   -enabletgbot` and a restart. `panel/setting/update` is never used: it zeroes the fields it is not given.
-   Empty vault values leave the panel's Telegram settings alone.
+   -enabletgbot` and a restart. `panel/setting/update` is not used for the bot: it zeroes the fields it is not given.
+   Empty vault values leave the panel's Telegram settings alone. The notification channel (`tg_channel_id` →
+   `tgNotifyChatId`, a channel id or @username, the bot an admin there) has no CLI flag: it goes through the
+   settings form in the same save as the public subscription address (step «Domain», the whole form read back and
+   sent with only these changed); empty leaves the panel's channel alone.
 5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
    if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
    The token is read back every run and never stored in the vault.
@@ -1071,8 +1074,10 @@ Secrets live in each profile's `inventories/<profile>/group_vars/all/vault.yml`,
 git (`.gitignore`). A vault left at the old shared place, `group_vars/all/vault.yml` next to the playbooks, would
 override every profile's own; `vault_guard.yml` (first in `site.yml`, `verify.yml` and `wipe.yml`) refuses to run
 while it exists — move it into the profile. Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
-`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` and
-`dnsexit_api_key` and `awg_header_protection_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `inventories/vault.yml.example`).
+`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, `vault_hosts` (the real host addresses, the
+only place they are kept); optionally `tg_channel_id` (the panel's notification channel), `warp_license`, the domain
+keys `dns_zone`, `dnsexit_api_key`, `domain_expiry`, `sub_public_url`, `vpn_name`, `vpn_name_ttl`, and
+`awg_header_protection_key` — each explained in `inventories/vault.yml.example`.
 
 ```sh
 V=inventories/production/group_vars/all/vault.yml   # or stand-full, stand-chain
