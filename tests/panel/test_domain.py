@@ -179,6 +179,29 @@ class DomainTest(unittest.TestCase):
         self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
         self.assertIn("(as wanted)", flat(out))
 
+    def test_notification_channel_goes_through_the_form_and_a_second_run_changes_nothing(self):
+        out = flat(self.play(tg_channel_id="-1001234567890"))
+        self.assertEqual(self.writes, ["setting/update"])
+        self.assertEqual(self.settings()["tgNotifyChatId"], "-1001234567890")
+        self.assertIn('tgNotifyChatId "" -> "-1001234567890"', out)
+        self.play(tg_channel_id="-1001234567890")
+        self.assertEqual(self.writes, [])
+
+    def test_notification_channel_and_public_address_share_one_save(self):
+        self.play(showcase=True, dns_zone="example.com", tg_channel_id="@notify_channel")
+        self.assertEqual(self.writes, ["setting/update"])
+        settings = self.settings()
+        self.assertEqual((settings["subPublicURL"], settings["tgNotifyChatId"]), ("https://sub.example.com", "@notify_channel"))
+
+    def test_empty_channel_leaves_the_panels_alone_and_a_bad_one_is_refused(self):
+        post("/test/panel/reset", {"settings": {"tgNotifyChatId": "-1009876543210"}})
+        self.play()
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.settings()["tgNotifyChatId"], "-1009876543210")
+        out = self.play(expect_rc=2, tg_channel_id="not a channel")
+        self.assertIn("tg_channel_id", out)
+        self.assertEqual(self.writes, [])
+
     def test_nothing_in_the_inventory_leaves_the_settings_alone(self):
         seed = {"subPublicURL": "https://old.example.net", "dnsExitApiKey": "hand-key-0b9d", "vpnName": "vpn.example.net",
                 "vpnNameTtl": 7, "domainExpiry": "2026-12-31"}

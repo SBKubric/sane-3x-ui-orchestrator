@@ -2,34 +2,57 @@
 # Template for each profile's vault, inventories/<profile>/group_vars/all/vault.yml (git-ignored). Copy, fill, encrypt:
 #   cp inventories/vault.yml.example inventories/<profile>/group_vars/all/vault.yml
 #   ansible-vault encrypt inventories/<profile>/group_vars/all/vault.yml
-# One per profile: the stand and production never share secrets or addresses.
+# One per profile: the stand and production never share secrets or addresses. Optional keys are commented out;
+# an unset or empty optional key leaves the matching setting alone.
 
-# Panel account, applied by role panel via `x-ui setting` right after install (#2).
+# --- Panel -----------------------------------------------------------------------------------------------------------
+# Panel account, applied by role panel via `x-ui setting` right after install (#2). The panel listens on 127.0.0.1 only:
+# reach it through an ssh tunnel to panel_port (ssh -N -L 2053:127.0.0.1:<panel_port> <panel host>).
 panel_user: admin
 panel_password: change-me
 panel_port: 2053
 # Web base path with leading and trailing slash, at least 4 characters between them, e.g. /s3cr3t/.
 panel_base_path: /change-me/
 
+# --- Monitoring ------------------------------------------------------------------------------------------------------
 # mon-server admin account (`mon-server admin set`), role monserver (#4).
 mon_admin_user: monadmin
 mon_admin_password: change-me
 
-# One Telegram bot and chat for both the panel and mon-server (#2, #4); leave both empty to skip.
+# --- Telegram --------------------------------------------------------------------------------------------------------
+# One bot and admin chat for both the panel and mon-server (#2, #4); leave both empty to skip.
 tg_bot_token: "123456:change-me"
 tg_chat_id: "-1000000000000"
+# Notification channel of the panel (tgNotifyChatId, SBKubric/sane-3x-ui#195): a channel id (-100...) or @username;
+# the bot must be an admin there. Optional.
+# tg_channel_id: "-1001111111111"
 
+# --- WARP ------------------------------------------------------------------------------------------------------------
 # WARP+ license key for the panel's WARP (#41), optional; empty = the free account.
-warp_license: ""
+# warp_license: ""
 
-# DNSExit API key for the records of dns_zone (role showcase: sub.<dns_zone>, #53; role panel gives it to the panel,
-# which keeps vpn_name on the active edge, #56), optional; empty = the records are only read, the owner sets them by
-# hand, and the panel's key is left as it is.
-dnsexit_api_key: ""
+# --- Domain (map #52) ------------------------------------------------------------------------------------------------
+# The project's domain at DNSExit: the subscription showcase answers sub.<dns_zone> and the panel hands out
+# subscription links through https://sub.<dns_zone> (while group showcase has a host). Kept here, not in the
+# inventory, because its records point at the profile's addresses.
+# dns_zone: example.com
+# DNSExit API key (role showcase writes the sub.<dns_zone> record; role panel gives it to the panel for vpn_name);
+# empty = the records are only read and set by hand.
+# dnsexit_api_key: ""
+# Registration expiry of the domain, YYYY-MM-DD: the panel reminds in the notification channel 30 and 7 days before.
+# domain_expiry: "2027-01-01"
+# Overrides the public subscription address (default https://sub.<dns_zone>).
+# sub_public_url: https://sub.example.com
+# VPN name kept on the active edge through DNSExit (an A record that already exists there), and its TTL in minutes.
+# vpn_name: vpn.example.com
+# vpn_name_ttl: 5
+
+# --- AmneziaWG -------------------------------------------------------------------------------------------------------
 # AmneziaWG 3.0 header protection key (awg genkey) of the panel's AWG server (#68), optional; unset = the panel's own
 # stays, or the panel makes one for a server without. Every client .conf carries it.
 # awg_header_protection_key: ""
 
+# --- Hosts -----------------------------------------------------------------------------------------------------------
 # Real host addresses: inventory hostname → public IPv4. The only place they are kept; never put an address
 # into an inventory, README or test. A host without an entry is reached through its ssh alias.
 vault_hosts:

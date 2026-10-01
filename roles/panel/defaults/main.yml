@@ -6,6 +6,7 @@
 # Inputs from the vault (inventories/<profile>/group_vars/all/vault.yml):
 #   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
 #   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...` (optional)
+#   tg_channel_id                                             the notification channel (tgNotifyChatId, optional)
 # Inputs from the inventory (group_vars/panel.yml, optional):
 #   panel_inbounds     inbounds converged through panel/api/inbounds (tasks/inbounds.yml, README "Inbounds")
 # Monitoring is switched on only when group `monserver` is not empty.
@@ -73,6 +74,10 @@ panel_web_base_path: "/{{ panel_base_path | regex_replace('^/+|/+$', '') }}/"
 # Telegram bot, from the vault; empty = leave the panel's Telegram settings alone.
 panel_tg_bot_token: "{{ tg_bot_token | default('') }}"
 panel_tg_chat_id: "{{ tg_chat_id | default('') }}"
+# The notification channel (tgNotifyChatId, SBKubric/sane-3x-ui#195): the channel id (-100...) or @username the bot
+# posts notifications to, the bot being an admin there; set through the settings form (tasks/domain.yml, no CLI flag).
+# Empty = the panel's channel is left alone.
+panel_tg_notify_chat_id: "{{ tg_channel_id | default('') }}"
 
 # Inbounds of the panel (tasks/inbounds.yml), matched by remark: missing ones are added, declared fields
 # that differ are updated, inbounds the list does not name are left alone. One entry:
