@@ -6,9 +6,10 @@
 # (SBKubric/sane-3x-ui#224, #225).
 # The subscription page template, Copy JSON and the firefox fingerprint default need v1.9.0-chain.24
 # (SBKubric/sane-3x-ui#230, #231, #235).
-xui_version: v1.9.0-chain.24
-# Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3 = main b66b795).
-mon_version: v1.9.0-chain.13
+# v1.9.0 = chain.24 + the bot expiry editor for AmneziaWG/WireGuard clients (SBKubric/sane-3x-ui#242).
+xui_version: v1.9.0
+# Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3, same code as v1.9.0-chain.13).
+mon_version: v1.9.0
 # The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
 front_mode: only443
 # Let's Encrypt CA for mon-server: false = staging (default for the stand), true = production.
