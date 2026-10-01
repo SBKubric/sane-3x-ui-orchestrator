@@ -1,0 +1,6 @@
+---
+# Edge hop, active; hop_next is derived: no inner hop, so the panel.
+hop_name: proxy
+hop_role: edge
+hop_active: true
+hop_tls: letsencrypt-ip

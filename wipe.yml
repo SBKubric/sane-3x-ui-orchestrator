@@ -10,6 +10,9 @@
 #   -e showcase_wipe_cert=true       also delete the showcase's certificate and its acme.sh renewal
 # Tags as in site.yml (showcase, monclient, monserver, hops, panel) wipe some groups only.
 
+- name: Vault per profile
+  ansible.builtin.import_playbook: vault_guard.yml
+
 - name: Require explicit wipe confirmation
   hosts: localhost
   connection: local

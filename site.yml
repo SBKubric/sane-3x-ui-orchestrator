@@ -7,6 +7,9 @@
 # An empty group (e.g. monserver/monclient in stand-chain) matches no hosts and is skipped.
 # site.yml never wipes anything; a fresh start is wipe.yml followed by site.yml.
 
+- name: Vault per profile
+  ansible.builtin.import_playbook: vault_guard.yml
+
 - name: Common host setup
   hosts: all
   tags: [common]

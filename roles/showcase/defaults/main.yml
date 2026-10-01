@@ -8,7 +8,7 @@
 # Inputs (inventories/<profile>/group_vars/all/main.yml or group_vars/showcase.yml):
 #   dns_zone             the domain DNSExit hosts, e.g. example.com (shared with the VPN name, #52)
 #   showcase_domain      the showcase's name, default sub.<dns_zone>
-# From the vault (group_vars/all/vault.yml):
+# From the vault (inventories/<profile>/group_vars/all/vault.yml):
 #   dnsexit_api_key      DNSExit API key; empty = the DNS record is left to the owner (read, never written)
 #   panel_*              the panel API login (role panel's api_login) that reads the subscription paths
 # Read from the inventory: group hops (the edges, hop_active first), the panel's settings (subscription paths).

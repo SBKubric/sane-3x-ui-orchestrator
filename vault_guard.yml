@@ -1,0 +1,22 @@
+---
+# Imported first by site.yml, verify.yml and wipe.yml: every profile keeps its own vault in
+# inventories/<profile>/group_vars/all/vault.yml. A vault left at the old shared place (group_vars/all/vault.yml next to
+# the playbooks) would override every profile's own, so production would run with the stand's secrets; refuse it.
+- name: Refuse a vault shared by every profile
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Look for the old shared vault
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/group_vars/all/vault.yml"
+      register: vault_guard_shared
+
+    - name: Require the vault in the profile
+      ansible.builtin.assert:
+        that:
+          - not vault_guard_shared.stat.exists
+        fail_msg: >-
+          group_vars/all/vault.yml next to the playbooks is shared by every profile and overrides each profile's own
+          vault: move it to inventories/<profile>/group_vars/all/vault.yml (one per profile, README "Vault")
+        quiet: true

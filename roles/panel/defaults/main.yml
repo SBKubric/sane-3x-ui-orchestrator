@@ -3,7 +3,7 @@
 #
 # Inputs from the inventory (group_vars/all):
 #   xui_version        release tag passed to install.sh, e.g. v1.9.0-chain.4
-# Inputs from the vault (group_vars/all/vault.yml):
+# Inputs from the vault (inventories/<profile>/group_vars/all/vault.yml):
 #   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
 #   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...` (optional)
 # Inputs from the inventory (group_vars/panel.yml, optional):

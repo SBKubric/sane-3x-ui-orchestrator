@@ -1,0 +1,31 @@
+---
+# Release tag of SBKubric/sane-3x-ui for the panel and every hop (install.sh <xui_version>).
+# Monitoring contract 3: the panel and mon-server must speak the same contract, bump both tags together.
+# The «only 443» front needs v1.9.0-chain.12 or later (SBKubric/sane-3x-ui#142-#149, #154, #155).
+# The domain settings (public subscription address, VPN name, DNSExit) need v1.9.0-chain.23 or later
+# (SBKubric/sane-3x-ui#224, #225).
+# The subscription page template, Copy JSON and the firefox fingerprint default need v1.9.0-chain.24
+# (SBKubric/sane-3x-ui#230, #231, #235).
+xui_version: v1.9.0-chain.24
+# Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3 = main b66b795).
+mon_version: v1.9.0-chain.13
+# The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
+front_mode: only443
+# Let's Encrypt CA for mon-server: false = staging (the stand), true = production.
+# Hops and the panel's front always use production LE IP certificates; the panel's own port (reached on the box
+# and through the SSH tunnel) keeps a self-signed certificate.
+acme_production: true
+# Approve new mon-client pairing requests automatically through the mon-server admin API.
+mon_auto_approve: true
+# The project's domain at DNSExit (map #52): the subscription showcase answers sub.<dns_zone> (group showcase, role
+# showcase); the A record is written through the DNSExit API when the vault has dnsexit_api_key. Kept in this profile's vault.
+# dns_zone: example.com
+# The panel's domain settings (role panel, README "Domain: public subscription address and VPN name"); empty = the
+# panel's setting is left alone. The public subscription address is https://sub.<dns_zone> while group showcase has a
+# host; sub_public_url overrides it. The VPN name (an A record that already exists at DNSExit) follows the active edge
+# when the vault has dnsexit_api_key. Kept in this profile's vault.
+# sub_public_url: https://sub.example.com
+# vpn_name: vpn.example.com
+# vpn_name_ttl: 5
+# domain_expiry: "2027-05-01"
+# Real addresses live only in the vault (vault_hosts); each host in hosts.yml picks its own entry.
