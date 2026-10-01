@@ -1,0 +1,64 @@
+---
+# verify.yml on the panel host, with a host in group showcase (orchestrator#57): the showcase's address
+# (front_trusted_showcase.yml) is among the panel's frontTrustedAddrs, an entry or a network that holds it, so the
+# fronts of the panel and of every hop neither limit nor ban it. Only warnings: without it the showcase still works,
+# until its clients' typos get it limited or banned on the edges. Read-only; needs api_login.
+- name: Find the showcase's address
+  ansible.builtin.include_tasks: front_trusted_showcase.yml
+
+- name: Read the panel's settings form
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_front_trusted_form
+  failed_when: false
+  no_log: true
+  when: panel_front_trusted_showcase.address | length > 0
+
+- name: Look at the panel's list
+  ansible.builtin.set_fact:
+    panel_front_trusted_verify:
+      read: "{{ panel_front_trusted_form.json.success | default(false) | bool }}"
+      known: "{{ 'frontTrustedAddrs' in panel_front_trusted_form.json.obj | default({}, true) }}"
+      list: "{{ panel_front_trusted_form.json.obj.frontTrustedAddrs | default('', true) }}"
+  when: panel_front_trusted_showcase.address | length > 0
+
+- name: Warn about the settings form
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: POST panel/setting/all failed (HTTP {{ panel_front_trusted_form.status | default('?') }}
+      {{ panel_front_trusted_form.json.msg | default('') }}), so the trusted front addresses were not checked
+  when:
+    - panel_front_trusted_showcase.address | length > 0
+    - not panel_front_trusted_verify.read | bool
+
+- name: Warn about a panel without frontTrustedAddrs
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the panel has no frontTrustedAddrs (it predates v1.9.0-chain.23): the edges limit and ban the showcase
+      {{ panel_front_trusted_showcase.host }} ({{ panel_front_trusted_showcase.address }}) as one client
+  when:
+    - panel_front_trusted_showcase.address | length > 0
+    - panel_front_trusted_verify.read | bool
+    - not panel_front_trusted_verify.known | bool
+
+- name: Report the showcase among the trusted front addresses
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('the showcase ' ~ panel_front_trusted_showcase.host ~ ' (' ~ panel_front_trusted_showcase.address
+          ~ ') is among the trusted front addresses: ' ~ panel_front_trusted_verify.list)
+         if panel_front_trusted_verify.list | front_trusted_covers(panel_front_trusted_showcase.address)
+         else ('WARNING: the showcase ' ~ panel_front_trusted_showcase.host ~ ' (' ~ panel_front_trusted_showcase.address
+               ~ ') is not in the panel setting frontTrustedAddrs "' ~ panel_front_trusted_verify.list
+               ~ '": the edges limit it as one client and ban it after 10 unknown subscriptions in 10 minutes; '
+               ~ 'run site.yml --tags panel') }}
+  when:
+    - panel_front_trusted_showcase.address | length > 0
+    - panel_front_trusted_verify.known | bool

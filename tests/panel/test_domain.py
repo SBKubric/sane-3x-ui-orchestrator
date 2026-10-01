@@ -5,15 +5,19 @@ stand-in for DNSExit's nameserver (tests/showcase/mock_dnsexit.py); no real host
     PANEL_TEST_PORT=18087 python3 tests/panel/test_domain.py   # needs ansible-playbook
 
 tests/panel/domain.yml runs one task file of the role (panel_test_tasks):
-  domain           subPublicURL through the settings form; dnsExitApiKey, vpnName, vpnNameTtl and domainExpiry through
-                   `x-ui setting`; empty variables leave the settings alone
-  verify_vpn_name  verify.yml's check: the VPN name at DNSExit's nameservers against the active edge (a warning only)
+  domain                 subPublicURL through the settings form; dnsExitApiKey, vpnName, vpnNameTtl, domainExpiry and
+                         frontTrustedAddrs (the showcase's address + front_trusted_addrs, orchestrator#57) through
+                         `x-ui setting`; empty variables leave the settings alone
+  verify_vpn_name        verify.yml's check: the VPN name at DNSExit's nameservers against the active edge (a warning only)
+  verify_front_trusted   verify.yml's check: the showcase's address in the panel's frontTrustedAddrs (a warning only)
 """
 
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -38,6 +42,16 @@ EVERYTHING = {"dns_zone": "example.com", "vpn_name": "VPN.Example.com.", "vpn_na
               "domain_expiry": "2027-05-01", "dnsexit_api_key": KEY}
 EVERYTHING_CLI = ["setting", "-dnsExitApiKey", KEY, "-vpnName", "vpn.example.com", "-vpnNameTtl", "3",
                   "-domainExpiry", "2027-05-01"]
+
+SHOWCASE_IP = "198.51.100.10"
+
+
+def local_ipv4():
+    """The source address of this machine's default route: what the setup module reports as default_ipv4."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("198.51.100.1", 9))
+        return s.getsockname()[0]
+
 
 # Records its arguments (one JSON list a line) and stores the VPN name flags in the mock panel, as the real CLI stores
 # them in the database.
@@ -116,7 +130,17 @@ class DomainTest(unittest.TestCase):
             files.append(f.name)
         env = dict(os.environ, PANEL_TEST_PORT=str(PORT), ANSIBLE_CONFIG=str(REPO / "ansible.cfg"),
                    ANSIBLE_ROLES_PATH=str(REPO / "roles"), ANSIBLE_NOCOLOR="1", ANSIBLE_STDOUT_CALLBACK="default")
-        inventories = ["-i", str(HERE / "inventory.yml")] + (["-i", str(HERE / "showcase_inventory.yml")] if showcase else [])
+        inventories = ["-i", str(HERE / "inventory.yml")]
+        if isinstance(showcase, dict):
+            # The showcase host with vars of its own (ansible_host, its connection), as a profile's inventory has it.
+            with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+                f.write(json.dumps({"all": {"children": {"showcase": {"hosts": {"subgateway": dict(
+                    {"ansible_connection": "local", "ansible_python_interpreter": "{{ ansible_playbook_python }}"},
+                    **showcase)}}}}}))
+            files.append(f.name)
+            inventories += ["-i", f.name]
+        elif showcase:
+            inventories += ["-i", str(HERE / "showcase_inventory.yml")]
         before = len(self.state()["calls"])
         try:
             run = subprocess.run(["ansible-playbook", "-vvv", *inventories, str(HERE / "domain.yml"),
@@ -139,11 +163,11 @@ class DomainTest(unittest.TestCase):
     def test_fresh_panel_gets_every_setting_and_a_second_run_changes_nothing(self):
         out = flat(self.play(showcase=True, **EVERYTHING))
         self.assertEqual(self.writes, ["setting/update"])
-        self.assertEqual(self.cli(), [EVERYTHING_CLI])
+        self.assertEqual(self.cli(), [EVERYTHING_CLI + ["-frontTrustedAddrs", SHOWCASE_IP]])
         settings = self.settings()
         self.assertEqual(settings["subPublicURL"], "https://sub.example.com")
-        self.assertEqual((settings["dnsExitApiKey"], settings["vpnName"], settings["vpnNameTtl"], settings["domainExpiry"]),
-                         (KEY, "vpn.example.com", 3, "2027-05-01"))
+        self.assertEqual((settings["dnsExitApiKey"], settings["vpnName"], settings["vpnNameTtl"], settings["domainExpiry"],
+                          settings["frontTrustedAddrs"]), (KEY, "vpn.example.com", 3, "2027-05-01", SHOWCASE_IP))
         self.assertIn('subPublicURL "" -> "https://sub.example.com"', out)
         self.assertIn('vpnName "" -> "vpn.example.com"', out)
         self.assertIn("dnsExitApiKey: set from the vault", out)
@@ -166,6 +190,8 @@ class DomainTest(unittest.TestCase):
 
     def test_public_address_needs_both_a_showcase_and_dns_zone(self):
         self.play(showcase=True)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.cli(), [["setting", "-frontTrustedAddrs", SHOWCASE_IP]], "the showcase alone is trusted")
         self.play(dns_zone="example.com")
         self.assertEqual((self.writes, self.cli()), ([], []))
         self.assertEqual(self.settings()["subPublicURL"], "")
@@ -190,8 +216,8 @@ class DomainTest(unittest.TestCase):
         before = self.settings()
         self.play(showcase=True, dns_zone="example.com")
         self.assertEqual(self.writes, ["setting/update"])
-        self.assertEqual(self.cli(), [])
-        self.assertEqual(self.settings(), dict(before, subPublicURL="https://sub.example.com"))
+        self.assertEqual(self.cli(), [["setting", "-frontTrustedAddrs", SHOWCASE_IP]])
+        self.assertEqual(self.settings(), dict(before, subPublicURL="https://sub.example.com", frontTrustedAddrs=SHOWCASE_IP))
 
     def test_a_new_key_in_the_vault_is_applied_alone_and_then_kept(self):
         self.play(**EVERYTHING)
@@ -257,6 +283,108 @@ class DomainTest(unittest.TestCase):
         (self.tmp / "x-ui").write_text("#!/bin/sh\necho 'failed to set vpnName: VPN name must be a DNS name'\nexit 1\n")
         out = flat(self.play(expect_rc=2, vpn_name="vpn.example.com"))
         self.assertIn("x-ui setting refused the domain settings: failed to set vpnName", out)
+
+    # --- the front's trusted addresses (orchestrator#57) -----------------------------------------------
+    def test_the_showcase_address_becomes_the_trusted_list_and_a_second_run_changes_nothing(self):
+        out = flat(self.play(showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertEqual(self.cli(), [["setting", "-frontTrustedAddrs", SHOWCASE_IP]])
+        self.assertEqual(self.settings()["frontTrustedAddrs"], SHOWCASE_IP)
+        self.assertIn(f'frontTrustedAddrs "" -> "{SHOWCASE_IP}"', out)
+
+        out = self.play(showcase={"ansible_host": SHOWCASE_IP})
+        self.assertEqual((self.writes, self.cli()), ([], []))
+        self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
+        self.assertIn(f'frontTrustedAddrs "{SHOWCASE_IP}" (as wanted)', flat(out))
+
+    def test_front_trusted_addrs_extends_the_showcase_address(self):
+        extra = ["203.0.113.0/24", "2001:DB8::1"]
+        self.play(showcase={"ansible_host": SHOWCASE_IP}, front_trusted_addrs=extra)
+        self.assertEqual(self.cli(), [["setting", "-frontTrustedAddrs", f"{SHOWCASE_IP},203.0.113.0/24,2001:db8::1"]])
+        self.assertEqual(self.settings()["frontTrustedAddrs"], f"{SHOWCASE_IP},203.0.113.0/24,2001:db8::1")
+        out = self.play(showcase={"ansible_host": SHOWCASE_IP}, front_trusted_addrs=extra)
+        self.assertEqual(self.cli(), [])
+        self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
+
+    def test_front_trusted_addrs_alone_is_enough(self):
+        self.play(front_trusted_addrs="192.0.2.7, 203.0.113.0/24")
+        self.assertEqual(self.settings()["frontTrustedAddrs"], "192.0.2.7,203.0.113.0/24")
+        self.play(front_trusted_addrs=["192.0.2.7", "203.0.113.0/24"])
+        self.assertEqual(self.cli()[1:], [], "already set")
+
+    def test_no_showcase_and_no_list_leaves_the_trusted_list_alone(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": "192.0.2.7"}})
+        out = self.play()
+        self.assertEqual((self.writes, self.cli()), ([], []))
+        self.assertEqual(self.settings()["frontTrustedAddrs"], "192.0.2.7")
+        self.assertIn("panel domain settings: none in the inventory", flat(out))
+
+    def test_the_list_is_compared_the_way_the_panel_stores_it(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": f"203.0.113.0/24,2001:db8::1,{SHOWCASE_IP}"}})
+        out = self.play(showcase={"ansible_host": SHOWCASE_IP},
+                        front_trusted_addrs=["203.0.113.9/24", "2001:0DB8:0:0::1", f"::ffff:{SHOWCASE_IP}", "203.0.113.0/24"])
+        self.assertEqual((self.writes, self.cli()), ([], []), "same entries, other order and spelling")
+        self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
+
+    def test_a_new_showcase_address_replaces_the_list(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": "192.0.2.7,198.51.100.99"}})
+        self.play(showcase={"ansible_host": SHOWCASE_IP})
+        self.assertEqual(self.cli(), [["setting", "-frontTrustedAddrs", SHOWCASE_IP]])
+        self.assertEqual(self.settings()["frontTrustedAddrs"], SHOWCASE_IP)
+
+    def test_a_showcase_reached_by_name_gives_its_default_ipv4(self):
+        out = flat(self.play(showcase={"ansible_host": "subgateway.example.net"}))
+        address = self.settings()["frontTrustedAddrs"]
+        self.assertTrue(address, out[-6000:])
+        self.assertIsInstance(ipaddress.ip_address(address), ipaddress.IPv4Address)
+        self.assertEqual(address, local_ipv4())
+        self.assertIn(f"showcase subgateway at {address} (its default IPv4)", out)
+
+    def test_an_unreachable_showcase_leaves_the_list_alone_with_a_warning(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": "192.0.2.7"}})
+        out = flat(self.play(showcase={"ansible_host": "subgateway.invalid", "ansible_connection": "ssh"},
+                             front_trusted_addrs=["203.0.113.0/24"]))
+        self.assertEqual((self.writes, self.cli()), ([], []))
+        self.assertEqual(self.settings()["frontTrustedAddrs"], "192.0.2.7")
+        self.assertIn("WARNING: the showcase subgateway has no address", out)
+
+    def test_bad_trusted_addresses_fail_before_anything_is_written(self):
+        cases = ["sub.example.com", "203.0.113.5:80", "10.0.0.0/8", "0.0.0.0", "::", "2001:db8::/16", "fe80::1%eth0",
+                 "203.0.113.0/255.255.255.0", "::ffff:203.0.113.0/120",
+                 [f"203.0.113.{i}" for i in range(65)]]
+        for bad in cases:
+            with self.subTest(bad=bad if isinstance(bad, str) else "65 entries"):
+                out = flat(self.play(expect_rc=2, vpn_name="vpn.example.com", front_trusted_addrs=bad))
+                self.assertIn("front_trusted_addrs", out)
+                self.assertEqual((self.writes, self.cli()), ([], []))
+
+    def test_check_mode_shows_the_trusted_list_and_writes_nothing(self):
+        out = flat(self.play(check=True, showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertEqual((self.writes, self.cli()), ([], []))
+        self.assertIn(f'frontTrustedAddrs "" -> "{SHOWCASE_IP}"', out)
+
+    def test_a_panel_without_the_setting_fails_and_check_mode_warns(self):
+        post("/test/panel/reset", {"without": ["frontTrustedAddrs"]})
+        out = flat(self.play(expect_rc=2, showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertIn("v1.9.0-chain.23", out)
+        self.assertEqual((self.writes, self.cli()), ([], []))
+        out = flat(self.play(check=True, showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertIn("WARNING: the panel has no frontTrustedAddrs", out)
+
+    def test_verify_reports_the_showcase_among_the_trusted_addresses(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": "192.0.2.7,198.51.100.0/24"}})
+        out = flat(self.play("verify_front_trusted", showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertIn(f"the showcase subgateway ({SHOWCASE_IP}) is among the trusted front addresses", out)
+        self.assertNotIn("WARNING", out)
+        self.assertEqual((self.writes, self.cli()), ([], []))
+
+    def test_verify_warns_when_the_showcase_is_not_trusted(self):
+        post("/test/panel/reset", {"settings": {"frontTrustedAddrs": "192.0.2.7"}})
+        out = flat(self.play("verify_front_trusted", showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertIn(f"WARNING: the showcase subgateway ({SHOWCASE_IP}) is not in the panel setting frontTrustedAddrs "
+                      '"192.0.2.7"', out)
+        post("/test/panel/reset", {"without": ["frontTrustedAddrs"]})
+        out = flat(self.play("verify_front_trusted", showcase={"ansible_host": SHOWCASE_IP}))
+        self.assertIn("WARNING: the panel has no frontTrustedAddrs", out)
 
     # --- verify.yml ----------------------------------------------------------------------------------------
     def edges(self, active="proxy"):

@@ -1,0 +1,51 @@
+---
+# The showcase's public address for the panel's frontTrustedAddrs (orchestrator#57; domain.yml and
+# verify_front_trusted.yml): the host of group showcase, at its ansible_host when that is an IPv4 address (the profiles
+# take it from vault_hosts), else at its default IPv4 from facts, gathered here when no play has gathered them. The
+# showcase reaches the edges, which the chain knows by IPv4, from that address. Sets panel_front_trusted_showcase
+# {host, address, from}: host '' = no showcase; address '' = the showcase is there but its address is unknown.
+- name: Find the showcase host
+  ansible.builtin.set_fact:
+    panel_front_trusted_showcase:
+      host: "{{ groups['showcase'] | default([]) | first | default('') }}"
+      address: >-
+        {{ hostvars[groups['showcase'][0]].ansible_host | default('') | string
+           if groups['showcase'] | default([]) | length > 0
+              and hostvars[groups['showcase'][0]].ansible_host | default('') | string is match(panel_front_trusted_ipv4_re)
+           else '' }}
+      from: ansible_host
+
+- name: Gather network facts of the showcase host
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  # delegate_to is templated before the condition: the default keeps a run without a showcase from failing on it.
+  delegate_to: "{{ panel_front_trusted_showcase.host | default(inventory_hostname, true) }}"
+  delegate_facts: true
+  ignore_unreachable: true
+  failed_when: false
+  check_mode: false
+  when:
+    - panel_front_trusted_showcase.host | length > 0
+    - panel_front_trusted_showcase.address | length == 0
+    - hostvars[panel_front_trusted_showcase.host].ansible_facts.default_ipv4.address is not defined
+
+- name: Take the showcase's address from its facts
+  ansible.builtin.set_fact:
+    panel_front_trusted_showcase:
+      host: "{{ panel_front_trusted_showcase.host }}"
+      address: "{{ hostvars[panel_front_trusted_showcase.host].ansible_facts.default_ipv4.address | default('') }}"
+      from: its default IPv4
+  when:
+    - panel_front_trusted_showcase.host | length > 0
+    - panel_front_trusted_showcase.address | length == 0
+
+- name: Warn about a showcase without an address
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the showcase {{ panel_front_trusted_showcase.host }} has no address: its ansible_host
+      "{{ hostvars[panel_front_trusted_showcase.host].ansible_host | default('') }}" is not an IPv4 address and its
+      facts could not be gathered (unreachable?), so the panel setting frontTrustedAddrs is left as it is. Put its
+      address in vault_hosts.
+  when:
+    - panel_front_trusted_showcase.host | length > 0
+    - panel_front_trusted_showcase.address | length == 0

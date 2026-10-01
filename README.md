@@ -88,6 +88,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `vpn_name` | the VPN name, e.g. `vpn.example.com`: a DNS name the panel keeps on the active edge through DNSExit (the A record must already exist there); empty = left as the panel has it |
 | `vpn_name_ttl` | TTL of the VPN name's A record in minutes, 1-1440 (default `5`), applied with `vpn_name` |
 | `domain_expiry` | the domain's registration expiry date `YYYY-MM-DD` (quote it or not), for the panel's renewal reminders in the notify channel; empty = left as the panel has it |
+| `front_trusted_addrs` | more trusted front addresses (IPv4/IPv6 addresses or CIDR networks, a list or a comma-separated string) after the showcase's address in the panel's `frontTrustedAddrs`; neither the panel's front nor any hop's limits or bans them. See [Domain](#domain-public-subscription-address-and-vpn-name) |
 | `awg_route_via_xray` | `true` (default): the AmneziaWG server's `routeViaXray`, so AWG clients go through xray's routing (ru-inside, WARP); `false` = the kernel NATs them out directly |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
@@ -178,6 +179,7 @@ panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 
 | `dnsExitApiKey` | the vault's `dnsexit_api_key` (the one role showcase uses) | `x-ui setting -dnsExitApiKey` |
 | `vpnName`, `vpnNameTtl` | `vpn_name`, `vpn_name_ttl` (default 5) | `x-ui setting -vpnName -vpnNameTtl` |
 | `domainExpiry` | `domain_expiry` | `x-ui setting -domainExpiry` |
+| `frontTrustedAddrs` | the showcase's address, then `front_trusted_addrs` | `x-ui setting -frontTrustedAddrs` |
 
 - **Empty or unset** variable: the setting stays as the panel has it (clear one in the panel's form). Nothing is
   set on the stand.
@@ -195,8 +197,29 @@ panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 
 - `verify.yml` (with `vpn_name`): the record at DNSExit's nameservers (role showcase's `files/dnsexit.py
   --check-only`, on the controller) against the active edge's address in the chain registry; a mismatch is a
   `WARNING`, not a failure (the 4-minute limit, resolvers' TTL).
-- TODO: the panel's setting for trusted front addresses (the showcase exempt from the edges' limits and bans,
-  [SBKubric/sane-3x-ui#228](https://github.com/SBKubric/sane-3x-ui/issues/228)) is not set by the role yet.
+- **Trusted front addresses** (`frontTrustedAddrs`, [SBKubric/sane-3x-ui#228](https://github.com/SBKubric/sane-3x-ui/issues/228),
+  the panel's `docs/spec/proxy-chain.md` §5.12; orchestrator#57). The showcase calls the edges from one address on
+  behalf of all its clients, and an edge's guard limits each address to 30 subscription requests a minute and bans it
+  after 10 unknown subscriptions in 10 minutes. The panel puts the addresses in this list into every chain document, and
+  the fronts of the panel and of every hop exempt them from limits and bans. A new list bumps the chain revision, and
+  the hops pick it up on their next poll. No restart.
+  - **What goes in:** the address of the host of group `showcase` comes first. It is the host's `ansible_host` when
+    that is an IPv4 address, which is what `vault_hosts` gives. Otherwise it is the host's default IPv4 from facts,
+    gathered from the panel play if no play has gathered them yet. Then come the entries of `front_trusted_addrs`.
+    That variable **adds to** the showcase's address and does not replace it.
+  - **The role owns the whole list** while it has something to set: entries typed into the panel's form are replaced,
+    so put your own in `front_trusted_addrs`. If there is no showcase and `front_trusted_addrs` is empty, the list stays
+    as the panel has it. The role never clears it (clear it in the panel's form or with `x-ui setting
+    -frontTrustedAddrs ""`). The list also stays untouched if the showcase's address is unknown (`ansible_host` is a
+    name and the host is unreachable). That case is a `WARNING`.
+  - **Idempotent:** both lists are normalised the way the panel stores them (masked networks, IPv4-mapped addresses as
+    IPv4, canonical IPv6, no repeats) and compared as sets (`roles/panel/filter_plugins/front_trusted.py`).
+  - **Checked before anything is written**, as the panel checks it: each entry must be an IP address or a CIDR network.
+    Names, `host:port`, zones, the unspecified address, networks wider than /16 (IPv4) or /32 (IPv6), IPv4-mapped
+    networks and more than 64 entries are refused. A panel older than v1.9.0-chain.23 has no such setting: a real run
+    fails, and check mode prints a `WARNING`.
+  - `verify.yml` (with a showcase): the showcase's address is among the panel's `frontTrustedAddrs`, either as an entry
+    or inside a network. Otherwise it prints a `WARNING`, not a failure.
 
 ### Inbounds
 
@@ -807,10 +830,11 @@ domain>` in `group_vars/all/main.yml`; `dnsexit_api_key` in the vault (or the A 
 subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase: role panel sets it to
 `https://sub.<dns_zone>` (`--tags panel`), see [Domain](#domain-public-subscription-address-and-vpn-name).
 
-**Before production:** the edges limit and ban by client address too, and every request through the showcase comes
-from the showcase's address: its traffic counts against one address on every edge (30 a minute), and ten unknown
-subscriptions in ten minutes get the showcase banned there. The edges' guard must exempt the showcase's address (a
-panel change; until then keep the showcase for few clients).
+The edges limit and ban by client address too, and every request through the showcase comes from the showcase's
+address. Its traffic would count against one address on every edge (30 a minute), and ten unknown subscriptions in ten
+minutes would get the showcase banned there. Role panel therefore puts the showcase's address into the panel's trusted
+front addresses (`frontTrustedAddrs`, `xui_version` v1.9.0-chain.23 or later), which every edge exempts; see
+[Domain](#domain-public-subscription-address-and-vpn-name). Run `--tags panel` after the showcase gets a new address.
 
 Knobs in `roles/showcase/defaults/main.yml`: `showcase_domain` (default `sub.<dns_zone>`), `showcase_public_ip`,
 `showcase_edges`, `showcase_sub_paths`, `showcase_failover_statuses`, the timeouts, `showcase_tls`, `showcase_acme_server`,
@@ -904,7 +928,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
