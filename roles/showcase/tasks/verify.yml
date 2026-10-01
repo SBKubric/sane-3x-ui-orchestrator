@@ -7,6 +7,13 @@
 # showcase's jail with an action. From the controller: 80 and 443 answer on the public address. DNS: the record at the
 # nameservers (a warning when it is not the showcase's address).
 # Each verify run costs every edge one miss from the showcase's address (the unknown subscription).
+# verify.yml gathers no facts; showcase_public_ip comes from the default IPv4, so read the network facts when a
+# standalone verify run has none (inside site.yml they are already there).
+- name: Gather network facts for the showcase's address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when: ansible_facts['default_ipv4']['address'] is not defined
+
 - name: Test nginx's config
   ansible.builtin.command:
     argv: "{{ showcase_nginx_test_command }}"
