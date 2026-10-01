@@ -4,7 +4,9 @@
 # The «only 443» front needs v1.9.0-chain.12 or later (SBKubric/sane-3x-ui#142-#149, #154, #155).
 # The domain settings (public subscription address, VPN name, DNSExit) need v1.9.0-chain.23 or later
 # (SBKubric/sane-3x-ui#224, #225).
-xui_version: v1.9.0-chain.23
+# The subscription page template, Copy JSON and the firefox fingerprint default need v1.9.0-chain.24
+# (SBKubric/sane-3x-ui#230, #231, #235).
+xui_version: v1.9.0-chain.24
 # Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3 = main b66b795).
 mon_version: v1.9.0-chain.13
 # The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
