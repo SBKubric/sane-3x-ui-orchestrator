@@ -116,7 +116,9 @@ class TemplatesTest(unittest.TestCase):
         self.assertEqual(headers["Content-Length"], "0")
 
 
-class AwgMimicTest(unittest.TestCase):
+class PanelCase(unittest.TestCase):
+    """The mock panel, a playbook run against it, and what the run sent."""
+
     @classmethod
     def setUpClass(cls):
         cls.server = mock_panel.serve(PORT, os.devnull)
@@ -124,6 +126,7 @@ class AwgMimicTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()  # the next class binds the same port
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="awgmimictest-"))
@@ -153,6 +156,9 @@ class AwgMimicTest(unittest.TestCase):
         out = run.stdout + run.stderr
         self.assertEqual(run.returncode, expect_rc, out[-6000:])
         self.assertNotIn(self.awg()["privateKey"], out, "the AWG private key reached the ansible output")
+        for key in [self.awg()["headerProtectionKey"], VAULT_KEY, *self.state()["panel"]["awgGenerated"]]:
+            if key:
+                self.assertNotIn(key, out, "a header protection key reached the ansible output")
         calls = self.state()["calls"][before:]
         self.writes = [(c["path"], json.loads(c["body"] or "{}")) for c in calls if c["method"] == "POST" and c["path"] != "login"]
         self.reads = [c["path"] for c in calls if c["method"] == "GET"]
@@ -180,6 +186,9 @@ class AwgMimicTest(unittest.TestCase):
             "awgClients": [{"id": 1, "name": "alice", "email": "alice", "enable": True},
                            {"id": 2, "name": "probe", "email": "Probe-AWG-1", "enable": True}]})
 
+
+
+class AwgMimicTest(PanelCase):
     # --- a new server --------------------------------------------------------------------------------
     def test_new_server_gets_the_quic_template_before_its_inbound(self):
         before = self.awg()
@@ -220,12 +229,13 @@ class AwgMimicTest(unittest.TestCase):
         self.assert_idempotent({"awg_mimic_protocol": "custom", "awg_mimic_custom": custom})
 
     def test_none_leaves_the_panels_packets(self):
-        out = self.play({"awg_mimic_protocol": "none"})
+        none = {"awg_mimic_protocol": "none", "awg_v3": False}  # awg_v3 sets fields of its own (AwgV3Test)
+        out = self.play(none)
         body = self.saved()  # the server is still switched on and moved to its port
         self.assertEqual({k: body[k] for k in KEYS}, SEEDED)
         self.assertNotIn("awg/clients", self.reads)
         self.assertNotRegex(out, r"AmneziaWG server: \w+ \([^)]*obfuscation")
-        self.assert_idempotent({"awg_mimic_protocol": "none"})
+        self.assert_idempotent(none)
 
     def test_check_mode_only_plans(self):
         out = self.play(None, "--check")
@@ -305,6 +315,186 @@ class AwgMimicTest(unittest.TestCase):
         post("/test/panel/reset", {"awg": {"i1": ""}})
         out = self.play(playbook=HERE / "verify_awg_mimic.yml")
         self.assertIn("WARNING: AmneziaWG mimicry: the server's I1 is empty, not the quic template", out)
+
+
+# The role's 3.0 ranges when the inventory sets none (roles/panel/defaults/main.yml, README "AmneziaWG 3.0").
+V3_DEFAULTS = {"contentPaddingAddition": "8-40", "rekeyAfterTime": "105-125", "rekeyTimeout": "4-7",
+               "rejectAfterTime": "170-195", "keepaliveTimeout": "8-12", "maxHandshakeAttempts": "15-21"}
+# A key in the shape awg genkey prints (base64 of 32 bytes); test data only.
+VAULT_KEY = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+# A server made before 3.0 on a host that now takes it, as the stand had it: the 2.0 set with S3/S4 below the
+# 12-byte nonce, no key, the panel's own ContentPaddingAddition, no timers.
+V2_SERVER = {"s1": 5, "s2": 73, "s3": 8, "s4": 4, "headerProtectionKey": "", "contentPaddingAddition": "4-20",
+             "rekeyAfterTime": "", "rekeyTimeout": "", "rejectAfterTime": "", "keepaliveTimeout": "",
+             "maxHandshakeAttempts": ""}
+
+
+class AwgV3Test(PanelCase):
+    """AmneziaWG 3.0 (awg_v3, default on): HeaderProtectionKey, S1-S4 >= 12, the ranges; and verify.yml's check."""
+
+    def test_new_server_takes_the_default_ranges_and_keeps_the_panels_key(self):
+        before = self.awg()
+        self.play()
+        body = self.saved()
+        self.assertEqual({k: body[k] for k in V3_DEFAULTS}, V3_DEFAULTS)
+        self.assertEqual(body["headerProtectionKey"], before["headerProtectionKey"], "the key the panel made stays")
+        self.assertEqual([body[f"s{i}"] for i in range(1, 5)], [40, 120, 20, 16], "S1-S4 already hold the nonce")
+        self.assertNotIn("awg/server/generate", [path for path, _ in self.writes])
+        self.assertIn("awg/server/status", self.reads, "the role asks whether the kernel takes 3.0")
+        self.assert_idempotent()
+
+
+    def seed_v2_in_use(self, **extra):
+        """The stand before 3.0: a server in use (its inbound, a user and a probe peer) with V2_SERVER's fields."""
+        seed = {"awg": dict({"enable": True, "listenPort": 51820, "routeViaXray": True, "i1": TEMPLATES["quic"]["i1"],
+                             "i2": "", "i3": "", "i4": "", "i5": ""}, **V2_SERVER),
+                "inbounds": [{"remark": "awg", "protocol": "amneziawg", "port": 51820, "tag": "inbound-amneziawg",
+                              "settings": '{"clients": []}'}],
+                "awgClients": [{"id": 1, "name": "alice", "email": "alice", "enable": True},
+                               {"id": 2, "name": "probe", "email": "Probe-AWG-1", "enable": True}]}
+        seed.update(extra)
+        post("/test/panel/reset", seed)
+
+    def test_new_server_without_a_key_gets_one_from_the_panel_and_padding_for_the_nonce(self):
+        post("/test/panel/reset", {"awg": V2_SERVER})
+        self.play()
+        self.assertEqual([path for path, _ in self.writes][:2], ["awg/server/generate", "awg/server"],
+                         "the panel makes the key right before the save")
+        body = self.saved()
+        generated = self.state()["panel"]["awgGenerated"]
+        self.assertEqual(len(generated), 1)
+        self.assertEqual(body["headerProtectionKey"], generated[0])
+        # S1 5 -> 17 would make S1 + 56 = S2 (73): the kernel refuses that, so S1 goes one further.
+        self.assertEqual([body[f"s{i}"] for i in range(1, 5)], [18, 73, 20, 16])
+        self.assertEqual({k: body[k] for k in V3_DEFAULTS}, V3_DEFAULTS)
+        self.assert_idempotent()
+
+    def test_server_in_use_keeps_its_2_0_set_with_a_warning(self):
+        self.seed_v2_in_use()
+        out = self.play(inbounds=AWG_ONLY)
+        self.assertEqual(self.writes, [], "no save, and no key made for nothing")
+        self.assertIn("WARNING: the AmneziaWG server is in use (its AWG inbound exists)", out)
+        self.assertIn("/ awg_v3.", out)
+        self.assertIn("AmneziaWG 3.0 is not on yet: header protection (HeaderProtectionKey, S1-S4 >= 12)", out)
+        self.assertIn("awg_obfuscation_apply=true", out)
+        self.assertEqual(self.awg()["headerProtectionKey"], "")
+        self.assertRegex(out, r"real\s+: ok=\d+\s+changed=0 ")
+
+    def test_apply_turns_on_3_0_on_a_server_in_use(self):
+        self.seed_v2_in_use()
+        out = self.play({"awg_obfuscation_apply": True}, inbounds=AWG_ONLY)
+        self.assertEqual([path for path, _ in self.writes], ["awg/server/generate", "awg/server"])
+        body = self.saved()
+        self.assertEqual(body["headerProtectionKey"], self.state()["panel"]["awgGenerated"][0])
+        self.assertEqual([body[f"s{i}"] for i in range(1, 5)], [18, 73, 20, 16])
+        self.assertEqual({k: body[k] for k in V3_DEFAULTS}, V3_DEFAULTS)
+        self.assertEqual(body["i1"], TEMPLATES["quic"]["i1"])
+        self.assertIn("NOTE: awg_obfuscation_apply changes the obfuscation of an AmneziaWG server in use", out)
+        self.assertIn("With header protection (AmneziaWG 3.0) an old .conf gets no handshake at all", out)
+        self.assertNotIn("WARNING", out)
+        self.assert_idempotent({"awg_obfuscation_apply": True}, inbounds=AWG_ONLY)
+        self.assert_idempotent(None, inbounds=AWG_ONLY)
+
+    def test_the_vault_key_and_awg_v3_params_win(self):
+        params = {"rekeyAfterTime": "90-100", "maxHandshakeAttempts": 20}
+        self.play({"awg_header_protection_key": VAULT_KEY, "awg_v3_params": params})
+        body = self.saved()
+        self.assertEqual(body["headerProtectionKey"], VAULT_KEY)
+        self.assertEqual((body["rekeyAfterTime"], body["maxHandshakeAttempts"], body["rekeyTimeout"]), ("90-100", "20", "4-7"))
+        self.assertNotIn("awg/server/generate", [path for path, _ in self.writes])
+        self.assert_idempotent({"awg_header_protection_key": VAULT_KEY, "awg_v3_params": params})
+
+    def test_awg_v3_false_leaves_the_3_0_fields_alone(self):
+        post("/test/panel/reset", {"awg": V2_SERVER})
+        self.play({"awg_v3": False})
+        body = self.saved()
+        for key, value in V2_SERVER.items():
+            self.assertEqual(body[key], value, key)
+        self.assertNotIn("awg/server/status", self.reads)
+        self.assert_idempotent({"awg_v3": False})
+
+    def test_a_host_without_3_0_gets_a_warning_and_the_mimicry_alone(self):
+        post("/test/panel/reset", {"awg": V2_SERVER, "supportsV3": False})
+        out = self.play()
+        body = self.saved()
+        self.assertEqual(body["i1"], TEMPLATES["quic"]["i1"])
+        for key, value in V2_SERVER.items():
+            self.assertEqual(body[key], value, key)
+        self.assertIn("WARNING: AmneziaWG 3.0: the kernel module on real does not take the 3.0 parameters", out)
+        self.assertNotIn("awg/server/generate", [path for path, _ in self.writes])
+
+    def test_check_mode_makes_no_key(self):
+        post("/test/panel/reset", {"awg": V2_SERVER})
+        out = self.play(None, "--check")
+        self.assertEqual(self.writes, [])
+        self.assertRegex(out, r"AmneziaWG server: save \([^)]*obfuscation [^)]*headerProtectionKey")
+
+
+    def test_malformed_3_0_inputs_are_refused_before_the_login(self):
+        cases = [
+            ({"awg_v3": "maybe"}, "awg_v3 must be true or false"),
+            ({"awg_v3_params": ["8-40"]}, "awg_v3_params must be a mapping"),
+            ({"awg_v3_params": {"persistentKeepalive": "20-30"}}, "awg_v3_params takes contentPaddingAddition, rekeyAfterTime"),
+            ({"awg_v3_params": {"rekeyTimeout": "7-4"}}, "awg_v3_params.rekeyTimeout must be a number or a low-high range"),
+            ({"awg_v3_params": {"keepaliveTimeout": "70000"}}, "awg_v3_params.keepaliveTimeout must be a number or a low-high range"),
+            ({"awg_v3_params": {"rekeyAfterTime": "150-200"}},
+             "awg_v3_params: rekeyAfterTime (up to 200) must stay below rejectAfterTime (from 170)"),
+            ({"awg_header_protection_key": "not-a-key"}, "awg_header_protection_key must be base64 of 32 bytes (awg genkey)"),
+            ({"awg_obfuscation": {"s4": 8}}, "awg_obfuscation.s4 must be at least 12 with awg_v3 (header protection carries its nonce in the padding)"),
+        ]
+        for extra, text in cases:
+            with self.subTest(text):
+                out = self.play(extra, expect_rc=2)
+                self.assertIn(text, out)
+                self.assertEqual((self.writes, self.reads), ([], []))
+        post("/test/panel/reset", {"awg": V2_SERVER})
+        self.play({"awg_v3": False, "awg_obfuscation": {"s4": 8}})  # without 3.0 (and no key) a small padding is fine
+        self.assertEqual(self.saved()["s4"], 8)
+
+
+    # --- verify.yml ----------------------------------------------------------------------------------
+    def verify(self, extra_vars=None, expect_rc=0):
+        return self.play(dict({"panel_awg_conf_dir": str(self.tmp)}, **(extra_vars or {})), expect_rc=expect_rc,
+                         playbook=HERE / "verify_awg_v3.yml", inbounds=AWG_ONLY)
+
+    def test_verify_checks_awg0_conf_and_a_clients_conf_against_the_panel(self):
+        self.seed_v2_in_use(awgConfDir=str(self.tmp))
+        self.play({"awg_obfuscation_apply": True}, inbounds=AWG_ONLY)
+        conf = self.tmp / "awg0.conf"
+        self.assertIn("HeaderProtectionKey = ", conf.read_text(), "the mock panel wrote the applied server")
+        out = self.verify()
+        self.assertEqual(self.writes, [])
+        self.assertIn("AmneziaWG 3.0: awg0.conf has HeaderProtectionKey, S1-S4 18/73/20/16 and the panel's 3.0 fields;"
+                      " the .conf of client alice carries the same key", out)
+        self.assertIn("awg/client/1/config", self.reads)
+        out = self.verify({"awg_verify_client": "Probe-AWG-1"})
+        self.assertIn("the .conf of client Probe-AWG-1 carries the same key", out)
+
+        conf.write_text("".join(line for line in conf.read_text().splitlines(True)
+                                if not line.startswith(("HeaderProtectionKey", "RekeyTimeout"))))
+        out = self.verify(expect_rc=2)
+        self.assertIn("AmneziaWG 3.0: " + str(conf) + " differs from the panel's AWG server in HeaderProtectionKey, RekeyTimeout"
+                      " (the kernel module took fewer fields, or the panel did not apply the last save)", out)
+
+    def test_verify_fails_on_a_client_conf_with_another_key(self):
+        self.seed_v2_in_use(awgConfDir=str(self.tmp))
+        self.play({"awg_obfuscation_apply": True}, inbounds=AWG_ONLY)
+        # alice still has a .conf from before (the mock hands out "config" as it is).
+        post("/test/panel/reset", {"awg": self.awg(), "awgConfDir": str(self.tmp),
+                                   "awgClients": [{"id": 1, "name": "alice", "email": "alice", "enable": True,
+                                                   "config": "[Interface]\nS1 = 18\nHeaderProtectionKey = " + VAULT_KEY + "\n"}]})
+        out = self.verify(expect_rc=2)
+        self.assertIn("AmneziaWG 3.0: the .conf of client alice has another HeaderProtectionKey than the server", out)
+
+    def test_verify_warns_about_a_server_still_on_2_0_and_a_host_without_3_0(self):
+        self.seed_v2_in_use(awgConfDir=str(self.tmp))
+        out = self.verify()
+        self.assertIn("WARNING: AmneziaWG 3.0: the panel's AWG server has no HeaderProtectionKey and S1, S3, S4 below 12"
+                      " (a server in use keeps its set until site.yml runs with awg_obfuscation_apply=true)", out)
+        self.seed_v2_in_use(awgConfDir=str(self.tmp), supportsV3=False)
+        out = self.verify()
+        self.assertIn("WARNING: AmneziaWG 3.0: the kernel module on real does not take the 3.0 parameters", out)
+        self.assertNotIn("awg/client/1/config", self.reads)
 
 
 if __name__ == "__main__":

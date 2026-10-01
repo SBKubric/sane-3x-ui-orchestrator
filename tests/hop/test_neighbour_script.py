@@ -128,14 +128,71 @@ def serve_whois(port, answers):
     return listener
 
 
+def dns_name(data, offset):
+    """(name, offset after it) of the DNS name at offset, compression pointers followed."""
+    labels, end = [], None
+    while True:
+        size = data[offset]
+        if size & 0xC0 == 0xC0:
+            end = end or offset + 2
+            offset = ((size & 0x3F) << 8) | data[offset + 1]
+            continue
+        if size == 0:
+            return ".".join(labels), end or offset + 1
+        labels.append(data[offset + 1:offset + 1 + size].decode())
+        offset += 1 + size
+
+
+def encode_name(name):
+    return b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
+
+
+class FakeDns:
+    """A recursive resolver on 127.0.0.1:port (UDP) that answers A queries from records:
+    {name: ["a.b.c.d", ...] | "cname target"}; an unknown name gets NXDOMAIN. Answers use compression pointers and
+    follow a CNAME as a real resolver does (the CNAME, then the target's A records)."""
+
+    def __init__(self, port):
+        self.records = {}
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", port))
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def close(self):
+        self.sock.close()
+
+    def loop(self):
+        while True:
+            try:
+                query, peer = self.sock.recvfrom(512)
+            except OSError:
+                return
+            name, end = dns_name(query, 12)
+            answers, first = [], True
+            while isinstance(self.records.get(name.lower()), str):  # a CNAME to the next name
+                target = self.records[name.lower()]
+                rdata = encode_name(target)
+                answers.append((b"\xc0\x0c" if first else encode_name(name)) + b"\x00\x05\x00\x01\x00\x00\x00\x3c"
+                               + len(rdata).to_bytes(2, "big") + rdata)
+                name, first = target, False
+            for address in self.records.get(name.lower()) or []:
+                answers.append((b"\xc0\x0c" if first else encode_name(name))
+                               + b"\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04" + socket.inet_aton(address))
+            rcode = 0 if name.lower() in self.records else 3
+            header = query[:2] + bytes([0x81, 0x80 | rcode]) + b"\x00\x01" + len(answers).to_bytes(2, "big") + b"\0\0\0\0"
+            self.sock.sendto(header + query[12:end + 4] + b"".join(answers), peer)
+
+
 class FindTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.certdir = Path(tempfile.mkdtemp(prefix="nbcert-"))
         cls.cert = self_signed(cls.certdir)
+        cls.dns = FakeDns(PORT + 4)
 
     @classmethod
     def tearDownClass(cls):
+        cls.dns.close()
         shutil.rmtree(cls.certdir, ignore_errors=True)
 
     def setUp(self):
@@ -154,12 +211,18 @@ class FindTest(unittest.TestCase):
     def site(self, ip, **kwargs):
         self.servers.append(serve_site(ip, PORT, self.cert, **kwargs))
 
-    def find(self, rows, *extra, address="127.0.0.10"):
+    def find(self, rows, *extra, address="127.0.0.10", dns=None):
+        """find over the scanner's rows; every certificate name resolves to its own site unless dns says otherwise."""
         (self.tmp / "scan.csv").write_text(HEADER + "".join(rows))
         env = {"FAKE_SCAN_CSV": str(self.tmp / "scan.csv"), "FAKE_SCAN_RECORD": str(self.tmp / "record.json")}
+        records = {}
+        for line in rows:
+            ip, name = line.split(",")[0], line.split(",")[8]
+            records[("www." + name[2:]) if name.startswith("*.") else name] = [ip]
+        self.dns.records = {k: v for k, v in {**records, **(dns or {})}.items() if v is not None}  # None: NXDOMAIN
         result = run("find", "--address", address, "--scanner", str(self.scanner), "--port", str(PORT),
                      "--timeout", "2", "--asn-whois", "", "--confirm", "0", "--cache", str(self.tmp / "cache"),
-                     *extra, env=env)
+                     "--dns", f"127.0.0.1:{PORT + 4}", *extra, env=env)
         self.record = json.loads((self.tmp / "record.json").read_text())
         return json.loads(result.stdout)
 
@@ -225,6 +288,27 @@ class FindTest(unittest.TestCase):
         self.assertEqual(reasons["127.0.0.9"], "ALPN http/1.1 for site9.test, not h2")
         self.assertTrue(reasons["127.0.0.11"].startswith("no TLS answer for gone.test"), reasons["127.0.0.11"])
 
+    def test_keeps_only_sites_whose_name_resolves_into_the_24(self):
+        # A site that merely carries a famous name's certificate is no copy of that site: the name must point into the
+        # edge's /24 (the site itself, or another address of the /24), else a client's SNI gives the edge away.
+        for i in range(2, 8):
+            self.site(f"127.0.0.{i}")
+        out = self.find([row("127.0.0.2", "own.example.com"), row("127.0.0.3", "sibling.example.com"),
+                         row("127.0.0.4", "www.example.net"), row("127.0.0.5", "gone.example.com"),
+                         row("127.0.0.6", "*.cdn.example.com"), row("127.0.0.7", "mixed.example.net")],
+                        dns={"sibling.example.com": ["127.0.0.200"],
+                             "www.example.net": ["198.51.100.7", "198.51.100.8"],
+                             "gone.example.com": None,
+                             "www.cdn.example.com": "edge.example.net", "edge.example.net": ["127.0.0.6"],
+                             "mixed.example.net": ["203.0.113.4", "127.0.0.7"]})
+        self.assertEqual(sorted(self.targets(out)), [
+            (f"127.0.0.2:{PORT}", "own.example.com"), (f"127.0.0.3:{PORT}", "sibling.example.com"),
+            (f"127.0.0.6:{PORT}", "www.cdn.example.com"), (f"127.0.0.7:{PORT}", "mixed.example.net")])
+        reasons = self.reasons(out)
+        self.assertEqual(reasons["127.0.0.4"], "www.example.net resolves to 198.51.100.7, 198.51.100.8, outside 127.0.0.0/24")
+        self.assertTrue(reasons["127.0.0.5"].startswith("gone.example.com does not resolve"), reasons["127.0.0.5"])
+        self.assertEqual(sorted(reasons), ["127.0.0.4", "127.0.0.5"])
+
     def test_drops_cdns_by_their_as(self):
         self.site("127.0.0.2")
         self.site("127.0.0.3")
@@ -243,6 +327,43 @@ class FindTest(unittest.TestCase):
         self.assertEqual(self.targets(out), [(f"127.0.0.2:{PORT}", "a.test")])
         self.assertTrue(any("AS lookup" in note for note in out["notes"]), out["notes"])
 
+
+
+class DnsTest(unittest.TestCase):
+    """dns: does a server name resolve into an edge's /24 (a stored target's re-check, verify.yml)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dns = FakeDns(PORT + 6)
+        cls.dns.records = {"www.example.com": ["203.0.113.40"], "www.example.net": ["198.51.100.7", "198.51.100.8"],
+                           "alias.example.com": "www.example.com"}
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.dns.close()
+
+    def check(self, name, address="203.0.113.9", dns=f"127.0.0.1:{PORT + 6}"):
+        return json.loads(run("dns", "--name", name, "--address", address, *(["--dns", dns] if dns else [])).stdout)
+
+    def test_a_name_in_the_edges_24_passes(self):
+        self.assertEqual(self.check("www.example.com"), {
+            "name": "www.example.com", "address": "203.0.113.9", "network": "203.0.113.0/24",
+            "addresses": ["203.0.113.40"], "ok": True, "detail": "www.example.com resolves to 203.0.113.40 in 203.0.113.0/24"})
+        self.assertTrue(self.check("alias.example.com")["ok"])
+
+    def test_a_name_elsewhere_fails(self):
+        out = self.check("www.example.net")
+        self.assertEqual((out["ok"], out["addresses"], out["detail"]), (
+            False, ["198.51.100.7", "198.51.100.8"], "www.example.net resolves to 198.51.100.7, 198.51.100.8, outside 203.0.113.0/24"))
+
+    def test_a_name_that_does_not_resolve_fails(self):
+        out = self.check("gone.example.com")
+        self.assertEqual((out["ok"], out["addresses"]), (False, []))
+        self.assertEqual(out["detail"], "gone.example.com does not resolve (NXDOMAIN)")
+
+    def test_the_controllers_resolver_by_default(self):
+        out = self.check("localhost", address="127.0.0.9", dns="")
+        self.assertEqual((out["ok"], out["addresses"]), (True, ["127.0.0.1"]))
 
 
 class HandshakeTest(unittest.TestCase):
@@ -308,9 +429,11 @@ class HandshakeTest(unittest.TestCase):
                                           + row("127.0.0.9", "a.test"))
         env = {"FAKE_SCAN_CSV": str(self.tmp / "scan.csv"), "FAKE_SCAN_RECORD": str(self.tmp / "scan.json"),
                "FAKE_XRAY_BROKEN": f"127.0.0.9:{PORT}"}
+        dns = FakeDns(PORT + 5)
+        dns.records = {"c.test": ["127.0.0.5"], "b.test": ["127.0.0.8"], "a.test": ["127.0.0.9"]}
         common = ["find", "--address", "127.0.0.10", "--scanner", str(scanner), "--xray", str(HERE / "fake_xray.py"),
                   "--port", str(PORT), "--timeout", "2", "--asn-whois", "", "--probe-url", self.probe_url,
-                  "--cache", str(self.tmp / "cache")]
+                  "--cache", str(self.tmp / "cache"), "--dns", f"127.0.0.1:{PORT + 5}"]
         try:
             out = json.loads(run(*common, "--confirm", "3", env=env).stdout)
             self.assertEqual(out["found"], {"target": f"127.0.0.8:{PORT}", "serverName": "b.test"})
@@ -320,6 +443,7 @@ class HandshakeTest(unittest.TestCase):
             self.assertIsNone(out["found"])
             self.assertEqual(len(out["candidates"]), 3)
         finally:
+            dns.close()
             for site in sites:
                 site.shutdown()
                 site.server_close()

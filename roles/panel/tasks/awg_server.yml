@@ -8,7 +8,7 @@
 # port. A new routeViaXray makes the panel bounce the interface (its PostUp swaps NAT for the TPROXY rules) and ask
 # for an xray restart, which its job does within 30 s; the role restarts xray right away, so the synthetic
 # dokodemo-door inbound is there when the TPROXY rules send traffic to it. The same save carries the protocol mimicry
-# I1-I5 and awg_obfuscation where awg_obfuscation.yml allows it (a new server, or awg_obfuscation_apply): one
+# I1-I5, awg_obfuscation and AmneziaWG 3.0 (awg_v3.yml) where awg_obfuscation.yml allows it (a new server, or awg_obfuscation_apply): one
 # read-modify-write of the whole server, so no field of one converge is lost to the other. Result: fact panel_awg_port.
 - name: Read the AmneziaWG server
   ansible.builtin.include_tasks: api.yml

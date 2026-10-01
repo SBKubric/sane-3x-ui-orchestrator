@@ -75,7 +75,8 @@
     success_msg: "hop {{ hop_name }}: {{ hop_verify_status.stdout_lines | default([]) | map('regex_replace', '\\s+', ' ') | join('; ') }}"
 
 # An edge's neighbour target in the registry (tasks/neighbour.yml): shown, with a warning (not a failure) for the
-# shared fallback or none at all. The handshake check is left to site.yml.
+# shared fallback or none at all, and for a server name that does not resolve into the edge's /24 (orchestrator#66;
+# looked up from the controller). The handshake check is left to site.yml.
 - name: Read the neighbour target of the edge
   when:
     - hop_role == 'edge'
@@ -94,9 +95,27 @@
         hop_verify_neighbour: >-
           {{ hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='realityTarget')
              | first | default('', true) }}
-        hop_verify_neighbour_name: >-
+        hop_verify_neighbour_sni: >-
           {{ hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='realityServerName')
-             | first | default('', true) }}
+             | first | default('', true)
+             or hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='realityTarget')
+             | first | default('', true) | regex_replace(':[0-9]+$', '') }}
+        hop_verify_edge_host: >-
+          {{ hop_registry.hops | selectattr('name', 'equalto', hop_name) | map(attribute='host') | first | default('', true) }}
+
+    - name: Check that the neighbour's server name resolves into the edge's /24
+      ansible.builtin.command:
+        argv: >-
+          {{ hop_neighbour_command + ['dns', '--name', hop_verify_neighbour_sni, '--address', hop_verify_edge_host]
+             + hop_neighbour_dns_args }}
+      delegate_to: localhost
+      register: hop_verify_neighbour_dns_raw
+      changed_when: false
+      failed_when: false
+      when:
+        - hop_verify_neighbour | length > 0
+        - hop_verify_edge_host | length > 0
+        - not (hop_verify_neighbour == hop_reality_fallback_target and hop_reality_target | length == 0)
 
     - name: Show the neighbour target
       ansible.builtin.debug:
@@ -107,7 +126,23 @@
               ~ ' not a site next to it: no neighbour in its /24 passed the checks (set hop_reality_target to pick one)')
              if hop_verify_neighbour == hop_reality_fallback_target and hop_reality_target | length == 0 else
              ('hop ' ~ hop_name ~ ': neighbour target ' ~ hop_verify_neighbour ~ ' ('
-              ~ (hop_verify_neighbour_name or hop_verify_neighbour | regex_replace(':[0-9]+$', '')) ~ ')') }}
+              ~ hop_verify_neighbour_sni ~ ')') }}
+
+    - name: Warn about a neighbour server name outside the edge's /24
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: edge {{ hop_name }}: the server name {{ hop_verify_neighbour_sni }} of its neighbour target
+          {{ hop_verify_neighbour }} does not resolve into the /24 of the edge
+          ({{ hop_verify_dns.detail | default(hop_verify_neighbour_dns_raw.stderr | default('') | trim) }}), so the SNI
+          of its clients points away from the edge; {{ 'pick another hop_reality_target' if hop_reality_target | length > 0
+          else 'run site.yml to scan again' }}
+      vars:
+        hop_verify_dns: >-
+          {{ hop_verify_neighbour_dns_raw.stdout | from_json
+             if hop_verify_neighbour_dns_raw.stdout | default('') | length > 0 else {} }}
+      when:
+        - hop_verify_neighbour_dns_raw is not skipped
+        - not (hop_verify_dns.ok | default(false) | bool)
 
 # hop_sub_scheme https: the box must still hold a certificate (a manual-TLS reinstall used to leave
 # proxy.json with "cert": "", SBKubric/sane-3x-ui#124) and its sub port must answer TLS where the chain

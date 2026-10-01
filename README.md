@@ -15,7 +15,7 @@ mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric
 ansible.cfg            roles path, root over ssh, no default inventory
 requirements.txt       ansible-core + ansible-lint (pinned)
 requirements.yml       collections (pinned)
-site.yml               converge: common -> panel -> hops -> panel inbounds again -> showcase -> monserver -> monclient
+site.yml               converge: common -> panel -> hops -> panel inbounds again -> monserver -> monclient -> showcase
                        -> verify.yml
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
                        (steps: roles/<role>/tasks/wipe.yml)
@@ -233,7 +233,8 @@ panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 
   A record to the active edge on every switch (at most once in 4 minutes) and the VLESS links name it (host override
   on). The record must already exist at DNSExit: the panel updates it, never creates it.
 - `verify.yml` (with `vpn_name`): the record at DNSExit's nameservers (role showcase's `files/dnsexit.py
-  --check-only`, on the controller) against the active edge's address in the chain registry; a mismatch is a
+  --check-only`, on the controller; the zone's NS records found as for the showcase, see [Role showcase](#role-showcase)
+  item 3, or `panel_vpn_name_nameservers`) against the active edge's address in the chain registry; a mismatch is a
   `WARNING`, not a failure (the 4-minute limit, resolvers' TTL).
 - **Trusted front addresses** (`frontTrustedAddrs`, [SBKubric/sane-3x-ui#228](https://github.com/SBKubric/sane-3x-ui/issues/228),
   the panel's `docs/spec/proxy-chain.md` §5.12; orchestrator#57). The showcase calls the edges from one address on
@@ -336,7 +337,8 @@ the active edge's server name) that they get by refreshing the subscription.
 The Reality `target` must be a site Xray's Reality can borrow a handshake from: with Xray 26.3.27 and the
 `chrome` fingerprint, `www.microsoft.com` fails every handshake ("REALITY: processed invalid connection ...
 handshake did not complete successfully") while `dl.google.com`, `github.com` and `www.samsung.com` work; the
-stand uses `dl.google.com`.
+stand uses `dl.google.com`. Clients' uTLS fingerprint (`fp`) is `firefox` (owner's default since 2026-10-01; the
+panel's own default follows in SBKubric/sane-3x-ui#230); the neighbour-target handshake check uses the same.
 
 Example (`inventories/stand-full/group_vars/panel.yml`):
 
@@ -358,7 +360,7 @@ panel_inbounds:
         target: dl.google.com:443 # until an edge is active
         serverNames: [dl.google.com]
         settings:
-          fingerprint: chrome
+          fingerprint: firefox
           serverName: ""
           spiderX: /
       xhttpSettings:
@@ -444,6 +446,57 @@ The panel already puts an I1 (its own `<r N>`) into every `.conf`, so the mimicr
 `src/config.c` of amneziawg-tools, at the tags above), `client/core/utils/constants/protocolConstants.h` of
 amnezia-client, bivlked/amneziawg-installer `ADVANCED.en.md` (field reports), voidwaifu/Special-Junk-Packet-List,
 SagePtr/mini_quic_generator.
+
+### AmneziaWG 3.0
+
+The panel's AWG server runs AmneziaWG 3.0 in full (orchestrator#68): header protection plus randomised timers, on
+top of the 2.0 set and the mimicry above. The panel (sane-3x-ui) stores the 3.0 fields with the server and writes
+them into `awg0.conf` and every client `.conf` when the kernel module takes them (it probes the module itself;
+`GET panel/api/awg/server/status` → `supportsV3`). The role sets them through the same save of `POST
+panel/api/awg/server` as the mimicry, under the same rules.
+
+| Variable | Meaning |
+|---|---|
+| `awg_v3` | `true` (default): turn 3.0 on; `false`: the role leaves the panel's 3.0 fields as they are |
+| `awg_header_protection_key` | vault, optional: the `HeaderProtectionKey` (base64 of 32 bytes, `awg genkey`). Unset: the server's own key stays; a server without one gets a new key from the panel (`POST panel/api/awg/server/generate?std=3`, which saves nothing) in the run that saves it, so a second run keeps it |
+| `awg_v3_params` | optional `{contentPaddingAddition, rekeyAfterTime, rekeyTimeout, rejectAfterTime, keepaliveTimeout, maxHandshakeAttempts}`, each `"N"` or `"low-high"` (0..65535), over the defaults below |
+
+What the role sets:
+
+- **`HeaderProtectionKey`** encrypts the low-entropy header fields WireGuard keeps in the clear. It is the one 3.0
+  parameter both ends must share: a client `.conf` without it gets no handshake.
+- **S1-S4 at least 12.** Header protection takes its nonce from the first 12 bytes of the padding, and the kernel
+  refuses the interface with less. A smaller S is raised by 12 (S1 one more if that made S1 + 56 = S2, which the
+  kernel refuses too); an `awg_obfuscation` S below 12 is refused before the run. S1-S4 must match on both ends.
+- **Ranges** (one-sided: each end may differ, the panel writes the server's into the clients' `.conf` too). The
+  kernel draws a value inside a range per session, so no two sessions share a timing profile. The defaults
+  (`panel_awg_v3_defaults`) sit around WireGuard's constants, and the rekey window stays below the reject one:
+
+  | Field | WireGuard | Default |
+  |---|---|---|
+  | `ContentPaddingAddition` (extra padding inside the encrypted part, bytes) | — | `8-40` |
+  | `RekeyAfterTime` (s) | 120 | `105-125` |
+  | `RekeyTimeout` (s) | 5 | `4-7` |
+  | `RejectAfterTime` (s) | 180 | `170-195` |
+  | `KeepaliveTimeout` (s) | 10 | `8-12` |
+  | `MaxHandshakeAttempts` | 18 | `15-21` |
+
+  `PersistentKeepalive` as a range (a `[Peer]` field) is not set: the panel keeps it per client as one number
+  (SBKubric/sane-3x-ui#234). `RandomTrailers` and `DisableCookies` stay as the panel has them (it turns
+  `RandomTrailers` on for a new server).
+
+**When.** As with the mimicry: a new server (no AWG inbound, no AWG clients) takes it with its first save. A server
+in use keeps its set with a `WARNING` (it names what differs, "AmneziaWG 3.0 is not on yet" when the key is
+missing) until a run with `awg_obfuscation_apply: true`, which prints a `NOTE`. **This change is breaking:** an old
+`.conf` gets no handshake once the server has a key or new S1-S4, so every client needs the new `.conf` (the
+panel's send-configs button / the bot's broadcast of new links and configs, or by hand) and an AmneziaWG 3.0 app
+(amneziawg-go with `HeaderProtectionKey`). The monitoring probes take theirs from the panel. On a host whose kernel
+module does not take 3.0 (`supportsV3` false) the role skips it with a `WARNING` and sets the mimicry alone.
+
+```sh
+# the stand's existing server (2.0 set, no key), once; then send the new configs from the panel
+ansible-playbook -i inventories/stand-full site.yml --tags panel -e awg_obfuscation_apply=true
+```
 
 ### Blocking ru-inside
 
@@ -641,8 +694,8 @@ a prober sees the neighbour's site. The role picks it after converging the hops 
 | Situation | What happens |
 |---|---|
 | `hop_reality_target` set in the edge's `host_vars` | no scan; written as given (server name `hop_reality_server_name`, else the host); a failed handshake check prints a `WARNING` but does not stop the run |
-| the registry already holds a target in the edge's /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
-| otherwise (no target, the check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check |
+| the registry already holds a target in the edge's /24, its server name still resolves into that /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
+| otherwise (no target, the DNS or the handshake check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check; a stored target that failed the DNS check is named in the run's line (`the stored ... failed the DNS check (...), scanned again`) |
 | the scan finds nothing that passes | `hop_reality_fallback_target` (`dl.google.com:443`, passed the xray 26.3.27 handshake in SBKubric/sane-3x-ui#129) and a `WARNING`; the next run scans again |
 
 How the scan works (`roles/hop/files/neighbour.py find`, all **on the controller**, `delegate_to: localhost`,
@@ -654,8 +707,13 @@ never on a box: a VPS scanning its neighbours gets flagged):
    `hop_neighbour_port` (443). It keeps sites that answer **TLS 1.3 with ALPN h2 and X25519** (or the hybrid
    X25519MLKEM768).
 2. The certificate name becomes the server name (a wildcard `*.example.com` stands for `www.example.com`; an
-   address or a bare `*` is dropped). The site must answer **TLS 1.3 + h2 again with that name as SNI**, and
-   `GET /` for that name must **not redirect to another host**.
+   address or a bare `*` is dropped). **The server name must resolve into the edge's /24** (the DNS check,
+   `neighbour.py dns`): at least one of its A records (after CNAMEs) is an address of the /24, the candidate's own
+   or another one. A site that merely carries another site's certificate (a server dressed up as a famous name it
+   is not) is dropped, as is a name that does not resolve: the clients' SNI would point away from the edge's network,
+   which is what a neighbour target is meant to avoid. The lookup runs on the controller, through
+   `hop_neighbour_dns` (`host:port`, UDP) or, empty by default, the controller's own resolver. The site must answer
+   **TLS 1.3 + h2 again with that name as SNI**, and `GET /` for that name must **not redirect to another host**.
 3. **Not a CDN**, two ways: the HTTP answer carries no CDN headers (Cloudflare `cf-ray`/`server: cloudflare`,
    CloudFront `x-amz-cf-*`/`via: ... cloudfront`, Fastly `x-fastly-request-id`/`x-served-by: cache-...`,
    Akamai `server: AkamaiGHost`/`x-akamai-*`), and the site's AS, looked up in
@@ -676,11 +734,17 @@ when all `hop_neighbour_check_tries` (3) fetches of `hop_neighbour_probe_url`
 The run prints one line per edge, e.g. `neighbour target of proxy (203.0.113.0/24): 203.0.113.32:443
 (www.example.net) from scan; scanned 253 addresses, 16 candidates, handshakes: 203.0.113.32:443 3/3 through
 the tunnel`. `verify.yml` shows each edge's target and warns (without failing) about an edge on the fallback
-or without a target. `hop_neighbour_enabled: false` leaves the registry fields alone.
+or without a target, and about a server name that does not resolve into the edge's /24 (the DNS check from the
+controller, on a scanned target and on `hop_reality_target` alike). `hop_neighbour_enabled: false` leaves the
+registry fields alone.
+
+There is no list of forbidden "brand" names: a famous name only passes when it really resolves into the edge's /24,
+and then the site is that name's own server.
 
 **Controller requirements.** Linux on x86_64 or aarch64 (the operator's `o1-ansible` container, root with
 `--network host`, works as is), the controller's Python (standard library only), and outbound access to
-GitHub (first run only), TCP 443 of the edge's /24, TCP 43 of `whois.cymru.com` and the probe URL. No Docker,
+GitHub (first run only), TCP 443 of the edge's /24, TCP 43 of `whois.cymru.com`, DNS (the controller's resolver,
+or UDP to `hop_neighbour_dns`) and the probe URL. No Docker,
 curl or unzip is needed: RealiTLScanner (`hop_neighbour_scanner_version`, `v0.2.3`) and xray are release
 binaries downloaded once into `hop_neighbour_cache` (`<playbook dir>/.cache/neighbour`, git-ignored, so the
 download survives a throwaway container that mounts the repo) and checked against the sha256 pinned in
@@ -834,9 +898,13 @@ address and passes every request on to the chain's edges. Runs after the hops in
    before every reload; a config it refuses stops the run and the running nginx keeps the old one.
 3. **DNS** (`showcase_dns_check`, default on). The A record `sub.<dns_zone>` → the showcase's IPv4 through
    `roles/showcase/files/dnsexit.py` on the controller. DNSExit's API cannot read records, so the record is read from
-   DNSExit's nameservers (`ns1`–`ns4.dnsexit.com`, a plain DNS query, no cache) and posted (`POST
-   https://api.dnsexit.com/dns/`, `add` with `overwrite`, TTL `showcase_dns_ttl` minutes) only when it differs, then
-   read back until the nameservers answer the new address. DNSExit allows one update in 4 minutes: the time of the
+   the zone's nameservers (a plain DNS query, no cache) and posted (`POST https://api.dnsexit.com/dns/`, `add` with
+   `overwrite`, TTL `showcase_dns_ttl` minutes) only when it differs, then read back until the nameservers answer the
+   new address. DNSExit serves different zones from different servers (a free `<name>.<their domain>` answers from
+   its parent's `ns11`/`ns13` while `ns1` says SERVFAIL, #64), so the nameservers are found through the controller's
+   resolvers (`/etc/resolv.conf`): the NS records of `dns_zone`, else of its parent, and so on. Only an authoritative
+   answer counts: SERVFAIL, REFUSED or an answer without the AA flag means that server did not answer, and the next
+   one is asked. `showcase_dns_nameservers` (and the panel's `panel_vpn_name_nameservers`) name the servers instead. DNSExit allows one update in 4 minutes: the time of the
    last post is kept in `.cache/dnsexit/state.json` next to the playbooks, and a post that comes sooner waits. The key
    (`dnsexit_api_key` in the vault) reaches the script on stdin, never in a command line or the output. Without a key
    the record is only read, and a mismatch is a `WARNING`: set it by hand. The record is never deleted.
@@ -867,6 +935,11 @@ domain>` in `group_vars/all/main.yml`; `dnsexit_api_key` in the vault (or the A 
 `ansible-playbook -i inventories/<profile> site.yml --tags showcase,verify`. The panel's public address for
 subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase: role panel sets it to
 `https://sub.<dns_zone>` (`--tags panel`), see [Domain](#domain-public-subscription-address-and-vpn-name).
+
+The showcase is the last play of `site.yml` and of `verify.yml` (#64). When every host of a play fails, Ansible ends
+the whole run, and the showcase is a single host that depends on services outside the installation (DNSExit, Let's
+Encrypt); last, a failing showcase leaves the panel, the hops and the monitoring converged and checked. Nothing before
+it needs it: role panel takes the showcase's address from the inventory.
 
 The edges limit and ban by client address too, and every request through the showcase comes from the showcase's
 address. Its traffic would count against one address on every edge (30 a minute), and ten unknown subscriptions in ten
@@ -966,21 +1039,21 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `awg_v3` (AmneziaWG 3.0) the server's `/etc/amnezia/amneziawg/awg0.conf` has the panel's `HeaderProtectionKey`, S1-S4 and 3.0 fields, and the `.conf` the panel hands a client (`awg_verify_client`, default the first enabled AWG client) the same key (a failure otherwise), a `WARNING` for a server without a key or with S1-S4 below 12 (it waits for `awg_obfuscation_apply`) and for a kernel module without 3.0; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
-| showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | all (DNS) | one lookup the way the libc stub resolver does it (`roles/common/files/dnscheck.py time`: the `nameserver`s of `/etc/resolv.conf` in order, each waited for the file's `timeout`, `attempts` rounds; the root's NS records): slower than `common_dns_slow_ms` (1000 ms) or no answer is a `WARNING` naming the servers that did not answer, never a failure; see [DNS servers](#dns-servers). `verify_dns: false` skips it |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+| showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 
 ## Prerequisites
 
 - Python 3.12+ on the controller; `pip install -r requirements.txt` and
   `ansible-galaxy collection install -r requirements.yml`.
 - For the [neighbour target](#neighbour-target) scan: a Linux x86_64/aarch64 controller with outbound
-  access to the edges' /24 on 443, `whois.cymru.com:43` and GitHub.
+  access to the edges' /24 on 443, `whois.cymru.com:43`, DNS and GitHub.
 - Root ssh access to every host of the profile (key-based, via the aliases above).
 - Target OS: Debian 12/13 or Ubuntu 22.04/24.04; anything else fails in role `common`.
 - The vault password.
@@ -990,7 +1063,7 @@ to look; the first group that fails ends the run.
 Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
 git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
 `mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` and
-`dnsexit_api_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
+`dnsexit_api_key` and `awg_header_protection_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
 
 ```sh
 cp group_vars/all/vault.yml.example group_vars/all/vault.yml
@@ -1109,15 +1182,16 @@ list/add/update/setEnable, the AWG server and getNewX25519Cert, the monitoring t
 install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
 certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
 neighbour target with `tests/hop/fake_neighbour.py` in place of the scanner and the handshake check — found
-and written before `setActive`, a stored target kept without a scan or rescanned when its check fails, the
+and written before `setActive`, a stored target kept without a scan or rescanned when its DNS or handshake check fails, the
 fallback with a warning and a rescan on every run, the override, its refusals, check mode; the «only 443» front
 (`PROXY_FRONT`, the innermost hop polling the panel on 443, the edge installed after its inner neighbour reported its
 front, a converged chain moved behind the front with re-joins only, a front that does not report stopping the run,
 `hop_tls` refused without the IP certificate, verify requiring 443/https in the registry); the
 panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
-wrong, and the neighbour target warnings; `tests/hop/test_neighbour_script.py`: `neighbour.py` against a fake
-RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois and a fake xray — the address list and
-limits, every filter, the ranking, the handshake check and the confirmation of the best candidates, the
+wrong, and the neighbour target warnings (a server name outside the edge's /24 included); `tests/hop/test_neighbour_script.py`:
+`neighbour.py` against a fake RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois, a fake DNS resolver
+and a fake xray — the address list and limits, every filter (names resolving into the /24 or elsewhere, through
+CNAMEs, or not at all), the `dns` command, the ranking, the handshake check and the confirmation of the best candidates, the
 pinned download; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
 the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
 idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
@@ -1164,7 +1238,7 @@ a fake `x-ui` storing what `x-ui setting` stores and `mock_dnsexit.py`'s nameser
 the address from the showcase or `sub_public_url` and compared normalised, the rest of the form and the stored key kept
 by the save, a new or hand-set or cleared key applied once (never printed), TTL and date alone, an unquoted YAML date,
 bad values refused before any write, check mode, a CLI refusal; the VPN name check of `verify.yml` (on the active edge,
-elsewhere, no answer, no active edge);
+elsewhere, no answer, no active edge, the zone's nameservers found by default);
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -1179,7 +1253,9 @@ check mode, the failure message, the fallback written, the warnings; verify's DN
 `tests/showcase/test_dnsexit_script.py`: `dnsexit.py` against `tests/showcase/mock_dnsexit.py` (DNSExit's API and an
 authoritative nameserver) — a record already right (no post), wrong or missing (one post, read back), the zone apex, a
 refusal and a wrong key (the key never printed), the 4-minute limit across runs, a silent nameserver (the state
-decides), the next nameserver, `--check-only`, the key on stdin, bad arguments;
+decides), the next nameserver, SERVFAIL and answers without the AA flag taken for no answer, the zone's nameservers
+found through a resolver above the zone (a SERVFAIL server first, then the one serving it; a silent resolver; given
+nameservers skip the search), `--check-only`, the key on stdin, bad arguments;
 `tests/showcase/test_showcase_role.py`: role showcase with a real nginx started from a temp dir on free ports, HTTPS
 stand-ins for the edges, `mock_panel.py` and `mock_dnsexit.py` — the panel's paths (clash off), the edges active first,
 a redirect and an error walked past to the third edge with its headers, a down edge skipped, unknown subscriptions

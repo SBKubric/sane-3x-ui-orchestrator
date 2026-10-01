@@ -1,8 +1,10 @@
 ---
 # verify.yml on the panel host, with vpn_name set: the VPN name's A record, read from DNSExit's nameservers (role
-# showcase's files/dnsexit.py --check-only on the controller: an authoritative answer, no cache), against the address of
-# the active edge in the chain registry. Only warnings: after an edge switch the panel moves the record at most once in
-# 4 minutes (DNSExit's limit), and resolvers keep the old answer for vpnNameTtl minutes. Read-only; needs api_login.
+# showcase's files/dnsexit.py --check-only on the controller: an authoritative answer, no cache; the servers are the
+# zone's NS records, found through the controller's resolvers unless panel_vpn_name_nameservers names them), against the
+# address of the active edge in the chain registry. Only warnings: after an edge switch the panel moves the record at
+# most once in 4 minutes (DNSExit's limit), and resolvers keep the old answer for vpnNameTtl minutes. Read-only; needs
+# api_login.
 - name: Read the chain registry for the active edge
   ansible.builtin.uri:
     url: "{{ panel_api_url }}panel/api/chain/list"

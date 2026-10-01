@@ -133,6 +133,32 @@ panel_awg_mimic_custom: "{{ awg_mimic_custom | default({}) }}"
 panel_awg_obfuscation: "{{ awg_obfuscation | default({}) }}"
 panel_awg_obfuscation_apply: "{{ awg_obfuscation_apply | default(false) }}"
 
+# AmneziaWG 3.0 on the same server (tasks/awg_v3.yml, README "AmneziaWG 3.0"), set and gated like the mimicry above
+# (a new server takes it, a server in use gets a WARNING until awg_obfuscation_apply), from the inventory:
+#   awg_v3                      true (default): header protection, S1-S4 >= 12, the ranges below; false: the role
+#                               leaves the panel's 3.0 fields alone
+#   awg_header_protection_key   optional, vault: the key (awg genkey); without it the panel's stays, or the panel
+#                               makes one (POST awg/server/generate?std=3) when the server has none
+#   awg_v3_params               optional {contentPaddingAddition, rekeyAfterTime, rekeyTimeout, rejectAfterTime,
+#                               keepaliveTimeout, maxHandshakeAttempts}: "N" or "low-high" over panel_awg_v3_defaults
+# Skipped with a WARNING on a host whose kernel module does not take 3.0 (awg/server/status supportsV3 false).
+panel_awg_v3: "{{ awg_v3 | default(true) }}"
+panel_awg_header_protection_key: "{{ awg_header_protection_key | default('') }}"
+panel_awg_v3_params: "{{ awg_v3_params | default({}) }}"
+# The ranges, around WireGuard's own constants (120 s rekey, 5 s retry, 180 s reject, 10 s keepalive, 18 attempts);
+# the kernel draws a value inside each one per session. The rekey window stays below the reject one.
+panel_awg_v3_defaults:
+  contentPaddingAddition: "8-40"
+  rekeyAfterTime: "105-125"
+  rekeyTimeout: "4-7"
+  rejectAfterTime: "170-195"
+  keepaliveTimeout: "8-12"
+  maxHandshakeAttempts: "15-21"
+# verify.yml: where the panel writes the AWG server's <interface>.conf, and the client whose .conf is checked for
+# the server's key (awg_verify_client: its name or email; default: the first enabled AWG client).
+panel_awg_conf_dir: /etc/amnezia/amneziawg
+panel_awg_verify_client: "{{ awg_verify_client | default('') }}"
+
 # The profile «only 443» (SBKubric/sane-3x-ui ADR 0005, tasks/front.yml). only443: the panel's own pages listen on
 # 127.0.0.1 (the admin comes through an SSH tunnel), and nginx on 443 publishes the subscriptions, the chain poll,
 # /mon/v1, <base>login and <base>panel/api/ with the box's Let's Encrypt IP certificate; the firewall leaves 443/tcp,
@@ -281,14 +307,17 @@ panel_dnsexit_key_state: "{{ panel_etc_dir }}/3ax-dnsexit-key.sha256"
 # Compared with the panel's list as a set, both normalised the way the panel stores them (filter_plugins/front_trusted.py).
 panel_front_trusted_addrs: "{{ front_trusted_addrs | default([]) }}"
 panel_front_trusted_ipv4_re: '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$'
-# verify.yml (tasks/verify_vpn_name.yml): the VPN name's A record read from DNSExit's nameservers (role showcase's
+# verify.yml (tasks/verify_vpn_name.yml): the VPN name's A record read from the zone's nameservers (role showcase's
 # files/dnsexit.py --check-only, on the controller) against the active edge's address in the chain registry; a
 # mismatch is a WARNING (the panel moves the record at most once in 4 minutes, and resolvers keep the old answer for
 # vpnNameTtl minutes).
 panel_vpn_name_zone: >-
   {{ dns_zone if dns_zone | default('') | length > 0 and (panel_vpn_name | lower | regex_replace('\.$', '')).endswith('.' ~ dns_zone)
      else panel_vpn_name | lower | regex_replace('\.$', '') | regex_replace('^[^.]*\.', '') }}
-panel_vpn_name_nameservers: [ns1.dnsexit.com, ns2.dnsexit.com, ns3.dnsexit.com, ns4.dnsexit.com]
+# The nameservers the record is read from; empty = found by dnsexit.py through the controller's resolvers (the NS
+# records of panel_vpn_name_zone, else of its parent, and so on: orchestrator#64, as role showcase's
+# showcase_dns_nameservers). A list here overrides the search.
+panel_vpn_name_nameservers: []
 panel_vpn_name_dns_state: "{{ playbook_dir }}/.cache/dnsexit/state.json"
 panel_vpn_name_dns_command: ["{{ ansible_playbook_python }}", "{{ role_path }}/../showcase/files/dnsexit.py"]
 

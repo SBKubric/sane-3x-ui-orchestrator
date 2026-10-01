@@ -1,0 +1,15 @@
+---
+# The AmneziaWG 3.0 step of verify.yml alone, against mock_panel.py (see test_awg_mimic.py).
+- name: Verify AmneziaWG 3.0
+  hosts: panel
+  gather_facts: false
+  tasks:
+    - name: Log in to the panel (verify.yml has done it before its checks)
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+
+    - name: Check awg0.conf and a client's .conf against the panel
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: verify_awg_v3

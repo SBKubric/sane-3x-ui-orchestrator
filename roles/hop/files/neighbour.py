@@ -8,18 +8,24 @@ against their sha256 (--downloads), unless --scanner / --xray name binaries to u
     neighbour.py net   --host H
         The edge's IPv4 address (H resolved) and its /24.
 
+    neighbour.py dns   --name NAME --address A [--dns HOST:PORT] [--timeout S]
+        The DNS check (orchestrator#66): ok = NAME's A records include an address in A's /24. Looked up through the
+        DNS server --dns (UDP), else the controller's resolver. The exit code is 0 either way.
+
     neighbour.py check --target HOST:PORT --server-name NAME [--tries N] [--probe-url URL]
         The Reality handshake check: a VLESS-Reality server (xray, loopback only) with the target as its target and
         NAME as its server name, a client through it, and N fetches of the probe URL through the tunnel. ok = all N
         passed. The exit code is 0 either way.
 
     neighbour.py find  --address A [--port P] [--limit N] [--threads T] [--timeout S] [--asn-whois HOST:PORT]
-                       [--cdn-asns 13335,...] [--confirm K] [check options]
+                       [--cdn-asns 13335,...] [--dns HOST:PORT] [--confirm K] [check options]
         Scans the N addresses of A's /24 nearest to A (A, .0 and .255 left out) with RealiTLScanner, then keeps the
         sites that
           - answered TLS 1.3 with ALPN h2 and X25519 (or its hybrid X25519MLKEM768) to the scanner,
           - carry a certificate name usable as a server name (not an address; a wildcard *.<domain> stands for
             www.<domain>),
+          - whose name resolves into the /24 (the dns check): a site that merely carries another site's certificate
+            would have the clients send an SNI that points away from the edge's network,
           - still answer TLS 1.3 + h2 with that name as SNI,
           - do not redirect a GET / for that name to another host,
           - are no CDN: neither a CDN's HTTP headers (Cloudflare, CloudFront, Fastly, Akamai) nor an AS listed in
@@ -89,6 +95,74 @@ def resolve(host):
     except OSError as err:
         raise Failure(f"cannot resolve {host}: {err}") from err
     return infos[0][4][0]
+
+
+def dns_query(server, name, timeout):
+    """The IPv4 addresses of name's A records from the DNS server at host:port (one UDP query, recursion desired)."""
+    host, _, port = server.rpartition(":")
+    ident = os.urandom(2)
+    question = b"".join(bytes([len(label)]) + label.encode() for label in name.rstrip(".").split(".")) + b"\x00\x00\x01\x00\x01"
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as conn:
+        conn.settimeout(timeout)
+        conn.connect((host, int(port)))
+        conn.send(ident + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question)
+        while True:
+            data = conn.recv(4096)
+            if data[:2] == ident and data[2] & 0x80:
+                break
+    rcode = data[3] & 0x0F
+    if rcode == 3:
+        raise OSError("NXDOMAIN")
+    if rcode:
+        raise OSError(f"DNS rcode {rcode}")
+    offset = 12
+    for _ in range(int.from_bytes(data[4:6], "big")):  # the questions
+        offset = skip_name(data, offset) + 4
+    addresses = []
+    for _ in range(int.from_bytes(data[6:8], "big")):  # the answers: a CNAME chain, then its A records
+        offset = skip_name(data, offset)
+        rtype, size = int.from_bytes(data[offset:offset + 2], "big"), int.from_bytes(data[offset + 8:offset + 10], "big")
+        offset += 10
+        if rtype == 1 and size == 4:
+            addresses.append(socket.inet_ntoa(data[offset:offset + 4]))
+        offset += size
+    return addresses
+
+
+def skip_name(data, offset):
+    while True:
+        size = data[offset]
+        if size & 0xC0 == 0xC0:
+            return offset + 2
+        if size == 0:
+            return offset + 1
+        offset += 1 + size
+
+
+def addresses_of(name, dns, timeout):
+    """The IPv4 addresses name resolves to: through the DNS server dns (host:port), else the controller's resolver."""
+    try:
+        if dns:
+            found = dns_query(dns, name, timeout)
+        else:
+            found = [info[4][0] for info in socket.getaddrinfo(name, None, socket.AF_INET, socket.SOCK_STREAM)]
+    except (OSError, IndexError, ValueError) as err:
+        raise Failure(f"{name} does not resolve ({err or type(err).__name__})") from err
+    if not found:
+        raise Failure(f"{name} does not resolve (no A record)")
+    return list(dict.fromkeys(found))
+
+
+def by_dns(name, network, dns, timeout):
+    """(reason or None, addresses): name must resolve to an address in network (the edge's /24). A site that carries a
+    name it is not the address of (another site's certificate) would make a client's SNI point elsewhere."""
+    try:
+        addresses = addresses_of(name, dns, timeout)
+    except Failure as err:
+        return str(err), []
+    if any(ipaddress.IPv4Address(a) in network for a in addresses):
+        return None, addresses
+    return f"{name} resolves to {', '.join(addresses)}, outside {network}", addresses
 
 
 def network_of(address):
@@ -313,6 +387,17 @@ def cmd_find(args):
         else:
             sites.append((ip, server_name(row["CERT_DOMAIN"])))
 
+    network = network_of(address)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(args.threads, 1)) as pool:
+        names = list(pool.map(lambda site: by_dns(site[1], network, args.dns, args.timeout), sites))
+    resolving = []
+    for (ip, name), (reason, _) in zip(sites, names):
+        if reason:
+            rejected.append({"ip": ip, "name": name, "reason": reason})
+        else:
+            resolving.append((ip, name))
+    sites = resolving
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(args.threads, 1)) as pool:
         answers = list(pool.map(lambda site: by_site(site[0], args.port, site[1], args.timeout), sites))
     kept = []
@@ -386,7 +471,7 @@ def reality_pair(target, server_name, server_port, client_port):
             "settings": {"vnext": [{"address": "127.0.0.1", "port": server_port, "users": [
                 {"id": CLIENT_ID, "flow": "xtls-rprx-vision", "encryption": "none"}]}]},
             "streamSettings": {"network": "tcp", "security": "reality", "realitySettings": {
-                "serverName": server_name, "fingerprint": "chrome", "publicKey": REALITY_PUBLIC,
+                "serverName": server_name, "fingerprint": "firefox", "publicKey": REALITY_PUBLIC,
                 "shortId": SHORT_ID, "spiderX": "/"}}}],
     }
     return server, client
@@ -489,6 +574,14 @@ def cmd_check(args):
     return {"target": args.target, "serverName": args.server_name, "ok": ok, "detail": detail}
 
 
+def cmd_dns(args):
+    address = resolve(args.address)
+    network = network_of(address)
+    reason, addresses = by_dns(args.name, network, args.dns, args.timeout)
+    return {"name": args.name, "address": address, "network": str(network), "addresses": addresses,
+            "ok": reason is None, "detail": reason or f"{args.name} resolves to {', '.join(addresses)} in {network}"}
+
+
 def cmd_net(args):
     address = resolve(args.host)
     return {"address": address, "network": str(network_of(address))}
@@ -499,6 +592,13 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     net = sub.add_parser("net", help="the edge's address and /24")
     net.add_argument("--host", required=True)
+
+    names = argparse.ArgumentParser(add_help=False)
+    names.add_argument("--dns", default="", help="DNS server host:port for A records (default: the system's resolver)")
+    dns = sub.add_parser("dns", parents=[names], help="does a server name resolve into an edge's /24")
+    dns.add_argument("--name", required=True)
+    dns.add_argument("--address", required=True)
+    dns.add_argument("--timeout", type=int, default=4)
 
     tools = argparse.ArgumentParser(add_help=False)
     tools.add_argument("--cache", default=str(Path.home() / ".cache" / "neighbour"))
@@ -513,7 +613,7 @@ def main(argv=None):
     check.add_argument("--target", required=True)
     check.add_argument("--server-name", required=True)
 
-    find = sub.add_parser("find", parents=[tools], help="scan the /24 of an edge for a neighbour target")
+    find = sub.add_parser("find", parents=[tools, names], help="scan the /24 of an edge for a neighbour target")
     find.add_argument("--address", required=True)
     find.add_argument("--port", type=int, default=443)
     find.add_argument("--limit", type=int, default=254)
@@ -525,7 +625,7 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     try:
-        result = {"net": cmd_net, "check": cmd_check, "find": cmd_find}[args.command](args)
+        result = {"net": cmd_net, "dns": cmd_dns, "check": cmd_check, "find": cmd_find}[args.command](args)
     except Failure as err:
         print(f"neighbour.py {args.command}: {err}", file=sys.stderr)
         return 2

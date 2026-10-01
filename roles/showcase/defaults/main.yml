@@ -59,7 +59,7 @@ showcase_acme_reload_cmd: systemctl reload nginx
 showcase_cert_min_validity: 604800
 
 # --- DNS (DNSExit) ---------------------------------------------------------------------------------------------------
-# The A record showcase_domain -> showcase_public_ip, through files/dnsexit.py on the controller: read from DNSExit's
+# The A record showcase_domain -> showcase_public_ip, through files/dnsexit.py on the controller: read from the zone's
 # nameservers, posted only when it differs, at most once in showcase_dns_min_interval seconds (DNSExit's limit).
 # Without a key the record is only read, and a mismatch is a warning: set it by hand before the certificate is issued.
 showcase_dns_manage: "{{ dnsexit_api_key | default('') | length > 0 }}"
@@ -67,7 +67,12 @@ showcase_dns_manage: "{{ dnsexit_api_key | default('') | length > 0 }}"
 showcase_dns_check: true
 showcase_dns_api_url: https://api.dnsexit.com/dns/
 showcase_dns_ttl: 60
-showcase_dns_nameservers: [ns1.dnsexit.com, ns2.dnsexit.com, ns3.dnsexit.com, ns4.dnsexit.com]
+# The nameservers the record is read from (host or host:port). Empty = found by files/dnsexit.py through the
+# controller's resolvers: the NS records of showcase_dns_zone, else of its parent, and so on (DNSExit serves zones from
+# different servers: a free <name>.<their domain> answers from its parent's ns11/ns13 while ns1 says SERVFAIL,
+# orchestrator#64). A server that answers SERVFAIL, REFUSED or without the AA flag counts as not answering. A list
+# here overrides the search, e.g. [ns11.example.net, ns13.example.net].
+showcase_dns_nameservers: []
 showcase_dns_state: "{{ playbook_dir }}/.cache/dnsexit/state.json"
 showcase_dns_min_interval: 240
 showcase_dns_wait: 180

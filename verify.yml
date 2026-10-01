@@ -15,6 +15,9 @@
 #   panel      AmneziaWG: routeViaXray on and the TPROXY inbound (awg-tproxy-in) in the config xray runs; a warning
 #              otherwise (its clients would leave directly, past ru-inside and WARP)
 #   panel      AmneziaWG: the server's I1 against awg_mimic_protocol (a warning, no failure)
+#   panel      AmneziaWG 3.0 (awg_v3): the server's awg0.conf has the panel's HeaderProtectionKey, S1-S4 and 3.0 fields, and a
+#              client's .conf (awg_verify_client) the same key; a server without header protection or with S1-S4 below 12
+#              is a warning (it waits for awg_obfuscation_apply), so is a kernel module without 3.0
 #   panel      (with vpn_name) the VPN name's A record at DNSExit's nameservers is the active edge's address (a warning,
 #              no failure: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL)
 #   panel      (with a showcase) the showcase's address is among the panel's frontTrustedAddrs (a warning, no failure)
@@ -22,14 +25,11 @@
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port (443 behind the
 #              front), fetched from the next-outer hop (the controller for an edge); an edge's neighbour target in
-#              the registry (a warning, no failure, for the shared fallback or none)
+#              the registry (a warning, no failure, for the shared fallback or none, and for a server name that does
+#              not resolve into the edge's /24)
 #   panel+hops (front_mode only443) from the controller: the box answers TCP on 443 and not on its old ports (the
 #              panel's port, the sub port 2096, the inbounds' ports), waiting up to 2 minutes; 80 closed is a warning;
 #              on the panel <base>panel/ gets the cover page, not the UI, and POST <base>login works on 443
-#   showcase   nginx config; 80 -> https://<domain>/; 443 with a certificate for the name and the cover page; an unknown
-#              subscription through every edge ends on the cover page; showcase_verify_sub comes back with
-#              Subscription-Userinfo; the fail2ban jail has an action; 80 and 443 from the controller; the DNS record
-#              (a warning, no failure)
 #   monserver  version; admin login; Settings -> Check says "Panel reachable." (so the panel speaks mon-server's
 #              contract) and counts probe links on direct and on every hop of group hops
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
@@ -37,6 +37,10 @@
 #              (mon_paths expanded over group hops: hops -> edge:/inner:<hop_name>), all UP, waiting up to 3 minutes
 #   all        DNS: one lookup the way the libc does it (resolv.conf order, timeout, attempts) slower than
 #              common_dns_slow_ms (1 s) or unanswered is a warning, no failure (verify_dns: false skips it)
+#   showcase   nginx config; 80 -> https://<domain>/; 443 with a certificate for the name and the cover page; an unknown
+#              subscription through every edge ends on the cover page; showcase_verify_sub comes back with
+#              Subscription-Userinfo; the fail2ban jail has an action; 80 and 443 from the controller; the DNS record
+#              (a warning, no failure)
 
 - name: Verify panel and chain registry
   hosts: panel
@@ -70,16 +74,6 @@
       when:
         - hop_front_mode | default(front_mode | default('only443')) == 'only443'
         - verify_front_scan | default(true) | bool
-
-- name: Verify subscription showcase
-  hosts: showcase
-  gather_facts: false
-  check_mode: false
-  tasks:
-    - name: Verify the showcase
-      ansible.builtin.include_role:
-        name: showcase
-        tasks_from: verify
 
 - name: Verify monitoring server
   hosts: monserver
@@ -122,3 +116,14 @@
         name: common
         tasks_from: verify_dns
       when: verify_dns | default(true) | bool
+
+# Last, as in site.yml (orchestrator#64): a failing showcase, a single host, would end the run before the monitoring checks.
+- name: Verify subscription showcase
+  hosts: showcase
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify the showcase
+      ansible.builtin.include_role:
+        name: showcase
+        tasks_from: verify

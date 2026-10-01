@@ -60,7 +60,7 @@ jobs:
       - name: Role panel's WARP (registration, outbound, last rule) and its verify.yml check against the mock panel API
         run: python3 tests/panel/test_warp.py
 
-      - name: Role panel's AmneziaWG protocol mimicry (I1-I5 templates, new server vs in use, apply flag) and its verify.yml check against the mock panel API
+      - name: Role panel's AmneziaWG mimicry (I1-I5, new server vs in use, apply flag) and AmneziaWG 3.0, and their verify.yml checks against the mock panel API
         run: python3 tests/panel/test_awg_mimic.py
 
       - name: Role panel's domain settings (public sub address, VPN name, DNSExit key, domain expiry, trusted front addresses) and verify.yml checks

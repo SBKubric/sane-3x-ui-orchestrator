@@ -140,7 +140,7 @@ class PanelInboundsTest(unittest.TestCase):
         self.assertTrue(vless["followChain"], "the stand's inbound follows the chain")
         self.assertEqual(reality["privateKey"], keys["privateKey"])
         self.assertEqual(reality["settings"]["publicKey"], keys["publicKey"])
-        self.assertEqual(reality["settings"]["fingerprint"], "chrome")
+        self.assertEqual(reality["settings"]["fingerprint"], "firefox")
         self.assertEqual(reality["serverNames"], ["dl.google.com"])
         self.assertEqual(len(reality["shortIds"]), 1)
         self.assertRegex(reality["shortIds"][0], r"^[0-9a-f]{16}$")
