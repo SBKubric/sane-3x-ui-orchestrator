@@ -53,6 +53,16 @@ all:
     monclient_le_staging_roots: "{{ box }}/etc/mon-client/le-staging-roots.pem"
     monclient_state_dir: "{{ box }}/var/lib/mon-client"
     monclient_cache_dir: "{{ box }}/var/cache/3ax-ui-orchestrator"
+    # showcase
+    showcase_domain: sub.example.test
+    showcase_nginx_conf_dir: "{{ box }}/etc/nginx/conf.d"
+    showcase_webroot: "{{ box }}/var/www/showcase"
+    showcase_acme_webroot: "{{ box }}/var/www/showcase-acme"
+    showcase_fail2ban_dir: "{{ box }}/etc/fail2ban"
+    showcase_cert_dir: "{{ box }}/etc/nginx/showcase-cert"
+    showcase_acme_home: "{{ box }}/root/.acme.sh"
+    showcase_nginx_reload_command: ["true"]
+    showcase_fail2ban_restart_command: ["true"]
   children:
     panel:
       hosts:
@@ -67,3 +77,6 @@ all:
     monclient:
       hosts:
         mon-client:
+    showcase:
+      hosts:
+        subgateway:

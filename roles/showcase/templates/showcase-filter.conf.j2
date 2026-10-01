@@ -1,0 +1,10 @@
+# {{ ansible_managed }} (role showcase, orchestrator#53)
+# The misses of the subscription showcase, as nginx writes them (log_format showcase_miss / showcase_limit):
+#   198.51.100.7 [26/Sep/2026:21:54:29 +0000] miss "GET /sub-abc/unknown" 404 : 404
+#   198.51.100.8 [26/Sep/2026:21:54:31 +0000] limit "GET /json/x" 200
+# fail2ban takes the date out of the line before matching, which leaves the brackets empty.
+
+[Definition]
+failregex   = ^<HOST> \[\] (?:miss|limit) "
+ignoreregex =
+datepattern = ^[^\[]*\[({DATE})

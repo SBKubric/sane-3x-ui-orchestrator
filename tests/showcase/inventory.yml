@@ -1,0 +1,82 @@
+---
+# Test inventory for role showcase (roles/showcase) and its verify.yml step: every host is local. The showcase box is a
+# directory (SHOWCASE_TEST_ROOT) with a real nginx started from it on free ports (tests/showcase/nginxctl, written by
+# the test), the edges are local HTTPS stand-ins on 127.0.0.1, the panel is tests/hop/mock_panel.py and DNSExit
+# tests/showcase/mock_dnsexit.py. Driven by test_showcase_role.py.
+all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    t: "{{ lookup('ansible.builtin.env', 'SHOWCASE_TEST_ROOT') }}"
+    # Vault values and the API endpoint of role panel's api_login, pointed at the mock.
+    panel_user: admin
+    panel_password: secret-pass
+    panel_port: 2053
+    panel_base_path: /base/
+    panel_api_url: "http://127.0.0.1:{{ lookup('ansible.builtin.env', 'SHOWCASE_PANEL_PORT') }}/base/"
+    panel_api_ca_path: /etc/ssl/certs/ca-certificates.crt
+  children:
+    panel:
+      hosts:
+        real:
+    hops:
+      hosts:
+        bridge:
+          hop_role: inner
+          hop_position: 1
+          hop_host: 127.0.0.9
+        proxy:
+          hop_role: edge
+          hop_host: "{{ lookup('ansible.builtin.env', 'EDGE_HOST') | default('127.0.0.1', true) }}"
+          hop_front_mode: "{{ lookup('ansible.builtin.env', 'EDGE_FRONT') | default('off', true) }}"
+          hop_sub_port: "{{ lookup('ansible.builtin.env', 'EDGE_PORT_proxy') | default(2096, true) | int }}"
+        proxy2:
+          hop_role: edge
+          hop_active: true
+          hop_host: "{{ lookup('ansible.builtin.env', 'EDGE_HOST') | default('127.0.0.1', true) }}"
+          hop_front_mode: "{{ lookup('ansible.builtin.env', 'EDGE_FRONT') | default('off', true) }}"
+          hop_sub_port: "{{ lookup('ansible.builtin.env', 'EDGE_PORT_proxy2') | default(2096, true) | int }}"
+        proxy3:
+          hop_role: edge
+          hop_host: "{{ lookup('ansible.builtin.env', 'EDGE_HOST') | default('127.0.0.1', true) }}"
+          hop_front_mode: "{{ lookup('ansible.builtin.env', 'EDGE_FRONT') | default('off', true) }}"
+          hop_sub_port: "{{ lookup('ansible.builtin.env', 'EDGE_PORT_proxy3') | default(2096, true) | int }}"
+    showcase:
+      hosts:
+        subgateway:
+          showcase_domain: sub.example.test
+          showcase_dns_zone: example.test
+          showcase_public_ip: 127.0.0.1
+          showcase_tls: manual
+          showcase_cert: "{{ t }}/manual/fullchain.pem"
+          showcase_key: "{{ t }}/manual/privkey.pem"
+          showcase_cert_dir: "{{ t }}/cert"
+          showcase_acme_home: "{{ t }}/root/.acme.sh"
+          showcase_acme_install_url: "file://{{ t }}/acme-install.sh"
+          showcase_acme_webroot: "{{ t }}/acme"
+          showcase_acme_reload_cmd: "true"
+          showcase_install_packages: false
+          showcase_manage_services: false
+          showcase_listen_http: "{{ lookup('ansible.builtin.env', 'SHOWCASE_HTTP_PORT') | int }}"
+          showcase_listen_https: "{{ lookup('ansible.builtin.env', 'SHOWCASE_HTTPS_PORT') | int }}"
+          showcase_listen_ipv6: false
+          showcase_nginx_conf_dir: "{{ t }}/conf.d"
+          showcase_nginx_default_site: "{{ t }}/sites-enabled/default"
+          showcase_nginx_test_command: ["{{ t }}/nginxctl", test]
+          showcase_nginx_reload_command: ["{{ t }}/nginxctl", reload]
+          showcase_fail2ban_restart_command: ["{{ t }}/fake-fail2ban"]
+          showcase_fail2ban_dir: "{{ t }}/fail2ban"
+          showcase_fail2ban_banaction: iptables-multiport
+          showcase_webroot: "{{ t }}/www"
+          showcase_welcome_pages: ["{{ t }}/welcome/index.nginx-debian.html"]
+          showcase_miss_log: "{{ t }}/log/miss.log"
+          showcase_edge_connect_timeout: 2s
+          showcase_edge_read_timeout: 5s
+          showcase_dns_check: false
+          showcase_dns_api_url: "{{ lookup('ansible.builtin.env', 'DNSEXIT_TEST_API') }}"
+          showcase_dns_nameservers: ["{{ lookup('ansible.builtin.env', 'DNSEXIT_TEST_NS') }}"]
+          showcase_dns_state: "{{ t }}/dnsexit-state.json"
+          showcase_dns_wait: 3
+          showcase_verify_validate_certs: false
+          showcase_verify_retries: 2
+          showcase_verify_delay: 1

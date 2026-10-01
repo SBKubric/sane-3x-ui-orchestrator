@@ -1,13 +1,14 @@
 ---
 # Destroys the installation on every host of the profile so that site.yml can start from scratch:
 #   ansible-playbook -i inventories/<profile> wipe.yml -e wipe_confirm=yes
-# Refuses to run without wipe_confirm=yes. One play per group, outside in (monclient -> monserver -> hops
+# Refuses to run without wipe_confirm=yes. One play per group, outside in (showcase -> monclient -> monserver -> hops
 # -> panel); an empty group is skipped, a box with nothing installed reports ok, a second wipe changes
 # nothing. What each group loses is in roles/<role>/tasks/wipe.yml and the role's *_wipe_* defaults.
 # Kept unless asked (Let's Encrypt limits, see README):
 #   -e hop_wipe_le_cert=true         also delete the hops' LE IP certificates (/root/cert/ip, acme.sh)
 #   -e monserver_wipe_certs=true     also delete mon-server's ACME certificates (<data dir>/certs)
-# Tags as in site.yml (monclient, monserver, hops, panel) wipe some groups only.
+#   -e showcase_wipe_cert=true       also delete the showcase's certificate and its acme.sh renewal
+# Tags as in site.yml (showcase, monclient, monserver, hops, panel) wipe some groups only.
 
 - name: Require explicit wipe confirmation
   hosts: localhost
@@ -23,6 +24,16 @@
         fail_msg: "wipe.yml deletes panel, chain and monitoring state; rerun with -e wipe_confirm=yes"
         success_msg: "wipe confirmed"
         quiet: true
+
+- name: Wipe subscription showcase
+  hosts: showcase
+  gather_facts: false
+  tags: [showcase]
+  tasks:
+    - name: Wipe the showcase
+      ansible.builtin.include_role:
+        name: showcase
+        tasks_from: wipe
 
 - name: Wipe monitoring clients
   hosts: monclient

@@ -5,7 +5,7 @@ Ansible that deploys a whole 3ax-ui installation from an inventory: the panel
 monitoring ([SBKubric/3ax-ui-monitoring](https://github.com/SBKubric/3ax-ui-monitoring): mon-server and
 mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric/3ax-ui-monitoring/issues/55).
 
-> Status: roles `common`, `panel`, `hop`, `monserver` and `monclient`, `wipe.yml` and `verify.yml` are real;
+> Status: roles `common`, `panel`, `hop`, `monserver`, `monclient` and `showcase`, `wipe.yml` and `verify.yml` are real;
 > the first full stand run (`wipe.yml` + `site.yml` of `stand-full` to a green `verify.yml`) is #5. The default
 > profile is [«only 443»](#front-only-443) (#21).
 
@@ -15,7 +15,8 @@ mon-client). Design: [SBKubric/3ax-ui-monitoring#55](https://github.com/SBKubric
 ansible.cfg            roles path, root over ssh, no default inventory
 requirements.txt       ansible-core + ansible-lint (pinned)
 requirements.yml       collections (pinned)
-site.yml               converge: common -> panel -> hops -> panel inbounds again -> monserver -> monclient -> verify.yml
+site.yml               converge: common -> panel -> hops -> panel inbounds again -> showcase -> monserver -> monclient
+                       -> verify.yml
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
                        (steps: roles/<role>/tasks/wipe.yml)
 verify.yml             non-destructive checks; also imported last by site.yml (tag verify)
@@ -36,20 +37,25 @@ roles/
   monserver/           release binary, bootstrap config, unit, admin account, Settings via the admin API;
                        tasks/api_login.yml is the mon-server admin API login helper for other roles
   monclient/           release binaries (mon-client, xray), unit, LE staging roots, pairing auto-approval
+  showcase/            the subscription showcase sub.<dns_zone>: nginx passing the panel's subscription paths to the
+                       edges in turn, LE certificate (HTTP-01), limits + fail2ban, the DNSExit record (files/dnsexit.py)
 tests/hop/             role hop and the chain part of verify.yml against a mock of the panel API, and
                        neighbour.py against a fake scanner, fake xray and local sites (CI)
 tests/panel/           role panel's inbounds, its «only 443» front, geosite ru-inside (with a local source of the
                        list) and the targets part of verify.yml against the same mock and local fakes (CI)
 tests/monserver/       role monserver's Settings against a mock of mon-server's admin API, verify's probe links (CI)
 tests/common/          verify.yml's «only 443» check (port scan, cover page, API login) on local listeners (CI)
+tests/showcase/        role showcase with a real nginx against local edges, the mock panel API and a stand-in for
+                       DNSExit (API and nameserver); dnsexit.py on its own (CI)
 tests/wipe/            wipe.yml on local stand-in boxes (CI)
 ```
 
 ## Profiles
 
 A profile is an inventory. Every profile has the groups `panel` (one host), `hops`, `monserver`
-(zero or one host) and `monclient`; `site.yml` has one play per group, and an empty group is simply
-skipped. So the chain-only profile is the full one with empty monitoring groups.
+(zero or one host), `monclient` and `showcase` (zero or one host, see [Role showcase](#role-showcase)); `site.yml`
+has one play per group, and an empty group is simply skipped. So the chain-only profile is the full one with empty
+monitoring groups. Neither stand profile has a showcase yet (an example entry is commented out in `hosts.yml`).
 
 | Profile | Groups filled | Use |
 |---|---|---|
@@ -75,6 +81,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `warp_enabled` | `true` (default): the panel's clients leave through Cloudflare WARP, see [WARP](#warp); `false` takes our rule and outbound out |
 | `warp_mtu` | MTU of the WARP outbound (default `1280`) |
 | `warp_license` | WARP+ license key, optional (default empty: the free account); keep it in the vault |
+| `dns_zone` | the project's domain at DNSExit, e.g. `example.com` (not set on the stand); the showcase answers `sub.<dns_zone>`, see [Role showcase](#role-showcase) |
 | `awg_route_via_xray` | `true` (default): the AmneziaWG server's `routeViaXray`, so AWG clients go through xray's routing (ru-inside, WARP); `false` = the kernel NATs them out directly |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
@@ -707,6 +714,68 @@ Runs on every host of group `monclient` (decision #55, item 6).
 Knobs in `roles/monclient/defaults/main.yml`: `monclient_server_url`, `monclient_log_level`,
 `monclient_pairing_retries`/`monclient_pairing_delay`, `monclient_release_url`.
 
+## Role showcase
+
+The **subscription showcase** (map #52, #53): a small VPS of its own (group `showcase`, at most one host) that answers
+`sub.<dns_zone>` and nothing else. It is not a VPN entry: it hands out subscription pages and links at a permanent
+address and passes every request on to the chain's edges. Runs after the hops in `site.yml`; an empty group is skipped.
+
+1. **Inputs.** The subscription paths come from the panel's settings (`panel/setting/all` through the panel API login,
+   delegated to the panel host): `subPath` (the page's assets live under it), `subJsonPath` with `subJsonEnable`,
+   `subClashPath` with `subClashEnable`, `subTunPath`. The edges come from group `hops`: every `hop_role: edge`, the
+   one with `hop_active` first, then the others in inventory order, each by its address (`hop_host`, else its default
+   IPv4 from facts, gathered on demand): `https://<address>:443` behind its «only 443» front (a request without SNI
+   lands on the box's HTTP side, where the edges publish the same paths), else its sub port. `showcase_sub_paths`
+   and `showcase_edges` set either by hand (e.g. when the play cannot reach the panel).
+2. **nginx.** The packages `nginx` and `fail2ban`; the distro's default site off port 80; the cover page = the welcome
+   page the nginx package installed on this box (the panel's default cover, SBKubric/sane-3x-ui#160), copied to
+   `/var/www/showcase/index.html`. Port 80 (`conf.d/3ax-ui-showcase-acme.conf`) answers the ACME challenge from
+   `/var/www/showcase-acme` and sends everything else to `https://sub.<dns_zone>/` (301). nginx is tested (`nginx -t`)
+   before every reload; a config it refuses stops the run and the running nginx keeps the old one.
+3. **DNS** (`showcase_dns_check`, default on). The A record `sub.<dns_zone>` → the showcase's IPv4 through
+   `roles/showcase/files/dnsexit.py` on the controller. DNSExit's API cannot read records, so the record is read from
+   DNSExit's nameservers (`ns1`–`ns4.dnsexit.com`, a plain DNS query, no cache) and posted (`POST
+   https://api.dnsexit.com/dns/`, `add` with `overwrite`, TTL `showcase_dns_ttl` minutes) only when it differs, then
+   read back until the nameservers answer the new address. DNSExit allows one update in 4 minutes: the time of the
+   last post is kept in `.cache/dnsexit/state.json` next to the playbooks, and a post that comes sooner waits. The key
+   (`dnsexit_api_key` in the vault) reaches the script on stdin, never in a command line or the output. Without a key
+   the record is only read, and a mismatch is a `WARNING`: set it by hand. The record is never deleted.
+4. **Certificate** (`showcase_tls: letsencrypt`). acme.sh (installed if missing) issues `sub.<dns_zone>` through
+   HTTP-01 on the webroot (the name must resolve to the showcase, port 80 open), installs it into
+   `/etc/nginx/showcase-cert/` with `systemctl reload nginx` as its reload command, and renews it from its cron. A
+   certificate for the name valid for another week is kept (no ACME order). `showcase_tls: manual` takes
+   `showcase_cert`/`showcase_key` already on the box.
+5. **The showcase** (`conf.d/3ax-ui-showcase.conf`, 443). Each subscription path is passed to the first edge;
+   `proxy_intercept_errors` with `error_page` and named locations walks on to the next edge on a redirect (3xx, which
+   `proxy_next_upstream` would never retry), a refusal or an error (`showcase_failover_statuses`), a timeout or a
+   connection refused (`showcase_edge_connect_timeout` 3 s, `showcase_edge_read_timeout` 15 s); after the last one, the
+   cover page. The edge's answer goes back as it is, headers included (`Subscription-Userinfo`,
+   `Profile-Update-Interval`, `Content-Disposition`, ...); the client's `Host` goes to the edge. Every other path, the
+   bare paths without their slash included, gets the cover page (200). The leg to an edge is TLS without verification:
+   nginx's `proxy_ssl_verify` matches DNS names only, and an edge's Let's Encrypt certificate names its address (the
+   hop-to-hop legs of the chain skip it the same way).
+6. **Protection**, as on the fronts' HTTP side (SBKubric/sane-3x-ui#141): per client address 30 requests a minute with a
+   burst of 30 and 20 open at once on the subscription paths; over the limit, the cover page (200, like a miss). A
+   request that ended on the cover page after the last edge refused it (400/401/403/404: an unknown subscription) and a
+   limited one go to `/var/log/nginx/3ax-ui-showcase-miss.log`; fail2ban's jail `3ax-ui-showcase-probe` bans 10 in 10
+   minutes for an hour from 80/443 (doubling up to a day; SSH stays). Edges that fail with an error do not count.
+   Loopback and `showcase_exempt` are never limited or banned. fail2ban is restarted, not reloaded, on a change (#152).
+
+**To switch it on** (nothing of it exists on the stand yet): a Debian 12/13 or Ubuntu 22.04/24.04 VPS with ports 80
+and 443 open, as an ssh alias in group `showcase` of the profile's `hosts.yml` (e.g. `subgateway`); `dns_zone: <your
+domain>` in `group_vars/all/main.yml`; `dnsexit_api_key` in the vault (or the A record set by hand); then
+`ansible-playbook -i inventories/<profile> site.yml --tags showcase,verify`. The panel's public address for
+subscriptions (SBKubric/sane-3x-ui#224) is what makes the links point at the showcase.
+
+**Before production:** the edges limit and ban by client address too, and every request through the showcase comes
+from the showcase's address: its traffic counts against one address on every edge (30 a minute), and ten unknown
+subscriptions in ten minutes get the showcase banned there. The edges' guard must exempt the showcase's address (a
+panel change; until then keep the showcase for few clients).
+
+Knobs in `roles/showcase/defaults/main.yml`: `showcase_domain` (default `sub.<dns_zone>`), `showcase_public_ip`,
+`showcase_edges`, `showcase_sub_paths`, `showcase_failover_statuses`, the timeouts, `showcase_tls`, `showcase_acme_server`,
+`showcase_dns_*`, `showcase_limit_*`, `showcase_fail2ban_*`, `showcase_exempt`, `showcase_verify_sub`.
+
 ## Front: only 443
 
 The default profile (`front_mode: only443`; SBKubric/sane-3x-ui [ADR 0005](https://github.com/SBKubric/sane-3x-ui/blob/main/docs/adr/0005-only-443-on-every-hop.md),
@@ -766,9 +835,9 @@ first, then rerun `site.yml` with `front_mode: off`.
 ## wipe.yml
 
 Stops and deletes what `site.yml` and install.sh put on the boxes, so that the next `site.yml` starts from
-scratch (decision #55, item 4). One play per group, outside in: monclient → monserver → hops → panel;
+scratch (decision #55, item 4). One play per group, outside in: showcase → monclient → monserver → hops → panel;
 an empty group is skipped, a box with nothing installed reports `ok`, and a second wipe reports
-`changed=0`. It refuses to start without `-e wipe_confirm=yes`. Tags `monclient`, `monserver`, `hops`,
+`changed=0`. It refuses to start without `-e wipe_confirm=yes`. Tags `showcase`, `monclient`, `monserver`, `hops`,
 `panel` wipe some groups only.
 
 Every unit is stopped, disabled and removed with its drop-ins (`/etc/systemd/system/<unit>.service[.d]`),
@@ -779,6 +848,7 @@ then:
 | panel | unit `x-ui` (with the ru-inside drop-in), units `3ax-ru-inside.timer`/`.service`; `/etc/x-ui` (database `x-ui.db`, the self-signed certificate in `tls/`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the ru-inside list `/var/lib/3ax-ru-inside`, `/usr/local/sbin/3ax-ru-inside` and `/etc/3ax-ru-inside.json`; tunnel interfaces from `/etc/amnezia/amneziawg/*.conf` and `/etc/wireguard/*.conf` (taken down, configs deleted); the panel's nginx files (`stream-enabled/3ax-ui.conf`, `conf.d/3ax-ui.conf`, `http.d/3ax-ui.conf`) and its marked stream block in `nginx.conf` (nginx reloaded); firewall chain `THREEAX-IN` and its `INPUT` jumps (iptables, ip6tables); the TPROXY wiring of tunnels routed through Xray (mangle `PREROUTING` rules with `--tproxy-mark 0x1`/`0x2`, fwmark policy rules and routing tables 100/101), which a tunnel's PostDown leaves behind once the server is switched to direct routing | packages (AmneziaWG, WireGuard, nginx, sqlite3, fail2ban), the rest of nginx.conf, the front's LE IP certificate `/root/cert/ip` with acme.sh's renewal (the next `site.yml` keeps using it) |
 | hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`); fail2ban and its jails |
 | monserver | unit `mon-server`; `/usr/local/bin/mon-server`, `/etc/mon-server`, `/var/cache/3ax-ui-orchestrator/mon-server`, everything in `/var/lib/mon-server` (database: admin account, Settings, mon-client registry) | `/var/lib/mon-server/certs` (certmagic's ACME account and certificates) and the `mon-server` user that owns it; `-e monserver_wipe_certs=true` deletes the whole data dir and the user |
+| showcase | `conf.d/3ax-ui-showcase.conf` and `3ax-ui-showcase-acme.conf`, `/var/www/showcase`, `/var/www/showcase-acme`, the jail `jail.d/3ax-ui-showcase.conf` and its filter (nginx reloaded, fail2ban restarted) | the packages, the DNS record, the certificate `/etc/nginx/showcase-cert` and acme.sh's renewal of it; `-e showcase_wipe_cert=true` also deletes those and `/root/.acme.sh/<domain>[_ecc]` |
 | monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`; user and group `mon-client` | nothing |
 
 The panel's chain registry is not touched on its own: a wiped panel forgets its hops, and a kept panel
@@ -798,6 +868,7 @@ to look; the first group that fails ends the run.
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
+| showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 | monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
 
@@ -815,8 +886,8 @@ to look; the first group that fails ends the run.
 
 Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
 git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
-`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license`, and
-`vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
+`mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` and
+`dnsexit_api_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
 
 ```sh
 cp group_vars/all/vault.yml.example group_vars/all/vault.yml
@@ -846,7 +917,7 @@ ansible-playbook -i inventories/stand-full wipe.yml -e wipe_confirm=yes --ask-va
 ansible-playbook -i inventories/stand-full site.yml --ask-vault-pass
 ```
 
-Tags in `site.yml`: `common`, `panel`, `hops`, `monserver`, `monclient`, `verify`.
+Tags in `site.yml`: `common`, `panel`, `hops`, `showcase`, `monserver`, `monclient`, `verify`.
 `site.yml` only converges and never deletes state; a fresh start is always the explicit `wipe.yml`.
 
 ## Runbook: stand from scratch
@@ -978,6 +1049,19 @@ changing it with the note, idempotency, malformed inputs refused before the logi
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
 open, an old port still answering, a closed front, a closed ACME port (warning), the panel UI answering on the front,
 a failing API login;
+`tests/showcase/test_dnsexit_script.py`: `dnsexit.py` against `tests/showcase/mock_dnsexit.py` (DNSExit's API and an
+authoritative nameserver) — a record already right (no post), wrong or missing (one post, read back), the zone apex, a
+refusal and a wrong key (the key never printed), the 4-minute limit across runs, a silent nameserver (the state
+decides), the next nameserver, `--check-only`, the key on stdin, bad arguments;
+`tests/showcase/test_showcase_role.py`: role showcase with a real nginx started from a temp dir on free ports, HTTPS
+stand-ins for the edges, `mock_panel.py` and `mock_dnsexit.py` — the panel's paths (clash off), the edges active first,
+a redirect and an error walked past to the third edge with its headers, a down edge skipped, unknown subscriptions
+ending on the cover page with a miss in the log (and `fail2ban-regex` on it), edges in error not counted, other paths
+and port 80, an idempotent rerun, the limit, check mode, edges behind their front on 443, paths and edges by hand, the
+Let's Encrypt path through a fake acme.sh (issued through port 80, then kept), a manual certificate for another name,
+the DNS record posted once and only read without a key, a refused update, the refusals, a config nginx refuses left
+unloaded, the verify step (green, a known subscription missing, an edge's own page for an unknown one, nginx down, the
+DNS warning) and the wipe step;
 `tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
 the certificate flags, a repeated wipe and a bare box with `changed=0`, one group by tag; and checks that
 `wipe.yml` refuses without confirmation. The mon-server/mon-client plays of `verify.yml` have no mock and
@@ -996,7 +1080,10 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/panel/test_warp.py &&
   python3 tests/panel/test_awg_mimic.py &&
   python3 tests/monserver/test_settings.py &&
-  python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py'
+  python3 tests/common/test_verify_front.py && python3 tests/wipe/test_wipe.py &&
+  python3 tests/showcase/test_dnsexit_script.py &&
+  apt-get update -qq && apt-get install -y -qq nginx fail2ban curl openssl >/dev/null &&
+  python3 tests/showcase/test_showcase_role.py'
 ```
 
 ## License

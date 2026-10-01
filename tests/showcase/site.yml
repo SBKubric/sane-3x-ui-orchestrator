@@ -1,0 +1,11 @@
+---
+# Role showcase, or one of its task files (showcase_test_tasks: verify | wipe), against local stand-ins (see
+# test_showcase_role.py).
+- name: Subscription showcase
+  hosts: showcase
+  gather_facts: false
+  tasks:
+    - name: Run the role or the task file under test
+      ansible.builtin.include_role:
+        name: showcase
+        tasks_from: "{{ showcase_test_tasks | default('main') }}"

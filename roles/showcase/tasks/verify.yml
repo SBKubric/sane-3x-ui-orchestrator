@@ -1,0 +1,186 @@
+---
+# verify.yml on the showcase host. Read-only. On the box, against 127.0.0.1 with the showcase's name (curl --resolve,
+# no DNS needed): nginx accepts its config; port 80 redirects to https://<domain>/ and the challenge path stays on 80;
+# 443 answers with a certificate for the name (verified unless showcase_verify_validate_certs is false) and the cover
+# page on / and on a subscription path no edge knows (the request went through every edge and ended on the cover, not
+# on an error); with showcase_verify_sub, that subscription comes back from an edge with its headers. fail2ban runs the
+# showcase's jail with an action. From the controller: 80 and 443 answer on the public address. DNS: the record at the
+# nameservers (a warning when it is not the showcase's address).
+# Each verify run costs every edge one miss from the showcase's address (the unknown subscription).
+- name: Test nginx's config
+  ansible.builtin.command:
+    argv: "{{ showcase_nginx_test_command }}"
+  register: showcase_verify_nginx
+  changed_when: false
+  failed_when: false
+
+- name: Require a config nginx accepts
+  ansible.builtin.assert:
+    that:
+      - showcase_verify_nginx.rc == 0
+    fail_msg: "nginx refuses its config on {{ inventory_hostname }}: {{ (showcase_verify_nginx.stderr_lines + showcase_verify_nginx.stdout_lines)[-10:] }}"
+    success_msg: "nginx config ok"
+
+# The subscription paths as the showcase passes them: the locations of its config.
+- name: Read the showcase's config
+  ansible.builtin.slurp:
+    src: "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase.conf"
+  register: showcase_verify_conf
+  failed_when: false
+
+- name: Require the showcase's config
+  ansible.builtin.assert:
+    that:
+      - showcase_verify_conf.content is defined
+      - showcase_verify_conf.content | b64decode is search('(?m)^\\s*location /\\S+ \\{')
+    fail_msg: "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase.conf on {{ inventory_hostname }} is missing or passes no path; run site.yml"
+    quiet: true
+
+- name: Read the cover page
+  ansible.builtin.slurp:
+    src: "{{ showcase_webroot }}/index.html"
+  register: showcase_verify_cover
+
+- name: Keep the request settings
+  ansible.builtin.set_fact:
+    showcase_verify_cover_text: "{{ showcase_verify_cover.content | b64decode | trim }}"
+    showcase_verify_probe_path: "{{ showcase_verify_conf.content | b64decode | regex_findall('(?m)^\\s*location (/\\S+) \\{') | first }}"
+    showcase_verify_https: "https://{{ showcase_domain }}{{ '' if showcase_listen_https | int == 443 else ':' ~ showcase_listen_https }}"
+    showcase_verify_curl: >-
+      {{ ['curl', '-sS', '--max-time', '30',
+          '--resolve', showcase_domain ~ ':' ~ showcase_listen_http ~ ':127.0.0.1',
+          '--resolve', showcase_domain ~ ':' ~ showcase_listen_https ~ ':127.0.0.1']
+         + ([] if showcase_verify_validate_certs | bool else ['--insecure']) }}
+    showcase_verify_get: ['-o', '-', '-D', '-']
+
+- name: Port 80 redirects to https
+  ansible.builtin.command:
+    argv: "{{ showcase_verify_curl + ['-o', '/dev/null', '-w', '%{http_code} %{redirect_url}',
+           'http://' ~ showcase_domain ~ ':' ~ showcase_listen_http ~ '/showcase-verify?x=1'] }}"
+  register: showcase_verify_http
+  changed_when: false
+  failed_when: false
+  until: showcase_verify_http.rc == 0
+  retries: "{{ showcase_verify_retries }}"
+  delay: "{{ showcase_verify_delay }}"
+
+- name: Require the redirect
+  ansible.builtin.assert:
+    that:
+      - (showcase_verify_http.stdout | trim).endswith('301 ' ~ showcase_verify_https ~ '/showcase-verify?x=1')
+    fail_msg: >-
+      http://{{ showcase_domain }}/ on {{ inventory_hostname }} does not redirect to {{ showcase_verify_https }}/:
+      {{ showcase_verify_http.stdout | default('') | trim | regex_replace('\s+', ' ') }} {{ showcase_verify_http.stderr | default('') }}
+    success_msg: "port {{ showcase_listen_http }} redirects to {{ showcase_verify_https }}/"
+
+- name: Ask 443 for the cover page
+  ansible.builtin.command:
+    argv: "{{ showcase_verify_curl + showcase_verify_get + [showcase_verify_https ~ '/'] }}"
+  register: showcase_verify_root
+  changed_when: false
+  failed_when: false
+  until: showcase_verify_root.rc == 0
+  retries: "{{ showcase_verify_retries }}"
+  delay: "{{ showcase_verify_delay }}"
+
+- name: Require the cover page on 443
+  ansible.builtin.assert:
+    that:
+      - showcase_verify_root.rc == 0
+      - showcase_verify_root.stdout is match('HTTP/\S+ 200')
+      - showcase_verify_root.stdout.endswith(showcase_verify_cover_text)
+    fail_msg: >-
+      {{ showcase_verify_https }}/ on {{ inventory_hostname }} is not the cover page (rc {{ showcase_verify_root.rc }}):
+      {{ showcase_verify_root.stderr | default('') }} {{ showcase_verify_root.stdout | default('') | truncate(300) }}
+    success_msg: "443 answers {{ showcase_domain }} with a trusted certificate and the cover page"
+
+- name: Ask for a subscription no edge knows
+  ansible.builtin.command:
+    argv: "{{ showcase_verify_curl + showcase_verify_get + [showcase_verify_https ~ showcase_verify_probe_path ~ 'showcase-verify-' ~ (999999 | random)] }}"
+  register: showcase_verify_unknown
+  changed_when: false
+  failed_when: false
+
+- name: Require the cover page after the edges
+  ansible.builtin.assert:
+    that:
+      - showcase_verify_unknown.rc == 0
+      - showcase_verify_unknown.stdout is match('HTTP/\S+ 200')
+      - showcase_verify_unknown.stdout.endswith(showcase_verify_cover_text)
+    fail_msg: >-
+      an unknown subscription under {{ showcase_verify_probe_path }} did not end on the cover page (an edge answered
+      something else, or nginx an error): {{ showcase_verify_unknown.stdout | default('') | truncate(300) }}
+    success_msg: "an unknown subscription went through the edges and ended on the cover page"
+
+- name: Ask for the known subscription
+  when: showcase_verify_sub | length > 0
+  block:
+    - name: Fetch the subscription through the showcase
+      ansible.builtin.command:
+        argv: "{{ showcase_verify_curl + showcase_verify_get + [showcase_verify_https ~ showcase_verify_probe_path ~ showcase_verify_sub] }}"
+      register: showcase_verify_known
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Require the subscription from an edge
+      ansible.builtin.assert:
+        that:
+          - showcase_verify_known.rc == 0
+          - showcase_verify_known.stdout is match('HTTP/\S+ 200')
+          - showcase_verify_known.stdout is search('(?im)^subscription-userinfo:')
+          - not showcase_verify_known.stdout.endswith(showcase_verify_cover_text)
+        fail_msg: >-
+          the subscription showcase_verify_sub under {{ showcase_verify_probe_path }} did not come back from an edge with
+          Subscription-Userinfo (HTTP {{ showcase_verify_known.stdout | default('') | regex_search('HTTP/\S+ [0-9]+') }})
+        success_msg: "the known subscription comes back from an edge with its headers"
+
+- name: Read the showcase's jail
+  ansible.builtin.command:
+    argv: [fail2ban-client, get, 3ax-ui-showcase-probe, actions]
+  register: showcase_verify_jail
+  changed_when: false
+  failed_when: false
+  when:
+    - showcase_fail2ban_enabled | bool
+    - showcase_manage_services | bool
+
+- name: Require the jail with an action
+  ansible.builtin.assert:
+    that:
+      - showcase_verify_jail.rc == 0
+      - showcase_verify_jail.stdout is search('has the following actions:\s*\S')
+    fail_msg: >-
+      fail2ban does not run the jail 3ax-ui-showcase-probe with an action on {{ inventory_hostname }}:
+      {{ showcase_verify_jail.stdout | default('') }} {{ showcase_verify_jail.stderr | default('') }}; run site.yml
+    success_msg: "fail2ban runs 3ax-ui-showcase-probe"
+  when: showcase_verify_jail is not skipped
+
+- name: Try 80 and 443 from the controller
+  ansible.builtin.wait_for:
+    host: "{{ showcase_public_ip }}"
+    port: "{{ item }}"
+    timeout: 10
+  loop: ["{{ showcase_listen_http }}", "{{ showcase_listen_https }}"]
+  delegate_to: localhost
+  become: false
+
+- name: Read the DNS record
+  ansible.builtin.command:
+    argv: >-
+      {{ showcase_dns_command
+         + ['--zone', showcase_dns_zone, '--name', showcase_domain, '--content', showcase_public_ip,
+            '--nameservers', showcase_dns_nameservers | join(','), '--state', showcase_dns_state, '--check-only'] }}
+  delegate_to: localhost
+  become: false
+  register: showcase_verify_dns
+  changed_when: false
+  failed_when: false
+  when: showcase_dns_check | bool
+
+- name: Show the DNS record
+  ansible.builtin.debug:
+    msg: >-
+      {%- set answer = showcase_verify_dns.stdout | default('{}') | from_json if showcase_verify_dns.stdout | default('') is match('^\{') else {} -%}
+      {{ '' if answer.action | default('') == 'none' else 'WARNING: ' }}DNS {{ answer.message | default(showcase_verify_dns.stderr | default('no answer')) }}
+  when: showcase_dns_check | bool

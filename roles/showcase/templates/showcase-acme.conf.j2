@@ -1,0 +1,23 @@
+# {{ ansible_managed }} (role showcase, orchestrator#53)
+# Port 80 of the subscription showcase: the ACME HTTP-01 challenge for {{ showcase_domain }}, everything else to https.
+# It stays whatever the certificate's state: acme.sh renews through it.
+
+server {
+    listen {{ showcase_listen_http }} default_server;
+{% if showcase_listen_ipv6 | bool %}
+    listen [::]:{{ showcase_listen_http }} default_server;
+{% endif %}
+    server_name _;
+
+    access_log off;
+    server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ showcase_acme_webroot }};
+        default_type text/plain;
+    }
+
+    location / {
+        return 301 https://{{ showcase_domain }}{{ '' if showcase_listen_https | int == 443 else ':' ~ showcase_listen_https }}$request_uri;
+    }
+}

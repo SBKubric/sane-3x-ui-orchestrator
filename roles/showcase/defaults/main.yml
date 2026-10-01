@@ -1,0 +1,129 @@
+---
+# Role showcase (SBKubric/sane-3x-ui-orchestrator#53, map #52): the subscription showcase, a small VPS of its own that
+# answers sub.<domain> and nothing else. nginx on it passes the panel's subscription paths to the edges of the chain,
+# the active edge first, and moves on to the next edge on a redirect or an error; every other path, and a request no
+# edge answered, gets the distro's nginx welcome page (the cover of SBKubric/sane-3x-ui#160). It is not a VPN entry.
+# Runs on the host of group `showcase` (zero hosts = skipped).
+#
+# Inputs (inventories/<profile>/group_vars/all/main.yml or group_vars/showcase.yml):
+#   dns_zone             the domain DNSExit hosts, e.g. example.com (shared with the VPN name, #52)
+#   showcase_domain      the showcase's name, default sub.<dns_zone>
+# From the vault (group_vars/all/vault.yml):
+#   dnsexit_api_key      DNSExit API key; empty = the DNS record is left to the owner (read, never written)
+#   panel_*              the panel API login (role panel's api_login) that reads the subscription paths
+# Read from the inventory: group hops (the edges, hop_active first), the panel's settings (subscription paths).
+
+# The showcase's public name and the zone it lives in.
+showcase_domain: "{{ ('sub.' ~ dns_zone) if dns_zone | default('') | length > 0 else '' }}"
+showcase_dns_zone: "{{ dns_zone | default('') }}"
+# The showcase's public IPv4: the A record points here.
+showcase_public_ip: "{{ ansible_facts['default_ipv4']['address'] }}"
+
+# --- edges -----------------------------------------------------------------------------------------------------------
+# Where the subscription paths are passed, in order. Empty = derived from group hops: every hop with hop_role edge,
+# the one with hop_active first, then the others in inventory order. Each edge is reached by address, as the chain
+# knows it (hop_host, else the hop's default IPv4 from facts, gathered on demand): https on 443 behind its «only 443»
+# front, where a request without SNI lands on the box's HTTP side, else its sub port (hop_sub_port, scheme by hop_tls).
+# An entry of your own: {name: proxy, address: 203.0.113.7, port: 443, scheme: https}.
+showcase_edges: []
+# How long one edge may take before the next is tried.
+showcase_edge_connect_timeout: 3s
+showcase_edge_read_timeout: 15s
+# Answers of an edge that send the request on to the next edge (all edges failed = the cover page). 3xx are listed on
+# purpose: proxy_next_upstream never retries a redirect, proxy_intercept_errors + error_page does.
+showcase_failover_statuses: [300, 301, 302, 303, 307, 308, 400, 401, 403, 404, 405, 408, 410, 429, 500, 502, 503, 504]
+# An edge's IP certificate names an address, which nginx's proxy_ssl_verify cannot match (it checks DNS names only),
+# and the edges' HTTP side answers only requests without SNI: the leg to the edge is TLS without verification, as the
+# hop-to-hop legs of the chain are.
+
+# --- subscription paths ----------------------------------------------------------------------------------------------
+# The paths passed to the edges. Empty = read from the panel's settings (panel/setting/all through role panel's API
+# login, delegated to the panel host): subPath (the page's assets live under it), subJsonPath with subJsonEnable,
+# subClashPath with subClashEnable, subTunPath. Set it by hand (e.g. [/sub-abc123/, /json/, /tun/]) when the play
+# cannot reach the panel.
+showcase_sub_paths: []
+
+# --- certificate -----------------------------------------------------------------------------------------------------
+# letsencrypt = acme.sh issues sub.<domain> through HTTP-01 on nginx's webroot (port 80) and renews it from its cron;
+# manual = showcase_cert / showcase_key already on the box.
+showcase_tls: letsencrypt
+showcase_cert: ""
+showcase_key: ""
+showcase_cert_dir: /etc/nginx/showcase-cert
+showcase_acme_home: /root/.acme.sh
+showcase_acme_install_url: https://get.acme.sh
+showcase_acme_server: letsencrypt
+showcase_acme_webroot: /var/www/showcase-acme
+showcase_acme_reload_cmd: systemctl reload nginx
+# A certificate for showcase_domain valid for at least this many more seconds is kept (no ACME order).
+showcase_cert_min_validity: 604800
+
+# --- DNS (DNSExit) ---------------------------------------------------------------------------------------------------
+# The A record showcase_domain -> showcase_public_ip, through files/dnsexit.py on the controller: read from DNSExit's
+# nameservers, posted only when it differs, at most once in showcase_dns_min_interval seconds (DNSExit's limit).
+# Without a key the record is only read, and a mismatch is a warning: set it by hand before the certificate is issued.
+showcase_dns_manage: "{{ dnsexit_api_key | default('') | length > 0 }}"
+# false = do not even read the record (a stand without a domain, the tests).
+showcase_dns_check: true
+showcase_dns_api_url: https://api.dnsexit.com/dns/
+showcase_dns_ttl: 60
+showcase_dns_nameservers: [ns1.dnsexit.com, ns2.dnsexit.com, ns3.dnsexit.com, ns4.dnsexit.com]
+showcase_dns_state: "{{ playbook_dir }}/.cache/dnsexit/state.json"
+showcase_dns_min_interval: 240
+showcase_dns_wait: 180
+showcase_dns_script: "{{ role_path }}/files/dnsexit.py"
+showcase_dns_command: ["{{ ansible_playbook_python }}", "{{ showcase_dns_script }}"]
+
+# --- protection (as the HTTP side of the fronts, SBKubric/sane-3x-ui#141) -----------------------------------------------
+# Per client address: 30 requests a minute with a burst of 30 and 20 open at once on the subscription paths; a request
+# over the limit gets the cover page (200, like a miss) and is logged. Misses (an edge's 400/401/403/404 that ended on
+# the cover page, a limited request) go to showcase_miss_log; fail2ban bans 10 in 10 minutes for an hour from 80/443,
+# doubling for a repeat offender up to a day. Addresses (IPs, CIDRs) never limited or banned, besides loopback (verify.yml
+# asks from the box itself):
+showcase_exempt: []
+showcase_exempt_loopback: true
+showcase_limit_rate: 30r/m
+showcase_limit_burst: 30
+showcase_limit_conns: 20
+showcase_miss_log: /var/log/nginx/3ax-ui-showcase-miss.log
+showcase_fail2ban_enabled: true
+showcase_fail2ban_dir: /etc/fail2ban
+showcase_fail2ban_maxretry: 10
+showcase_fail2ban_findtime: 10m
+showcase_fail2ban_bantime: 1h
+showcase_fail2ban_bantime_max: 24h
+# Empty = iptables-multiport where iptables is, nftables-multiport elsewhere (as the panel picks it).
+showcase_fail2ban_banaction: ""
+
+# --- nginx -----------------------------------------------------------------------------------------------------------
+showcase_packages: [nginx, fail2ban]
+showcase_install_packages: true
+# false = leave starting nginx and fail2ban to someone else (the tests); the commands below still reload them.
+showcase_manage_services: true
+showcase_listen_http: 80
+showcase_listen_https: 443
+showcase_listen_ipv6: true
+showcase_nginx_conf_dir: /etc/nginx/conf.d
+# The distro's default site takes port 80 as default_server too: it is disabled (the link only, the file stays).
+showcase_nginx_default_site: /etc/nginx/sites-enabled/default
+showcase_nginx_test_command: [nginx, -t]
+showcase_nginx_reload_command: [systemctl, reload, nginx]
+showcase_fail2ban_restart_command: [systemctl, restart, fail2ban]
+# The cover page: the distro's nginx welcome page, copied as index.html into the showcase's own webroot.
+showcase_webroot: /var/www/showcase
+showcase_welcome_pages:
+  - /var/www/html/index.nginx-debian.html
+  - /usr/share/nginx/html/index.html
+
+# --- verify.yml (tasks/verify.yml) -------------------------------------------------------------------------------------
+# Requests are made on the box against 127.0.0.1 with the showcase's name (curl --resolve), so they need no DNS.
+showcase_verify_retries: 6
+showcase_verify_delay: 5
+# A subscription id (or path tail) that must come back from an edge, e.g. the monitoring probe's: optional.
+showcase_verify_sub: ""
+# false = accept a certificate the box's CA bundle does not trust (the tests).
+showcase_verify_validate_certs: true
+
+# --- wipe.yml (tasks/wipe.yml) -----------------------------------------------------------------------------------------
+# The DNS record is never deleted. The certificate and acme.sh's renewal stay unless this is true.
+showcase_wipe_cert: false

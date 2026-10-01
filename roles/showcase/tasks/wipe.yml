@@ -1,0 +1,37 @@
+---
+# wipe.yml on the showcase: its nginx files (port 80, the showcase, the webroots) and its fail2ban jail and filter go;
+# handlers reload nginx and restart fail2ban when something went (one that fails, nothing running, is left at that).
+# The packages stay, and so does the DNS record (the next site.yml finds it in place). The certificate and acme.sh's
+# renewal of it stay unless showcase_wipe_cert is true.
+- name: Remove the showcase's nginx files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase.conf"
+    - "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase-acme.conf"
+    - "{{ showcase_webroot }}"
+    - "{{ showcase_acme_webroot }}"
+  notify: showcase wipe reload nginx
+
+- name: Remove the showcase's jail and filter
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ showcase_fail2ban_dir }}/jail.d/3ax-ui-showcase.conf"
+    - "{{ showcase_fail2ban_dir }}/filter.d/3ax-ui-showcase-probe.conf"
+  notify: showcase wipe restart fail2ban
+
+- name: Delete the certificate
+  when: showcase_wipe_cert | bool
+  block:
+    # acme.sh keeps one directory per certificate (<name>_ecc for the ECDSA key); with it gone its cron stops renewing.
+    - name: Remove the certificate and its acme.sh entries
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: >-
+        {{ [showcase_cert_dir]
+           + ([showcase_acme_home ~ '/' ~ showcase_domain ~ '_ecc', showcase_acme_home ~ '/' ~ showcase_domain]
+              if showcase_domain | length > 0 else []) }}

@@ -1,0 +1,27 @@
+---
+- name: Reload nginx
+  ansible.builtin.command:
+    argv: "{{ showcase_nginx_reload_command }}"
+  changed_when: true
+  listen: showcase reload nginx
+
+- name: Restart fail2ban
+  ansible.builtin.command:
+    argv: "{{ showcase_fail2ban_restart_command }}"
+  changed_when: true
+  listen: showcase restart fail2ban
+
+# wipe.yml: a reload that fails (nothing running) leaves nothing to do, the files are gone either way.
+- name: Reload nginx without the showcase
+  ansible.builtin.command:
+    argv: "{{ showcase_nginx_reload_command }}"
+  changed_when: true
+  failed_when: false
+  listen: showcase wipe reload nginx
+
+- name: Restart fail2ban without the showcase's jail
+  ansible.builtin.command:
+    argv: "{{ showcase_fail2ban_restart_command }}"
+  changed_when: true
+  failed_when: false
+  listen: showcase wipe restart fail2ban

@@ -41,6 +41,12 @@ MONSERVER = ["usr/local/bin/mon-server", "etc/mon-server/config.json", "var/lib/
 MONCLIENT = ["usr/local/bin/mon-client", "usr/local/bin/xray", "etc/mon-client/le-staging-roots.pem",
              "var/lib/mon-client/state.json", "var/cache/3ax-ui-orchestrator/mon-client/v0.1.0-stand.3/mon-client",
              "var/cache/3ax-ui-orchestrator/xray/v26.3.27/xray"]
+SHOWCASE = ["etc/nginx/conf.d/3ax-ui-showcase.conf", "etc/nginx/conf.d/3ax-ui-showcase-acme.conf",
+            "etc/nginx/conf.d/other-site.conf", "var/www/showcase/index.html",
+            "var/www/showcase-acme/.well-known/acme-challenge/x", "etc/fail2ban/jail.d/3ax-ui-showcase.conf",
+            "etc/fail2ban/filter.d/3ax-ui-showcase-probe.conf", "etc/fail2ban/jail.d/3ax-ui-sshd.local",
+            "etc/nginx/showcase-cert/fullchain.pem", "root/.acme.sh/sub.example.test_ecc/sub.example.test.cer",
+            "root/.acme.sh/account.conf"]
 
 
 class WipeTest(unittest.TestCase):
@@ -53,7 +59,7 @@ class WipeTest(unittest.TestCase):
     # --- helpers -------------------------------------------------------------------------------------
     def seed(self):
         for box, files in (("real", PANEL), ("bridge", HOP), ("proxy", HOP), ("mon-server", MONSERVER),
-                           ("mon-client", MONCLIENT)):
+                           ("mon-client", MONCLIENT), ("subgateway", SHOWCASE)):
             for rel in files:
                 path = self.root / box / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +82,7 @@ class WipeTest(unittest.TestCase):
         return (self.root / box / rel).exists()
 
     def assert_unchanged(self, out):
-        for host in ("real", "bridge", "proxy", "mon-server", "mon-client"):
+        for host in ("real", "bridge", "proxy", "mon-server", "mon-client", "subgateway"):
             self.assertRegex(out, rf"{re.escape(host)}\s+: ok=\d+\s+changed=0 ", f"{host} changed on a repeated wipe")
 
     # --- scenarios -----------------------------------------------------------------------------------
@@ -111,18 +117,29 @@ class WipeTest(unittest.TestCase):
         for rel in ("usr/local/bin/mon-client", "usr/local/bin/xray", "etc/mon-client", "var/lib/mon-client",
                     "var/cache/3ax-ui-orchestrator/mon-client", "var/cache/3ax-ui-orchestrator/xray"):
             self.assertFalse(self.exists("mon-client", rel), f"mon-client: {rel} left")
+        for rel in ("etc/nginx/conf.d/3ax-ui-showcase.conf", "etc/nginx/conf.d/3ax-ui-showcase-acme.conf",
+                    "var/www/showcase", "var/www/showcase-acme", "etc/fail2ban/jail.d/3ax-ui-showcase.conf",
+                    "etc/fail2ban/filter.d/3ax-ui-showcase-probe.conf"):
+            self.assertFalse(self.exists("subgateway", rel), f"showcase: {rel} left")
+        for rel in ("etc/nginx/conf.d/other-site.conf", "etc/fail2ban/jail.d/3ax-ui-sshd.local",
+                    "etc/nginx/showcase-cert/fullchain.pem", "root/.acme.sh/sub.example.test_ecc/sub.example.test.cer"):
+            self.assertTrue(self.exists("subgateway", rel), f"showcase: {rel} removed")
 
         self.assert_unchanged(self.wipe())
 
     def test_flags_delete_certificates(self):
         self.seed()
-        self.wipe("-e", "hop_wipe_le_cert=true", "-e", "monserver_wipe_certs=true")
+        self.wipe("-e", "hop_wipe_le_cert=true", "-e", "monserver_wipe_certs=true", "-e", "showcase_wipe_cert=true")
+        self.assertFalse(self.exists("subgateway", "etc/nginx/showcase-cert"))
+        self.assertFalse(self.exists("subgateway", "root/.acme.sh/sub.example.test_ecc"))
+        self.assertTrue(self.exists("subgateway", "root/.acme.sh/account.conf"))
         for box in ("bridge", "proxy"):
             self.assertFalse(self.exists(box, "root/cert/ip"))
             self.assertFalse(self.exists(box, "root/.acme.sh/203.0.113.7_ecc"))
             self.assertTrue(self.exists(box, "root/.acme.sh/account.conf"), "acme.sh itself was removed")
         self.assertFalse(self.exists("mon-server", "var/lib/mon-server"))
-        self.assert_unchanged(self.wipe("-e", "hop_wipe_le_cert=true", "-e", "monserver_wipe_certs=true"))
+        self.assert_unchanged(self.wipe("-e", "hop_wipe_le_cert=true", "-e", "monserver_wipe_certs=true",
+                                        "-e", "showcase_wipe_cert=true"))
 
     def test_bare_boxes(self):
         self.assert_unchanged(self.wipe("-e", "hop_wipe_le_cert=true"))

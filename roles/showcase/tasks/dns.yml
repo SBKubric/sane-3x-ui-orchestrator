@@ -1,0 +1,52 @@
+---
+# The A record showcase_domain -> showcase_public_ip at DNSExit (files/dnsexit.py on the controller): read from the
+# zone's nameservers, posted only when it differs (at most once in 4 minutes), then read back. Without an API key, and
+# in check mode, the record is only read: a mismatch is a warning, and the certificate cannot be issued until the
+# owner fixes the record. The key goes to the script on stdin: a task's environment shows in -vvv's command line, a
+# module argument under no_log does not.
+- name: Check the DNS inputs
+  ansible.builtin.assert:
+    that:
+      - showcase_dns_zone | length > 0
+      - showcase_domain == showcase_dns_zone or showcase_domain is search('\.' ~ (showcase_dns_zone | regex_escape) ~ '$')
+    fail_msg: >-
+      showcase {{ inventory_hostname }}: the DNS record needs dns_zone (the domain DNSExit hosts) with showcase_domain in
+      it (now '{{ showcase_domain }}' in '{{ showcase_dns_zone }}'); set showcase_dns_check: false to leave DNS alone.
+    quiet: true
+
+- name: Converge (or only read) the DNS record of {{ showcase_domain }}
+  ansible.builtin.command:
+    argv: >-
+      {{ showcase_dns_command
+         + ['--api-url', showcase_dns_api_url, '--zone', showcase_dns_zone, '--name', showcase_domain,
+            '--content', showcase_public_ip, '--ttl', showcase_dns_ttl | string,
+            '--nameservers', showcase_dns_nameservers | join(','), '--state', showcase_dns_state,
+            '--min-interval', showcase_dns_min_interval | string, '--wait', showcase_dns_wait | string]
+         + (['--key-stdin'] if showcase_dns_manage | bool and not ansible_check_mode else ['--check-only']) }}
+    stdin: "{{ dnsexit_api_key | default('') if showcase_dns_manage | bool and not ansible_check_mode else '' }}"
+  delegate_to: localhost
+  become: false
+  register: showcase_dns_run
+  changed_when: (showcase_dns_run.stdout | default('{}') | from_json).action | default('') == 'posted'
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Keep the DNS answer
+  ansible.builtin.set_fact:
+    showcase_dns: "{{ showcase_dns_run.stdout | default('') | from_json if (showcase_dns_run.stdout | default('')) is match('^\\{') else {} }}"
+
+- name: Require the DNS record
+  ansible.builtin.assert:
+    that:
+      - showcase_dns_run.rc == 0
+    fail_msg: >-
+      DNS record {{ showcase_domain }} -> {{ showcase_public_ip }}: {{ showcase_dns.message | default(showcase_dns_run.stderr | default('')) }}
+    quiet: true
+
+- name: "Show the DNS record"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'WARNING: ' if showcase_dns.action in ['mismatch', 'unknown'] else '' }}DNS {{ showcase_dns.message }}{{
+      ' (no DNSExit API key: set the record by hand, or put dnsexit_api_key in the vault)'
+      if showcase_dns.action == 'mismatch' and not showcase_dns_manage | bool else '' }}

@@ -1,0 +1,159 @@
+---
+# The certificate of showcase_domain. letsencrypt: issued by acme.sh through HTTP-01 on nginx's webroot (port 80 is
+# up by now, and the DNS record points here), installed into showcase_cert_dir with a reload of nginx, renewed by
+# acme.sh's cron. A certificate for the name valid for showcase_cert_min_validity more seconds is kept: nothing is
+# asked of Let's Encrypt (50 certificates per domain a week, 5 for the same name). manual: the given files.
+# Facts: showcase_cert_file, showcase_key_file, showcase_cert_installed (a new certificate went in).
+- name: Choose the certificate files
+  ansible.builtin.set_fact:
+    showcase_cert_file: "{{ showcase_cert if showcase_tls == 'manual' else showcase_cert_dir ~ '/fullchain.pem' }}"
+    showcase_key_file: "{{ showcase_key if showcase_tls == 'manual' else showcase_cert_dir ~ '/privkey.pem' }}"
+    showcase_cert_installed: false
+
+- name: Check the certificate already on the box
+  ansible.builtin.command:
+    argv: [openssl, x509, -in, "{{ showcase_cert_file }}", -noout, -checkend, "{{ showcase_cert_min_validity | string }}", -ext, subjectAltName]
+  register: showcase_cert_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check the certificate's key
+  ansible.builtin.stat:
+    path: "{{ showcase_key_file }}"
+  register: showcase_cert_key
+
+- name: Decide whether the certificate can stay
+  ansible.builtin.set_fact:
+    showcase_cert_reusable: >-
+      {{ showcase_cert_check.rc == 0
+         and showcase_cert_check.stdout is search('DNS:' ~ (showcase_domain | regex_escape) ~ '(,|\s|$)', multiline=true)
+         and showcase_cert_key.stat.exists }}
+
+- name: Require the manual certificate
+  ansible.builtin.assert:
+    that:
+      - showcase_cert_key.stat.exists
+      - showcase_cert_check.stdout is search('DNS:' ~ (showcase_domain | regex_escape) ~ '(,|\s|$)', multiline=true)
+    fail_msg: >-
+      showcase_tls manual: {{ showcase_cert }} must be a certificate for {{ showcase_domain }} and {{ showcase_key }} its
+      key ({{ showcase_cert_check.stderr | default('') | trim }})
+    quiet: true
+  when: showcase_tls == 'manual'
+
+- name: "Show the plan: certificate"
+  ansible.builtin.debug:
+    msg: >-
+      certificate for {{ showcase_domain }}: {{ 'keep ' ~ showcase_cert_file if showcase_cert_reusable | bool
+      else ('manual ' ~ showcase_cert_file ~ ' (expires within ' ~ showcase_cert_min_validity ~ ' s)'
+            if showcase_tls == 'manual' else 'issue through HTTP-01') }}
+
+- name: Issue the certificate through nginx's webroot
+  when:
+    - showcase_tls == 'letsencrypt'
+    - not showcase_cert_reusable | bool
+    - not ansible_check_mode
+  environment:
+    HOME: "{{ showcase_acme_home | dirname }}"
+  block:
+    - name: Check for acme.sh
+      ansible.builtin.stat:
+        path: "{{ showcase_acme_home }}/acme.sh"
+      register: showcase_acme_bin
+
+    - name: Download the acme.sh installer
+      ansible.builtin.get_url:
+        url: "{{ showcase_acme_install_url }}"
+        dest: "{{ showcase_acme_home | dirname }}/acme-install.sh"
+        mode: "0700"
+      when: not showcase_acme_bin.stat.exists
+
+    - name: Install acme.sh
+      ansible.builtin.command:
+        argv: [sh, "{{ showcase_acme_home | dirname }}/acme-install.sh"]
+        chdir: "{{ showcase_acme_home | dirname }}"
+        creates: "{{ showcase_acme_home }}/acme.sh"
+
+    # acme.sh exits 2 when it holds a certificate for the name that is not due yet ("Skipping"): it is installed below.
+    # Retried once only when the CA did not answer at all; a refusal (validation, rate limit) is final.
+    - name: Issue the certificate for {{ showcase_domain }}
+      ansible.builtin.command:
+        argv:
+          - "{{ showcase_acme_home }}/acme.sh"
+          - --issue
+          - -d
+          - "{{ showcase_domain }}"
+          - --webroot
+          - "{{ showcase_acme_webroot }}"
+          - --server
+          - "{{ showcase_acme_server }}"
+          - --keylength
+          - ec-256
+      register: showcase_cert_issue
+      until: >-
+        showcase_cert_issue.rc in [0, 2]
+        or (showcase_cert_issue.stdout ~ showcase_cert_issue.stderr) is not search('Cannot init API|Could not get nonce|curl error|timed out|: Timeout')
+      retries: 1
+      delay: 10
+      changed_when: showcase_cert_issue.rc == 0
+      failed_when: false
+
+    - name: Require the issued certificate
+      ansible.builtin.assert:
+        that:
+          - showcase_cert_issue.rc in [0, 2]
+        fail_msg: >-
+          acme.sh could not issue the certificate for {{ showcase_domain }} (the name must resolve to
+          {{ showcase_public_ip }} and port 80 must be reachable from the internet; Let's Encrypt allows 5 certificates
+          for the same name a week): {{ (showcase_cert_issue.stdout_lines + showcase_cert_issue.stderr_lines)[-15:] }}
+        quiet: true
+
+    - name: Create the certificate directory
+      ansible.builtin.file:
+        path: "{{ showcase_cert_dir }}"
+        state: directory
+        mode: "0700"
+
+    # acme.sh exits non-zero when the reload command fails (nginx not up yet, say): the files decide.
+    - name: Install the certificate where nginx reads it
+      ansible.builtin.command:
+        argv:
+          - "{{ showcase_acme_home }}/acme.sh"
+          - --install-cert
+          - -d
+          - "{{ showcase_domain }}"
+          - --ecc
+          - --key-file
+          - "{{ showcase_key_file }}"
+          - --fullchain-file
+          - "{{ showcase_cert_file }}"
+          - --reloadcmd
+          - "{{ showcase_acme_reload_cmd }}"
+      changed_when: true
+      failed_when: false
+
+    - name: Keep the key private
+      ansible.builtin.file:
+        path: "{{ showcase_key_file }}"
+        mode: "0600"
+
+    - name: Check the installed certificate
+      ansible.builtin.command:
+        argv: [openssl, x509, -in, "{{ showcase_cert_file }}", -noout, -checkend, "86400", -ext, subjectAltName]
+      register: showcase_cert_new
+      changed_when: false
+      failed_when: >-
+        showcase_cert_new.rc != 0
+        or showcase_cert_new.stdout is not search('DNS:' ~ (showcase_domain | regex_escape) ~ '(,|\s|$)', multiline=true)
+
+    - name: Note the new certificate
+      ansible.builtin.set_fact:
+        showcase_cert_installed: true
+
+# In check mode a certificate that is not there yet cannot be tested against: the showcase's 443 is not written.
+- name: Stop here without a certificate (check mode)
+  ansible.builtin.meta: end_host
+  when:
+    - ansible_check_mode
+    - not showcase_cert_reusable | bool
+    - showcase_tls == 'letsencrypt'
