@@ -300,7 +300,8 @@ the active edge's server name) that they get by refreshing the subscription.
 The Reality `target` must be a site Xray's Reality can borrow a handshake from: with Xray 26.3.27 and the
 `chrome` fingerprint, `www.microsoft.com` fails every handshake ("REALITY: processed invalid connection ...
 handshake did not complete successfully") while `dl.google.com`, `github.com` and `www.samsung.com` work; the
-stand uses `dl.google.com`.
+stand uses `dl.google.com`. Clients' uTLS fingerprint (`fp`) is `firefox` (owner's default since 2026-10-01; the
+panel's own default follows in SBKubric/sane-3x-ui#230); the neighbour-target handshake check uses the same.
 
 Example (`inventories/stand-full/group_vars/panel.yml`):
 
@@ -322,7 +323,7 @@ panel_inbounds:
         target: dl.google.com:443 # until an edge is active
         serverNames: [dl.google.com]
         settings:
-          fingerprint: chrome
+          fingerprint: firefox
           serverName: ""
           spiderX: /
       xhttpSettings:
