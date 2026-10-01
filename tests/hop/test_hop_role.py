@@ -409,13 +409,16 @@ class NeighbourTargetTest(HopHarness):
     """tasks/neighbour.yml: a neighbour target per edge in the registry, with fake_neighbour.py for the scan and the
     Reality handshake check (orchestrator#20)."""
 
-    def stub(self, found=None, good=()):
-        """What the fake scan finds around proxy's address (10.0.0.3) and which pairs pass the handshake check."""
+    def stub(self, found=None, good=(), dns=None):
+        """What the fake scan finds around proxy's address (10.0.0.3), which pairs pass the handshake check and what the
+        server names resolve to: the name of every found or good pair to its target's address, unless dns says else."""
         box = self.root / "neighbour"
         box.mkdir(exist_ok=True)
         scan = {"10.0.0.3": {"target": found[0], "serverName": found[1]}} if found else {}
         (box / "scan.json").write_text(json.dumps(scan))
         (box / "good").write_text("".join(f"{t} {n}\n" for t, n in good))
+        names = {n: [t.rsplit(":", 1)[0]] for t, n in [*([found] if found else []), *good]}
+        (box / "dns.json").write_text(json.dumps(dict(names, **(dns or {}))))
 
     def stub_calls(self):
         """The find/check calls since the last look."""
@@ -452,19 +455,20 @@ class NeighbourTargetTest(HopHarness):
         self.assertEqual(self.neighbour_of(), NEIGHBOUR)
         self.assertEqual(self.stub_calls(), ["find 10.0.0.3"])
 
-        # The stored target still passes the handshake check: no scan, no write.
+        # The stored target still resolves into the /24 and passes the handshake check: no scan, no write.
         out = self.play()
         self.assert_unchanged(out)
-        self.assertEqual(self.stub_calls(), ["check 10.0.0.77:443 www.neighbour.test"])
+        self.assertEqual(self.stub_calls(), ["dns www.neighbour.test 10.0.0.3", "check 10.0.0.77:443 www.neighbour.test"])
 
     def test_stored_neighbour_that_fails_the_handshake_is_replaced(self):
         self.seed(LEGACY)
         self.stub(found=NEIGHBOUR, good=[NEIGHBOUR])
         self.play()
         self.stub_calls()
-        self.stub(found=NEIGHBOUR_2, good=[NEIGHBOUR_2])
+        self.stub(found=NEIGHBOUR_2, good=[NEIGHBOUR_2], dns={NEIGHBOUR[1]: ["10.0.0.77"]})
         out = flat(self.play())
-        self.assertEqual(self.stub_calls(), ["check 10.0.0.77:443 www.neighbour.test", "find 10.0.0.3"])
+        self.assertEqual(self.stub_calls(), ["dns www.neighbour.test 10.0.0.3", "check 10.0.0.77:443 www.neighbour.test",
+                                             "find 10.0.0.3"])
         self.assertEqual(self.writes(), [
             ("POST", "update", {"realityTarget": "10.0.0.78:443", "realityServerName": "shop.neighbour.test"})])
         self.assertEqual(self.neighbour_of(), NEIGHBOUR_2)
@@ -478,8 +482,26 @@ class NeighbourTargetTest(HopHarness):
         self.stub(found=NEIGHBOUR, good=[("10.0.0.90:443", "old.neighbour.test")])
         self.play()
         self.assertEqual([(m, p) for m, p, _ in self.writes()], [("POST", "reissueToken"), ("POST", "reissueToken")])
-        self.assertEqual(self.stub_calls(), ["check 10.0.0.90:443 old.neighbour.test"])
+        self.assertEqual(self.stub_calls(), ["dns old.neighbour.test 10.0.0.3", "check 10.0.0.90:443 old.neighbour.test"])
         self.assertEqual(self.neighbour_of(), ("10.0.0.90:443", "old.neighbour.test"))
+
+    def test_stored_neighbour_whose_name_resolves_elsewhere_is_scanned_again(self):
+        # A neighbour that carries another site's certificate (the name points outside the edge's /24) was taken by
+        # an older run: it is no longer kept, even though its handshake passes.
+        self.seed([{"name": "bridge", "host": "10.0.0.2", "role": "inner", "subScheme": "http"},
+                   {"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": True,
+                    "realityTarget": "10.0.0.90:443", "realityServerName": "www.example.com"}])
+        self.stub(found=NEIGHBOUR, good=[NEIGHBOUR, ("10.0.0.90:443", "www.example.com")],
+                  dns={"www.example.com": ["198.51.100.7"]})
+        out = flat(self.play())
+        self.assertEqual(self.stub_calls(), ["dns www.example.com 10.0.0.3", "find 10.0.0.3"])
+        self.assertIn(("POST", "update", {"realityTarget": "10.0.0.77:443", "realityServerName": "www.neighbour.test"}),
+                      self.writes())
+        self.assertEqual(self.neighbour_of(), NEIGHBOUR)
+        self.assertIn("neighbour target of proxy (10.0.0.0/24): 10.0.0.77:443 (www.neighbour.test) from scan; the stored "
+                      "10.0.0.90:443 (www.example.com) failed the DNS check (www.example.com resolves to 198.51.100.7, "
+                      "outside 10.0.0.0/24), scanned again", out)
+        self.assertNotIn("WARNING", out)
 
     def test_no_neighbour_falls_back_with_a_warning_and_is_scanned_again(self):
         self.seed(LEGACY)
@@ -558,12 +580,28 @@ class NeighbourTargetTest(HopHarness):
         self.assertIn("hop proxy: neighbour target 10.0.0.77:443 (www.neighbour.test)", out)
         self.assertNotIn("WARNING", out)
 
+    def test_verify_warns_about_a_server_name_outside_the_edges_24(self):
+        self.stub(found=NEIGHBOUR, good=[NEIGHBOUR])
+        self.converge_fresh()
+        self.stub_calls()
+        self.seed([{"name": "bridge", "host": "10.0.0.2", "role": "inner", "subScheme": "http"},
+                   {"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": True,
+                    "realityTarget": "10.0.0.90:443", "realityServerName": "www.example.com"}])
+        self.stub(dns={"www.example.com": ["198.51.100.7"]})
+        out = flat(self.verify())
+        self.assertEqual(self.calls, [], "verify.yml wrote to the registry")
+        self.assertEqual(self.stub_calls(), ["dns www.example.com 10.0.0.3"])
+        self.assertIn("WARNING: edge proxy: the server name www.example.com of its neighbour target 10.0.0.90:443 does not "
+                      "resolve into the /24 of the edge (www.example.com resolves to 198.51.100.7, outside 10.0.0.0/24), so "
+                      "the SNI of its clients points away from the edge; run site.yml to scan again", out)
+
     def test_verify_warns_about_the_fallback_and_a_missing_target(self):
         self.stub(found=None, good=[])
         self.converge_fresh()
         out = flat(self.verify())
         self.assertIn("WARNING: edge proxy has the shared fallback dl.google.com:443 as its neighbour target, not a site "
                       "next to it", out)
+        self.assertNotIn("does not resolve into", out)  # the fallback's own warning says enough
         self.seed([{"name": "bridge", "host": "10.0.0.2", "role": "inner", "subScheme": "http"},
                    {"name": "proxy", "host": "10.0.0.3", "role": "edge", "isActive": True}])
         out = flat(self.verify())

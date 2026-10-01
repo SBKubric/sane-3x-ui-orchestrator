@@ -22,7 +22,8 @@
 #              relay running), waiting up to 2 minutes (a new port list takes a poll per hop); with
 #              hop_sub_scheme https also a cert in proxy.json and a TLS answer on the sub port (443 behind the
 #              front), fetched from the next-outer hop (the controller for an edge); an edge's neighbour target in
-#              the registry (a warning, no failure, for the shared fallback or none)
+#              the registry (a warning, no failure, for the shared fallback or none, and for a server name that does
+#              not resolve into the edge's /24)
 #   panel+hops (front_mode only443) from the controller: the box answers TCP on 443 and not on its old ports (the
 #              panel's port, the sub port 2096, the inbounds' ports), waiting up to 2 minutes; 80 closed is a warning;
 #              on the panel <base>panel/ gets the cover page, not the UI, and POST <base>login works on 443

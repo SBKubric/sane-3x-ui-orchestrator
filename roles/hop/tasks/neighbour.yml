@@ -3,7 +3,8 @@
 # realityTarget/realityServerName (SBKubric/sane-3x-ui ADR 0005). Needs hop_registry fresh. The scan and the checks
 # run on the controller (delegate_to localhost), never on a box: a VPS that scans its neighbours gets flagged.
 #   hop_reality_target set      write it as given; a failed handshake check only warns
-#   stored target in the /24    keep it while it passes the handshake check (no scan, no write)
+#   stored target in the /24    keep it while its server name resolves into the /24 (neighbour.py dns) and it passes
+#                               the handshake check (no scan, no write)
 #   otherwise                   scan the /24 (neighbour.py find: filters, ranking, handshake of the best few);
 #                               nothing found -> hop_reality_fallback_target and a warning
 # A stored target outside the edge's /24 (the fallback, a former override, an old address) is scanned again.
@@ -37,6 +38,24 @@
         {{ hop_nb_entry_.realityServerName | default('', true)
            or hop_nb_entry_.realityTarget | default('', true) | regex_replace(':[0-9]+$', '') }}
 
+# A stored target taken before the scan checked names (orchestrator#66) may carry another site's certificate: its name
+# must still resolve into the edge's /24, else the clients' SNI points away from the edge's network.
+- name: "Check that the stored server name resolves into the /24: {{ hop_edge.name }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ hop_neighbour_command + ['dns', '--name', hop_nb_stored.server_name, '--address', hop_nb_net.address]
+         + hop_neighbour_dns_args }}
+  delegate_to: localhost
+  register: hop_nb_dns_raw
+  changed_when: false
+  when:
+    - hop_nb_override | length == 0
+    - hop_nb_stored_is_neighbour | bool
+
+- name: "Keep the DNS result: {{ hop_edge.name }}"
+  ansible.builtin.set_fact:
+    hop_nb_dns: "{{ hop_nb_dns_raw.stdout | from_json if hop_nb_dns_raw.stdout is defined else {} }}"
+
 - name: "Check with a Reality handshake: {{ hop_edge.name }}"
   ansible.builtin.command:
     argv: >-
@@ -47,7 +66,7 @@
   delegate_to: localhost
   register: hop_nb_check_raw
   changed_when: false
-  when: hop_nb_override | length > 0 or hop_nb_stored_is_neighbour | bool
+  when: hop_nb_override | length > 0 or (hop_nb_stored_is_neighbour | bool and hop_nb_dns.ok | default(false) | bool)
 
 - name: "Keep the handshake result: {{ hop_edge.name }}"
   ansible.builtin.set_fact:
@@ -84,6 +103,8 @@
       neighbour target of {{ hop_edge.name }} ({{ hop_nb_net.network }}): {{ hop_nb_choice.target }}
       ({{ hop_nb_choice.server_name }}) from {{ hop_nb_choice.source }}{{
       '; handshake ' ~ hop_nb_check.detail if hop_nb_check | length > 0 else '' }}{{
+      ('; the stored ' ~ hop_nb_stored.target ~ ' (' ~ hop_nb_stored.server_name ~ ') failed the DNS check ('
+       ~ hop_nb_dns.detail ~ '), scanned again') if hop_nb_dns | length > 0 and not hop_nb_dns.ok | bool else '' }}{{
       ('; scanned ' ~ hop_nb_find.scanned ~ ' addresses, ' ~ hop_nb_find.candidates | length ~ ' candidates, handshakes: '
        ~ (hop_nb_find.confirmed | map(attribute='target') | zip(hop_nb_find.confirmed | map(attribute='detail'))
           | map('join', ' ') | join(', ') or 'none')) if hop_nb_find | length > 0 else '' }}

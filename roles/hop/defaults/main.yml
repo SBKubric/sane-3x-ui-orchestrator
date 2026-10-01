@@ -116,9 +116,10 @@ hop_verify_tls_probe_host: ""
 # Neighbour target of every edge (tasks/neighbour.yml; SBKubric/sane-3x-ui ADR 0005, orchestrator#20): the site the
 # Reality inbounds that follow the chain imitate while this edge is active, kept in the chain registry
 # (realityTarget, realityServerName). Found by scanning the edge's /24 from the controller, never from a box: TLS 1.3,
-# h2, X25519, no redirect to another host, not a CDN, and a real Reality handshake through a local xray pair.
-# A stored target in the edge's /24 that still passes the handshake is kept (no scan, no write). With nothing found,
-# the fallback below is written and the run and verify.yml warn. false = leave the registry fields alone.
+# h2, X25519, a certificate name that resolves into the /24, no redirect to another host, not a CDN, and a real Reality
+# handshake through a local xray pair. A stored target in the edge's /24 whose name still resolves into it and that
+# still passes the handshake is kept (no scan, no write). With nothing found, the fallback below is written and the run
+# and verify.yml warn. false = leave the registry fields alone.
 hop_neighbour_enabled: true
 # Per edge, in host_vars: a target of your own instead of the scan ("host:port"; an address needs the server
 # name its site answers to). It is written as given; a failed handshake check only warns.
@@ -157,6 +158,11 @@ hop_neighbour_cdn_asns:
   - 24319   # Akamai
   - 34164   # Akamai
   - 43639   # Akamai
+# The DNS check: a candidate's server name (its certificate name) must resolve to an address in the edge's /24 (the
+# candidate itself or another address there); a site that carries another site's certificate is dropped, and a stored
+# target whose name fails is scanned again. Looked up from the controller through this DNS server (host:port, UDP;
+# empty = the controller's own resolver).
+hop_neighbour_dns: ""
 # The handshake check: a VLESS-Reality server with the candidate as target and a client through it, both xray on the
 # controller (loopback only); passes when every one of the tries fetches the probe URL through the tunnel.
 hop_neighbour_check_tries: 3
@@ -190,6 +196,7 @@ hop_neighbour_tool_args: >-
   {{ ['--cache', hop_neighbour_cache, '--downloads', hop_neighbour_downloads | to_json]
      + (['--xray', hop_neighbour_xray_bin] if hop_neighbour_xray_bin | length > 0 else [])
      + (['--scanner', hop_neighbour_scanner_bin] if hop_neighbour_scanner_bin | length > 0 else []) }}
+hop_neighbour_dns_args: "{{ ['--dns', hop_neighbour_dns] if hop_neighbour_dns | length > 0 else [] }}"
 hop_neighbour_check_args: >-
   {{ hop_neighbour_tool_args + ['--tries', hop_neighbour_check_tries | string, '--probe-url', hop_neighbour_probe_url] }}
 hop_neighbour_find_args: >-
@@ -197,4 +204,4 @@ hop_neighbour_find_args: >-
      + ['--port', hop_neighbour_port | string, '--limit', hop_neighbour_scan_limit | string,
         '--threads', hop_neighbour_scan_threads | string, '--timeout', hop_neighbour_scan_timeout | string,
         '--confirm', hop_neighbour_confirm | string, '--asn-whois', hop_neighbour_asn_whois,
-        '--cdn-asns', hop_neighbour_cdn_asns | join(',')] }}
+        '--cdn-asns', hop_neighbour_cdn_asns | join(',')] + hop_neighbour_dns_args }}

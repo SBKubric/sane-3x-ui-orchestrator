@@ -607,8 +607,8 @@ a prober sees the neighbour's site. The role picks it after converging the hops 
 | Situation | What happens |
 |---|---|
 | `hop_reality_target` set in the edge's `host_vars` | no scan; written as given (server name `hop_reality_server_name`, else the host); a failed handshake check prints a `WARNING` but does not stop the run |
-| the registry already holds a target in the edge's /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
-| otherwise (no target, the check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check |
+| the registry already holds a target in the edge's /24, its server name still resolves into that /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
+| otherwise (no target, the DNS or the handshake check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check; a stored target that failed the DNS check is named in the run's line (`the stored ... failed the DNS check (...), scanned again`) |
 | the scan finds nothing that passes | `hop_reality_fallback_target` (`dl.google.com:443`, passed the xray 26.3.27 handshake in SBKubric/sane-3x-ui#129) and a `WARNING`; the next run scans again |
 
 How the scan works (`roles/hop/files/neighbour.py find`, all **on the controller**, `delegate_to: localhost`,
@@ -620,8 +620,13 @@ never on a box: a VPS scanning its neighbours gets flagged):
    `hop_neighbour_port` (443). It keeps sites that answer **TLS 1.3 with ALPN h2 and X25519** (or the hybrid
    X25519MLKEM768).
 2. The certificate name becomes the server name (a wildcard `*.example.com` stands for `www.example.com`; an
-   address or a bare `*` is dropped). The site must answer **TLS 1.3 + h2 again with that name as SNI**, and
-   `GET /` for that name must **not redirect to another host**.
+   address or a bare `*` is dropped). **The server name must resolve into the edge's /24** (the DNS check,
+   `neighbour.py dns`): at least one of its A records (after CNAMEs) is an address of the /24, the candidate's own
+   or another one. A site that merely carries another site's certificate (a server dressed up as a famous name it
+   is not) is dropped, as is a name that does not resolve: the clients' SNI would point away from the edge's network,
+   which is what a neighbour target is meant to avoid. The lookup runs on the controller, through
+   `hop_neighbour_dns` (`host:port`, UDP) or, empty by default, the controller's own resolver. The site must answer
+   **TLS 1.3 + h2 again with that name as SNI**, and `GET /` for that name must **not redirect to another host**.
 3. **Not a CDN**, two ways: the HTTP answer carries no CDN headers (Cloudflare `cf-ray`/`server: cloudflare`,
    CloudFront `x-amz-cf-*`/`via: ... cloudfront`, Fastly `x-fastly-request-id`/`x-served-by: cache-...`,
    Akamai `server: AkamaiGHost`/`x-akamai-*`), and the site's AS, looked up in
@@ -642,11 +647,17 @@ when all `hop_neighbour_check_tries` (3) fetches of `hop_neighbour_probe_url`
 The run prints one line per edge, e.g. `neighbour target of proxy (203.0.113.0/24): 203.0.113.32:443
 (www.example.net) from scan; scanned 253 addresses, 16 candidates, handshakes: 203.0.113.32:443 3/3 through
 the tunnel`. `verify.yml` shows each edge's target and warns (without failing) about an edge on the fallback
-or without a target. `hop_neighbour_enabled: false` leaves the registry fields alone.
+or without a target, and about a server name that does not resolve into the edge's /24 (the DNS check from the
+controller, on a scanned target and on `hop_reality_target` alike). `hop_neighbour_enabled: false` leaves the
+registry fields alone.
+
+There is no list of forbidden "brand" names: a famous name only passes when it really resolves into the edge's /24,
+and then the site is that name's own server.
 
 **Controller requirements.** Linux on x86_64 or aarch64 (the operator's `o1-ansible` container, root with
 `--network host`, works as is), the controller's Python (standard library only), and outbound access to
-GitHub (first run only), TCP 443 of the edge's /24, TCP 43 of `whois.cymru.com` and the probe URL. No Docker,
+GitHub (first run only), TCP 443 of the edge's /24, TCP 43 of `whois.cymru.com`, DNS (the controller's resolver,
+or UDP to `hop_neighbour_dns`) and the probe URL. No Docker,
 curl or unzip is needed: RealiTLScanner (`hop_neighbour_scanner_version`, `v0.2.3`) and xray are release
 binaries downloaded once into `hop_neighbour_cache` (`<playbook dir>/.cache/neighbour`, git-ignored, so the
 download survives a throwaway container that mounts the repo) and checked against the sha256 pinned in
@@ -954,7 +965,7 @@ to look; the first group that fails ends the run.
 - Python 3.12+ on the controller; `pip install -r requirements.txt` and
   `ansible-galaxy collection install -r requirements.yml`.
 - For the [neighbour target](#neighbour-target) scan: a Linux x86_64/aarch64 controller with outbound
-  access to the edges' /24 on 443, `whois.cymru.com:43` and GitHub.
+  access to the edges' /24 on 443, `whois.cymru.com:43`, DNS and GitHub.
 - Root ssh access to every host of the profile (key-based, via the aliases above).
 - Target OS: Debian 12/13 or Ubuntu 22.04/24.04; anything else fails in role `common`.
 - The vault password.
@@ -1083,15 +1094,16 @@ list/add/update/setEnable, the AWG server and getNewX25519Cert, the monitoring t
 install.sh — fresh chain replacing `legacy`, idempotent rerun, new version, new host, broken box, LE
 certificate reuse, pruning, check mode, refusals, `--limit`, no token or cookie in `-vvv` output; the
 neighbour target with `tests/hop/fake_neighbour.py` in place of the scanner and the handshake check — found
-and written before `setActive`, a stored target kept without a scan or rescanned when its check fails, the
+and written before `setActive`, a stored target kept without a scan or rescanned when its DNS or handshake check fails, the
 fallback with a warning and a rescan on every run, the override, its refusals, check mode; the «only 443» front
 (`PROXY_FRONT`, the innermost hop polling the panel on 443, the edge installed after its inner neighbour reported its
 front, a converged chain moved behind the front with re-joins only, a front that does not report stopping the run,
 `hop_tls` refused without the IP certificate, verify requiring 443/https in the registry); the
 panel and hop plays of `verify.yml` on the converged chain and on a registry, a box and a version that are
-wrong, and the neighbour target warnings; `tests/hop/test_neighbour_script.py`: `neighbour.py` against a fake
-RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois and a fake xray — the address list and
-limits, every filter, the ranking, the handshake check and the confirmation of the best candidates, the
+wrong, and the neighbour target warnings (a server name outside the edge's /24 included); `tests/hop/test_neighbour_script.py`:
+`neighbour.py` against a fake RealiTLScanner, TLS sites on `127.0.0.x`, a fake Team Cymru whois, a fake DNS resolver
+and a fake xray — the address list and limits, every filter (names resolving into the /24 or elsewhere, through
+CNAMEs, or not at all), the `dns` command, the ranking, the handshake check and the confirmation of the best candidates, the
 pinned download; `tests/panel/test_panel_inbounds.py`: role panel's inbounds with the stand's `panel_inbounds` against
 the same mock — a fresh panel (Reality keys from the panel, AWG server switched on, both ports relayed), an
 idempotent rerun also after the panel re-serialized the settings and added the probe client, a changed
