@@ -21,3 +21,13 @@ tg_chat_id: "-1000000000000"
 
 # WARP+ license key for the panel's WARP (#41), optional; empty = the free account.
 warp_license: ""
+
+# Real host addresses: inventory hostname → public IPv4. The only place they are kept; never put an address
+# into an inventory, README or test. A host without an entry is reached through its ssh alias.
+vault_hosts:
+  real: 203.0.113.10
+  bridge: 203.0.113.11
+  proxy: 203.0.113.12
+  proxy2: 203.0.113.13
+  mon-server: 203.0.113.14
+  mon-client: 203.0.113.15
