@@ -21,10 +21,12 @@ wipe.yml               destroy state for a fresh start; refuses without -e wipe_
                        (steps: roles/<role>/tasks/wipe.yml)
 verify.yml             non-destructive checks; also imported last by site.yml (tag verify)
                        (steps: roles/<role>/tasks/verify.yml)
-group_vars/all/        vault.yml (git-ignored, yours) and vault.yml.example (template)
+vault_guard.yml        imported first by the three: refuses a vault shared by every profile (group_vars/all/vault.yml)
 inventories/
+  vault.yml.example    template of each profile's group_vars/all/vault.yml (git-ignored, yours)
   stand-chain/         panel + hops; monserver/monclient empty
-  stand-full/          panel + hops + monserver + monclient
+  stand-full/          panel + hops + monserver + monclient + showcase
+  production/          as stand-full without the inner hop: two edges straight in front of the panel
 roles/
   common/              supported OS check, the host's DNS servers (tasks/dns.yml + files/dnscheck.py), base packages,
                        time sync; tasks/verify_front.yml + files/portscan.py: verify.yml's «only 443» check from the
@@ -59,12 +61,16 @@ tests/wipe/            wipe.yml on local stand-in boxes (CI)
 A profile is an inventory. Every profile has the groups `panel` (one host), `hops`, `monserver`
 (zero or one host), `monclient` and `showcase` (zero or one host, see [Role showcase](#role-showcase)); `site.yml`
 has one play per group, and an empty group is simply skipped. So the chain-only profile is the full one with empty
-monitoring groups. Neither stand profile has a showcase yet (an example entry is commented out in `hosts.yml`).
+monitoring groups. stand-full and production have the showcase `subgateway`; stand-chain only an example entry.
 
 | Profile | Groups filled | Use |
 |---|---|---|
 | `inventories/stand-chain` | panel, hops | panel + proxy chain only |
-| `inventories/stand-full` | panel, hops, monserver, monclient | panel + chain + monitoring |
+| `inventories/stand-full` | panel, hops (bridge, proxy, proxy2), monserver, monclient, showcase | the test stand |
+| `inventories/production` | panel, hops (proxy, proxy2: edges only, no inner hop), monserver, monclient, showcase | production; LE production for mon-server (`acme_production: true`) |
+
+Every profile has its own vault, `inventories/<profile>/group_vars/all/vault.yml` (see [Vault](#vault)): the
+stand and production share no secret and no address, and the host names (`real`, `proxy`, …) may repeat.
 
 No addresses or secrets are committed. A host's address is its `vault_hosts` entry from the vault (see
 [Vault](#vault)): every host in `hosts.yml` sets `ansible_host: "{{ (vault_hosts | default({}))['<host>'] | default('<ssh
@@ -1060,17 +1066,23 @@ to look; the first group that fails ends the run.
 
 ## Vault
 
-Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
-git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
+Secrets live in each profile's `inventories/<profile>/group_vars/all/vault.yml`, one per profile, and never in
+git (`.gitignore`). A vault left at the old shared place, `group_vars/all/vault.yml` next to the playbooks, would
+override every profile's own; `vault_guard.yml` (first in `site.yml`, `verify.yml` and `wipe.yml`) refuses to run
+while it exists — move it into the profile. Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
 `mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` and
-`dnsexit_api_key` and `awg_header_protection_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
+`dnsexit_api_key` and `awg_header_protection_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `inventories/vault.yml.example`).
 
 ```sh
-cp group_vars/all/vault.yml.example group_vars/all/vault.yml
-$EDITOR group_vars/all/vault.yml
-ansible-vault encrypt group_vars/all/vault.yml     # asks for a new vault password
-ansible-vault edit group_vars/all/vault.yml        # later changes
-ansible-vault view group_vars/all/vault.yml
+V=inventories/production/group_vars/all/vault.yml   # or stand-full, stand-chain
+cp inventories/vault.yml.example $V
+$EDITOR $V
+ansible-vault encrypt $V     # asks for a new vault password
+ansible-vault edit $V        # later changes
+ansible-vault view $V
+# moving an existing shared vault into the stand profiles:
+#   cp group_vars/all/vault.yml inventories/stand-full/group_vars/all/vault.yml
+#   cp group_vars/all/vault.yml inventories/stand-chain/group_vars/all/vault.yml && rm group_vars/all/vault.yml
 ```
 
 Give the password to each run with `--ask-vault-pass`, or keep it in a file outside the repo
@@ -1113,11 +1125,11 @@ Tags in `site.yml`: `common`, `panel`, `hops`, `showcase`, `monserver`, `monclie
    A host left out of `vault_hosts` is reached by its ssh alias from `~/.ssh/config` instead.
    Check with `ansible-playbook -i inventories/stand-full verify.yml --ask-vault-pass` (ad-hoc `ansible` does not
    load the vault and falls back to the ssh aliases).
-3. **Vault.** `group_vars/all/vault.yml` (see [Vault](#vault)) and its password, as
+3. **Vault.** `inventories/<profile>/group_vars/all/vault.yml` (see [Vault](#vault)) and its password, as
    `--ask-vault-pass` or `--vault-password-file ~/.3ax-ui-vault-pass`. The examples below use
    `--ask-vault-pass`.
-4. **Profile.** `inventories/stand-chain` (panel + hops) or `inventories/stand-full` (+ mon-server and
-   mon-client); versions and `front_mode` (`only443`, the default) in `inventories/<profile>/group_vars/all/main.yml`.
+4. **Profile.** `inventories/stand-chain` (panel + hops), `inventories/stand-full` (+ mon-server, mon-client and
+   the showcase) or `inventories/production` (as stand-full, edges only); versions and `front_mode` (`only443`, the default) in `inventories/<profile>/group_vars/all/main.yml`.
    With only443 every box needs its address reachable from the internet on 80 (Let's Encrypt IP certificates through
    nginx's webroot) and 443, and must not be behind NAT.
 5. **Wipe**, then **converge**; `site.yml` ends with `verify.yml`:

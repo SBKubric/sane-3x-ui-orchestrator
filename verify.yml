@@ -42,6 +42,9 @@
 #              Subscription-Userinfo; the fail2ban jail has an action; 80 and 443 from the controller; the DNS record
 #              (a warning, no failure)
 
+- name: Vault per profile
+  ansible.builtin.import_playbook: vault_guard.yml
+
 - name: Verify panel and chain registry
   hosts: panel
   gather_facts: false
