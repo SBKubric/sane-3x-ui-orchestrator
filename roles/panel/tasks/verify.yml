@@ -3,7 +3,8 @@
 # group hops (every hop joined, behind its front on 443/https when its front_mode is only443, the active edge
 # is the one with hop_active), geosite:ru-inside (the rule, the list and its age, the timer) and WARP (the outbound, the
 # last rule, the host's own cdn-cgi/trace), and the AmneziaWG server's routeViaXray (a warning when off) and its I1
-# against awg_mimic_protocol (verify_awg_mimic.yml, a warning). Read-only.
+# against awg_mimic_protocol (verify_awg_mimic.yml, a warning); with vpn_name, its record at DNSExit's nameservers against
+# the active edge (verify_vpn_name.yml, a warning). Read-only.
 - name: Read the panel version
   ansible.builtin.command:
     argv: ["{{ panel_bin }}", "-v"]
@@ -123,6 +124,10 @@
           the chain registry also has {{ panel_verify_chain_extra | join(', ') }}, which group hops does not list
           (role hop deletes them unless hop_prune is false)
       when: panel_verify_chain_extra | length > 0
+
+- name: Check the VPN name
+  ansible.builtin.include_tasks: verify_vpn_name.yml
+  when: panel_vpn_name | string | trim | length > 0
 
 - name: Check geosite:ru-inside
   ansible.builtin.include_tasks: verify_ru_inside.yml

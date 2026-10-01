@@ -34,6 +34,10 @@ Cloudflare device: id, token, account.license, config.client_id/peers/interface)
 license takes the form license and stores it; del clears the registration. Cloudflare out of reach is a refusal
 (success false, "(<error>)"), and an answer without account.license is success with an empty obj, as RegWarp has it.
 Test hook: POST /test/panel/warp (data, device, fail: "" | "network" | "empty" | "config", badLicense).
+
+And the domain settings of the form (#224, #225): subPublicURL, vpnName, vpnNameTtl, domainExpiry and dnsExitApiKey,
+which panel/setting/all shows only as the mask "********" and a save of the mask keeps. Test hook: POST /test/panel/cli
+({flag: value}: what `x-ui setting -vpnName ...` stores, for a fake x-ui).
 """
 
 import ipaddress
@@ -392,7 +396,10 @@ class Panel:
                          "webKeyFile": "/etc/x-ui/tls/panel.key", "webBasePath": "/base/", "sessionMaxAge": 360,
                          "tgBotEnable": False, "tgBotToken": "", "tgBotChatId": "", "subEnable": True, "subPort": 2096,
                          "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
-                         "timeLocation": "Local", "externalTrafficInformEnable": False}
+                         "timeLocation": "Local", "externalTrafficInformEnable": False,
+                         "subPublicURL": "", "dnsExitApiKey": "", "vpnName": "", "vpnNameTtl": 5, "domainExpiry": ""}
+    # entity.DnsExitApiKeyMask: what the form and the API show for a stored DNSExit API key.
+    KEY_MASK = "********"
 
     def reset(self, seed):
         self.nginx = dict(self.NGINX_DEFAULTS, **seed.get("nginx", {}))
@@ -660,10 +667,34 @@ class Panel:
                 "warnings": list(self.nginx_warnings)}
 
     # --- the settings form ------------------------------------------------------------------------------
+    def form_settings(self):
+        """GetAllSetting: the DNSExit API key only as the mask (or empty when none is stored)."""
+        form = dict(self.settings)
+        if form["dnsExitApiKey"]:
+            form["dnsExitApiKey"] = self.KEY_MASK
+        return form
+
     def update_settings(self, raw):
         body = json.loads(raw or "{}")
-        # UpdateAllSetting saves every field of the form: one left out goes back to its zero value.
-        self.settings = {key: body.get(key, type(value)()) for key, value in self.settings.items()}
+        # UpdateAllSetting saves every field of the form: one left out goes back to its zero value; the key's mask
+        # keeps the stored key, a vpnNameTtl of 0 (a form from before the setting) becomes the default 5.
+        if body.get("dnsExitApiKey") == self.KEY_MASK:
+            body["dnsExitApiKey"] = self.settings["dnsExitApiKey"]
+        settings = {key: body.get(key, type(value)()) for key, value in self.settings.items()}
+        settings["vpnNameTtl"] = settings["vpnNameTtl"] or 5
+        self.settings = settings
+
+    def cli_settings(self, values):
+        """What `x-ui setting -dnsExitApiKey/-vpnName/-vpnNameTtl/-domainExpiry` stores (the fake x-ui of the tests)."""
+        for key, value in values.items():
+            if key not in ("dnsExitApiKey", "vpnName", "vpnNameTtl", "domainExpiry"):
+                raise BadRequest(f"no such flag -{key}")
+            if key == "vpnNameTtl":
+                self.settings[key] = int(value)
+            elif key == "vpnName":
+                self.settings[key] = value.strip().lower().rstrip(".")
+            else:
+                self.settings[key] = value.strip()
 
     # --- the Xray template ----------------------------------------------------------------------------------
     def xray_setting(self):
@@ -856,6 +887,9 @@ class Handler(BaseHTTPRequestHandler):
                 reg.panel.warp_fail = seed.get("fail", reg.panel.warp_fail)
                 reg.panel.warp_bad_license = seed.get("badLicense", reg.panel.warp_bad_license)
                 return self._send(200, {"ok": True})
+            if path == "/test/panel/cli":
+                reg.panel.cli_settings(json.loads(raw or "{}"))
+                return self._send(200, {"ok": True})
             if path == "/test/panel/targets":
                 reg.panel.targets = json.loads(raw or "null")
                 return self._send(200, {"ok": True})
@@ -891,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
                 route = path[len(BASE + "panel/setting/"):]
                 reg.calls.append({"method": method, "path": "setting/" + route, "body": raw})
                 if method == "POST" and route == "all":
-                    return self._send(200, {"success": True, "msg": "", "obj": dict(reg.panel.settings)})
+                    return self._send(200, {"success": True, "msg": "", "obj": reg.panel.form_settings()})
                 if method == "POST" and route == "update":
                     reg.panel.update_settings(raw)
                     return self._send(200, {"success": True, "msg": "", "obj": None})

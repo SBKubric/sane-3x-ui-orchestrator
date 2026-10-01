@@ -1,7 +1,7 @@
 ---
 # Role panel: install/update by tag, self-signed TLS, account from the vault, Telegram and monitoring
 # through the x-ui CLI, geosite:ru-inside dropped by the Xray template, the rest of the clients' traffic through WARP,
-# inbounds from panel_inbounds through the API,
+# inbounds from panel_inbounds through the API, the domain settings (public subscription address, VPN name, DNSExit),
 # the «only 443» front (front_mode); leaves panel_url, panel_ca_pem and (with monitoring) panel_mon_token as facts.
 - name: Check role inputs
   ansible.builtin.assert:
@@ -43,6 +43,9 @@
 - name: Monitoring endpoint and token
   ansible.builtin.include_tasks: monitoring.yml
   when: panel_monitoring | bool
+
+- name: Public subscription address, VPN name and DNSExit
+  ansible.builtin.include_tasks: domain.yml
 
 - name: Apply pending panel restarts
   ansible.builtin.meta: flush_handlers
