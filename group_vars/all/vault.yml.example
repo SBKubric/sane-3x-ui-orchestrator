@@ -26,6 +26,9 @@ warp_license: ""
 # which keeps vpn_name on the active edge, #56), optional; empty = the records are only read, the owner sets them by
 # hand, and the panel's key is left as it is.
 dnsexit_api_key: ""
+# AmneziaWG 3.0 header protection key (awg genkey) of the panel's AWG server (#68), optional; unset = the panel's own
+# stays, or the panel makes one for a server without. Every client .conf carries it.
+# awg_header_protection_key: ""
 
 # Real host addresses: inventory hostname → public IPv4. The only place they are kept; never put an address
 # into an inventory, README or test. A host without an entry is reached through its ssh alias.

@@ -409,6 +409,57 @@ The panel already puts an I1 (its own `<r N>`) into every `.conf`, so the mimicr
 amnezia-client, bivlked/amneziawg-installer `ADVANCED.en.md` (field reports), voidwaifu/Special-Junk-Packet-List,
 SagePtr/mini_quic_generator.
 
+### AmneziaWG 3.0
+
+The panel's AWG server runs AmneziaWG 3.0 in full (orchestrator#68): header protection plus randomised timers, on
+top of the 2.0 set and the mimicry above. The panel (sane-3x-ui) stores the 3.0 fields with the server and writes
+them into `awg0.conf` and every client `.conf` when the kernel module takes them (it probes the module itself;
+`GET panel/api/awg/server/status` → `supportsV3`). The role sets them through the same save of `POST
+panel/api/awg/server` as the mimicry, under the same rules.
+
+| Variable | Meaning |
+|---|---|
+| `awg_v3` | `true` (default): turn 3.0 on; `false`: the role leaves the panel's 3.0 fields as they are |
+| `awg_header_protection_key` | vault, optional: the `HeaderProtectionKey` (base64 of 32 bytes, `awg genkey`). Unset: the server's own key stays; a server without one gets a new key from the panel (`POST panel/api/awg/server/generate?std=3`, which saves nothing) in the run that saves it, so a second run keeps it |
+| `awg_v3_params` | optional `{contentPaddingAddition, rekeyAfterTime, rekeyTimeout, rejectAfterTime, keepaliveTimeout, maxHandshakeAttempts}`, each `"N"` or `"low-high"` (0..65535), over the defaults below |
+
+What the role sets:
+
+- **`HeaderProtectionKey`** encrypts the low-entropy header fields WireGuard keeps in the clear. It is the one 3.0
+  parameter both ends must share: a client `.conf` without it gets no handshake.
+- **S1-S4 at least 12.** Header protection takes its nonce from the first 12 bytes of the padding, and the kernel
+  refuses the interface with less. A smaller S is raised by 12 (S1 one more if that made S1 + 56 = S2, which the
+  kernel refuses too); an `awg_obfuscation` S below 12 is refused before the run. S1-S4 must match on both ends.
+- **Ranges** (one-sided: each end may differ, the panel writes the server's into the clients' `.conf` too). The
+  kernel draws a value inside a range per session, so no two sessions share a timing profile. The defaults
+  (`panel_awg_v3_defaults`) sit around WireGuard's constants, and the rekey window stays below the reject one:
+
+  | Field | WireGuard | Default |
+  |---|---|---|
+  | `ContentPaddingAddition` (extra padding inside the encrypted part, bytes) | — | `8-40` |
+  | `RekeyAfterTime` (s) | 120 | `105-125` |
+  | `RekeyTimeout` (s) | 5 | `4-7` |
+  | `RejectAfterTime` (s) | 180 | `170-195` |
+  | `KeepaliveTimeout` (s) | 10 | `8-12` |
+  | `MaxHandshakeAttempts` | 18 | `15-21` |
+
+  `PersistentKeepalive` as a range (a `[Peer]` field) is not set: the panel keeps it per client as one number
+  (SBKubric/sane-3x-ui#234). `RandomTrailers` and `DisableCookies` stay as the panel has them (it turns
+  `RandomTrailers` on for a new server).
+
+**When.** As with the mimicry: a new server (no AWG inbound, no AWG clients) takes it with its first save. A server
+in use keeps its set with a `WARNING` (it names what differs, "AmneziaWG 3.0 is not on yet" when the key is
+missing) until a run with `awg_obfuscation_apply: true`, which prints a `NOTE`. **This change is breaking:** an old
+`.conf` gets no handshake once the server has a key or new S1-S4, so every client needs the new `.conf` (the
+panel's send-configs button / the bot's broadcast of new links and configs, or by hand) and an AmneziaWG 3.0 app
+(amneziawg-go with `HeaderProtectionKey`). The monitoring probes take theirs from the panel. On a host whose kernel
+module does not take 3.0 (`supportsV3` false) the role skips it with a `WARNING` and sets the mimicry alone.
+
+```sh
+# the stand's existing server (2.0 set, no key), once; then send the new configs from the panel
+ansible-playbook -i inventories/stand-full site.yml --tags panel -e awg_obfuscation_apply=true
+```
+
 ### Blocking ru-inside
 
 Clients of the panel get no answer from the sites of `geosite:ru-inside`
@@ -930,7 +981,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `awg_v3` (AmneziaWG 3.0) the server's `/etc/amnezia/amneziawg/awg0.conf` has the panel's `HeaderProtectionKey`, S1-S4 and 3.0 fields, and the `.conf` the panel hands a client (`awg_verify_client`, default the first enabled AWG client) the same key (a failure otherwise), a `WARNING` for a server without a key or with S1-S4 below 12 (it waits for `awg_obfuscation_apply`) and for a kernel module without 3.0; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -953,7 +1004,7 @@ to look; the first group that fails ends the run.
 Secrets live in `group_vars/all/vault.yml` next to the playbooks, shared by every profile, and never in
 git (`.gitignore`). Keys: `panel_user`, `panel_password`, `panel_port`, `panel_base_path`,
 `mon_admin_user`, `mon_admin_password`, `tg_bot_token`, `tg_chat_id`, optionally `warp_license` and
-`dnsexit_api_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
+`dnsexit_api_key` and `awg_header_protection_key`, and `vault_hosts` — the real host addresses, the only place they are kept (see `vault.yml.example`).
 
 ```sh
 cp group_vars/all/vault.yml.example group_vars/all/vault.yml

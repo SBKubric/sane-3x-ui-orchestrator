@@ -15,6 +15,9 @@
 #   panel      AmneziaWG: routeViaXray on and the TPROXY inbound (awg-tproxy-in) in the config xray runs; a warning
 #              otherwise (its clients would leave directly, past ru-inside and WARP)
 #   panel      AmneziaWG: the server's I1 against awg_mimic_protocol (a warning, no failure)
+#   panel      AmneziaWG 3.0 (awg_v3): the server's awg0.conf has the panel's HeaderProtectionKey, S1-S4 and 3.0 fields, and a
+#              client's .conf (awg_verify_client) the same key; a server without header protection or with S1-S4 below 12
+#              is a warning (it waits for awg_obfuscation_apply), so is a kernel module without 3.0
 #   panel      (with vpn_name) the VPN name's A record at DNSExit's nameservers is the active edge's address (a warning,
 #              no failure: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL)
 #   panel      (with a showcase) the showcase's address is among the panel's frontTrustedAddrs (a warning, no failure)

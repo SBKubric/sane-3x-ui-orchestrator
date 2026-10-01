@@ -43,6 +43,7 @@ web/entity/front_trusted.go does (comma-separated, masked networks, v4-mapped as
 POST /test/panel/reset {"without": [key, ...]} drops form keys (a panel from before a setting).
 """
 
+import base64
 import ipaddress
 import json
 import os
@@ -383,7 +384,66 @@ UPDATE_COPIED = ("up", "down", "total", "remark", "enable", "expiryTime", "traff
 AWG_FIELDS = {"kind": str, "id": int, "enable": bool, "interfaceName": str, "listenPort": int, "mtu": int,
               "privateKey": str, "publicKey": str, "jc": int, "jmin": int, "jmax": int, "s1": int, "s2": int, "s3": int,
               "s4": int, "h1": str, "h2": str, "h3": str, "h4": str, "i1": str, "i2": str, "i3": str, "i4": str, "i5": str,
-              "endpoint": str, "routeViaXray": bool, "xrayInboundTag": str, "xrayTproxyPort": int}
+              "endpoint": str, "routeViaXray": bool, "xrayInboundTag": str, "xrayTproxyPort": int,
+              # AmneziaWG 3.0 (model.TunnelServer): header protection, the one-sided ranges, two switches.
+              "headerProtectionKey": str, "contentPaddingAddition": str, "rekeyAfterTime": str, "rekeyTimeout": str,
+              "rejectAfterTime": str, "keepaliveTimeout": str, "maxHandshakeAttempts": str, "randomTrailers": bool,
+              "disableCookies": bool}
+# The 3.0 range fields, in the order tunnel.writeObfuscation30 writes them, with their config names.
+AWG_V3_RANGES = [("contentPaddingAddition", "ContentPaddingAddition"), ("rekeyAfterTime", "RekeyAfterTime"),
+                 ("rekeyTimeout", "RekeyTimeout"), ("rejectAfterTime", "RejectAfterTime"),
+                 ("keepaliveTimeout", "KeepaliveTimeout"), ("maxHandshakeAttempts", "MaxHandshakeAttempts")]
+
+
+def hp_key():
+    """A header protection key as tunnel.GenerateHeaderProtectionKey makes it: base64 of 32 random bytes."""
+    return base64.b64encode(secrets.token_bytes(32)).decode()
+
+
+def validate_awg(server):
+    """tunnel.ValidateObfuscation, the parts the role can trip: S3/S4 bounds, the 3.0 ranges, the key, and
+    header protection's S1-S4 >= 12."""
+    if not 0 <= server["s3"] <= 64 or not 0 <= server["s4"] <= 32:
+        raise Refusal("awg_obf", f"invalid S3/S4 {server['s3']}/{server['s4']}")
+    for field, name in AWG_V3_RANGES:
+        value = (server.get(field) or "").strip()
+        if not value:
+            continue
+        low, _, high = value.partition("-")
+        try:
+            low, high = int(low), int(high or low)
+        except ValueError as err:
+            raise Refusal("awg_obf", f"invalid {name}: {value!r}") from err
+        if low < 0 or high > 65535 or low > high:
+            raise Refusal("awg_obf", f"invalid {name}: {value!r}")
+    key = (server.get("headerProtectionKey") or "").strip()
+    if not key:
+        return
+    try:
+        raw = base64.b64decode(key, validate=True)
+    except ValueError as err:
+        raise Refusal("awg_obf", "invalid HeaderProtectionKey: must be base64") from err
+    if len(raw) != 32:
+        raise Refusal("awg_obf", f"invalid HeaderProtectionKey: must decode to 32 bytes, got {len(raw)}")
+    for i, pad in enumerate([server["s1"], server["s2"], server["s3"], server["s4"]], 1):
+        if pad < 12:
+            raise Refusal("awg_obf", f"padding S{i} = {pad} is too small for header protection")
+
+
+def awg_obfuscation_lines(server, v3):
+    """tunnel.writeObfuscation: the 2.0 set, then the 3.0 one only where the kernel takes it (SupportsV3)."""
+    lines = [f"Jc = {server['jc']}", f"Jmin = {server['jmin']}", f"Jmax = {server['jmax']}", f"S1 = {server['s1']}",
+             f"S2 = {server['s2']}"]
+    lines += [f"S{i} = {server[f's{i}']}" for i in (3, 4) if server[f"s{i}"] > 0]
+    lines += [f"H{i} = {server[f'h{i}'] or i}" for i in range(1, 5)]
+    lines += [f"I{i} = {server[f'i{i}']}" for i in range(1, 6) if server[f"i{i}"]]
+    if v3:
+        if (server.get("headerProtectionKey") or "").strip():
+            lines.append(f"HeaderProtectionKey = {server['headerProtectionKey'].strip()}")
+        lines += [f"{name} = {server[field].strip()}" for field, name in AWG_V3_RANGES if (server.get(field) or "").strip()]
+        lines += [f"{name} = on" for field, name in (("randomTrailers", "RandomTrailers"), ("disableCookies", "DisableCookies"))
+                  if server.get(field)]
+    return lines
 
 
 def bind(raw, fields):
@@ -464,8 +524,19 @@ class Panel:
                     # What the panel seeds a new server with (tunnel.GenerateObfuscation20): random I1, I2-I5 its own.
                     "i1": "<r 153>", "i2": "<b 0xc30000000108><r 20>", "i3": "<b 0x000100002112a442><r 16>",
                     "i4": "<b 0x16feff00000000000000><r 30>", "i5": "<t><r 40>", "endpoint": "10.0.0.1",
-                    "routeViaXray": False, "xrayInboundTag": "awg-tproxy-in", "xrayTproxyPort": 12345}
+                    "routeViaXray": False, "xrayInboundTag": "awg-tproxy-in", "xrayTproxyPort": 12345,
+                    # A host whose kernel module takes 3.0 (supportsV3) seeds the 3.0 set on top
+                    # (tunnel.GenerateObfuscation30): a fresh key and random ranges around WireGuard's timers.
+                    "headerProtectionKey": hp_key(), "contentPaddingAddition": "5-41", "rekeyAfterTime": "103-121",
+                    "rekeyTimeout": "5-7", "rejectAfterTime": "171-190", "keepaliveTimeout": "9-13",
+                    "maxHandshakeAttempts": "15-20", "randomTrailers": True, "disableCookies": False}
         self.awg.update(seed.get("awg", {}))
+        # tunnel.SupportsV3: whether the host's kernel module takes the 3.0 parameters (awg/server/status).
+        self.awg_supports_v3 = seed.get("supportsV3", True)
+        # Where the panel writes <interfaceName>.conf when it applies the server (the test's temp dir, or none).
+        self.awg_conf_dir = seed.get("awgConfDir")
+        self.awg_generated = []
+        self._write_awg_conf()
         # AWG peers (GET awg/clients): users and the monitoring probe peers alike.
         self.awg_clients = list(seed.get("awgClients", []))
         for inbound in seed.get("inbounds", []):
@@ -612,11 +683,56 @@ class Panel:
         if any(body.get(k, self.awg[k]) != self.awg[k] for k in ("routeViaXray", "xrayInboundTag", "xrayTproxyPort")):
             self.awg_bounces += 1
             self.xray_need_restart = True
+        validate_awg(dict(self.awg, **body))
         self.awg.update(body)
         for inbound in self.inbounds:
             if inbound["protocol"] == "amneziawg":
                 inbound["port"] = self.awg["listenPort"]
         self._ports_changed()
+        self._write_awg_conf()
+
+    def _write_awg_conf(self):
+        """WriteServerConfig: the server's [Interface] as tunnel.GenerateServerConfig writes it (no peers here)."""
+        if not self.awg_conf_dir:
+            return
+        server = self.awg
+        lines = ["[Interface]", f"PrivateKey = {server['privateKey']}", "Address = 198.51.100.1/24",
+                 f"ListenPort = {server['listenPort']}", f"MTU = {server['mtu']}"]
+        lines += awg_obfuscation_lines(server, self.awg_supports_v3)
+        Path(self.awg_conf_dir, (server["interfaceName"] or "awg0") + ".conf").write_text("\n".join(lines) + "\n")
+
+    def awg_status(self):
+        return {"running": self.awg["enable"], "awgInstalled": True, "awgVersion": "v3.1.20260812",
+                "supportsV3": self.awg_supports_v3}
+
+    def awg_generate(self, query):
+        """POST awg/server/generate: a fresh parameter set, saved nowhere; std=3 adds the 3.0 half (a new key)."""
+        out = {"jc": 4, "jmin": 50, "jmax": 120, "s1": 30, "s2": 60, "s3": 20, "s4": 14, "h1": "5-2000",
+               "h2": "600000000-600002000", "h3": "1100000000-1100002000", "h4": "1700000000-1700002000",
+               "i1": "<r 64>", "i2": "", "i3": "", "i4": "", "i5": ""}
+        if query.get("std") == ["3"]:
+            if not self.awg_supports_v3:
+                raise Refusal("generate", "AmneziaWG 3.0 needs newer amneziawg-tools and kernel module on this server")
+            key = hp_key()
+            self.awg_generated.append(key)
+            out.update({"headerProtectionKey": key, "contentPaddingAddition": "3-30", "rekeyAfterTime": "100-120",
+                        "rekeyTimeout": "4-6", "rejectAfterTime": "170-190", "keepaliveTimeout": "8-11",
+                        "maxHandshakeAttempts": "14-18", "randomTrailers": True, "disableCookies": False})
+        return out
+
+    def awg_client_config(self, client_id):
+        """GET awg/client/<id>/config: tunnel.GenerateClientConfig, the server's obfuscation in [Interface]."""
+        client = next((c for c in self.awg_clients if c.get("id") == client_id), None)
+        if client is None:
+            raise Refusal("get client config", "record not found")
+        if "config" in client:  # a test's stand-in for a .conf that no longer follows the server
+            return client["config"]
+        lines = ["[Interface]", f"PrivateKey = client-private-{client_id}", f"Address = 198.51.100.{client_id + 1}/32",
+                 "DNS = 192.0.2.53", f"MTU = {self.awg['mtu']}"]
+        lines += awg_obfuscation_lines(self.awg, self.awg_supports_v3)
+        lines += ["", "[Peer]", f"PublicKey = {self.awg['publicKey']}", f"Endpoint = {self.awg['endpoint']}:{self.awg['listenPort']}",
+                  "AllowedIPs = 0.0.0.0/0, ::/0", "PersistentKeepalive = 25"]
+        return "\n".join(lines) + "\n"
 
     def new_x25519(self):
         # xray x25519 prints base64url without padding; x25519Next seeds the next pairs.
@@ -820,7 +936,8 @@ class Panel:
                 "settings": dict(self.settings), "xrayTemplate": json.loads(self.xray_template),
                 "outboundTestUrl": self.outbound_test_url, "hiddifyCompat": self.hiddify_compat,
                 "xrayRestarts": self.xray_restarts, "warp": self.warp, "warpDevice": self.warp_device,
-                "xrayNeedRestart": self.xray_need_restart, "awgBounces": self.awg_bounces}
+                "xrayNeedRestart": self.xray_need_restart, "awgBounces": self.awg_bounces,
+                "awgGenerated": list(self.awg_generated)}
 
 
 ADD_FIELDS = {"name": str, "host": str, "role": str, "subPort": int, "subScheme": str, "position": int,
@@ -1032,6 +1149,10 @@ class Handler(BaseHTTPRequestHandler):
             return dict(panel.awg)
         if method == "GET" and route == "awg/clients":
             return [dict(c) for c in panel.awg_clients]
+        if method == "GET" and route == "awg/server/status":
+            return panel.awg_status()
+        if method == "GET" and route.startswith("awg/client/") and route.endswith("/config") and route.split("/")[2].isdigit():
+            return panel.awg_client_config(int(route.split("/")[2]))
         if method == "GET" and route == "nginx/settings":
             return panel.nginx_settings()
         if method == "GET" and route == "nginx/status":
@@ -1056,6 +1177,8 @@ class Handler(BaseHTTPRequestHandler):
             return panel.set_enable(inbound_id, raw)
         if route == "awg/server":
             return panel.save_awg(raw)
+        if route == "awg/server/generate":
+            return panel.awg_generate(parse_qs(self.path.partition("?")[2]))
         if route == "server/restartXrayService":
             return panel.xray_restart()
         return self._not_found()

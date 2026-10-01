@@ -1,17 +1,24 @@
 ---
 # The AmneziaWG obfuscation the inventory asks for (panel_awg_mimic_want from awg_mimic_want.yml: I1-I5 of the
-# chosen protocol, awg_obfuscation's fields) against the server as read (panel_awg_server, awg_server.yml).
+# chosen protocol, awg_obfuscation's fields; panel_awg_v3_want from awg_v3.yml: AmneziaWG 3.0) against the server as
+# read (panel_awg_server, awg_server.yml).
 # Every client .conf carries the server's values, so a change strands the clients that already have one:
 #   - a new server (no AWG inbound in the panel yet, which the role is about to add, and no AWG clients, not even
 #     a monitoring probe peer) takes them with the save of awg_server.yml, before anyone gets a .conf;
 #   - an existing server that differs gets a WARNING and keeps its values;
 #   - with awg_obfuscation_apply true it takes them too, with a NOTE that the issued .conf files need replacing.
+# A server without a header protection key gets one made by the panel (POST awg/server/generate?std=3, which saves
+# nothing) right before the save; never under --check.
 # Result: fact panel_awg_obf_patch, the fields awg_server.yml adds to its save (empty: nothing to change).
+- name: AmneziaWG 3.0
+  ansible.builtin.include_tasks: awg_v3.yml
+
 - name: Compare the AmneziaWG obfuscation with the inventory
   ansible.builtin.set_fact:
+    panel_awg_obf_want: "{{ panel_awg_mimic_want | combine(panel_awg_v3_want) }}"
     panel_awg_obf_diff: >-
       {%- set out = [] -%}
-      {%- for key, value in panel_awg_mimic_want.items() -%}
+      {%- for key, value in (panel_awg_mimic_want | combine(panel_awg_v3_want)).items() -%}
       {%-   if panel_awg_server[key] | default('', true) | string != value | string -%}
       {%-     set _ = out.append(key) -%}
       {%-   endif -%}
@@ -40,21 +47,49 @@
   ansible.builtin.set_fact:
     panel_awg_obf_new: "{{ panel_awg_obf_new_ }}"
     panel_awg_obf_patch: >-
-      {{ dict(panel_awg_obf_diff | zip(panel_awg_obf_diff | map('extract', panel_awg_mimic_want)))
+      {{ dict(panel_awg_obf_diff | zip(panel_awg_obf_diff | map('extract', panel_awg_obf_want)))
          if panel_awg_obf_diff | length > 0 and (panel_awg_obf_new_ | bool or panel_awg_obfuscation_apply | bool) else {} }}
   vars:
     panel_awg_obf_new_: >-
       {{ panel_awg_obf_diff | length > 0 and not panel_awg_obf_has_inbound | bool
          and panel_awg_obf_clients | default(0) | int == 0 }}
+  no_log: true
+
+- name: Make a header protection key for the AmneziaWG server
+  when:
+    - panel_awg_obf_patch.headerProtectionKey | default('') == panel_awg_v3_new_key
+    - not ansible_check_mode
+  block:
+    - name: Ask the panel for an AmneziaWG 3.0 set
+      ansible.builtin.include_tasks: api.yml
+      vars:
+        panel_call_path: awg/server/generate?std=3
+        panel_call_method: POST
+
+    - name: Require a header protection key from the panel
+      ansible.builtin.assert:
+        that:
+          - panel_call.obj.headerProtectionKey | default('', true) is match(panel_awg_v3_key_re)
+        fail_msg: POST awg/server/generate?std=3 returned no header protection key (base64 of 32 bytes)
+        quiet: true
+
+    - name: Put the new key into the save
+      ansible.builtin.set_fact:
+        panel_awg_obf_patch: "{{ panel_awg_obf_patch | combine({'headerProtectionKey': panel_call.obj.headerProtectionKey}) }}"
+      no_log: true
 
 - name: Warn that the existing AmneziaWG server keeps its obfuscation
   ansible.builtin.debug:
     msg: >-
       WARNING: the AmneziaWG server is in use ({{ 'its AWG inbound exists' if panel_awg_obf_has_inbound | bool
       else panel_awg_obf_clients ~ ' AWG client(s)' }}), so its obfuscation stays as it is: {{ panel_awg_obf_diff | join(', ') }}
-      differ from awg_mimic_protocol {{ panel_awg_mimic_protocol }}{{ ' / awg_obfuscation' if panel_awg_obfuscation | length > 0 else '' }}.
+      differ from awg_mimic_protocol {{ panel_awg_mimic_protocol }}{{ ' / awg_obfuscation' if panel_awg_obfuscation | length > 0 else ''
+      }}{{ ' / awg_v3' if panel_awg_v3_want | length > 0 else '' }}.
       Current I1: '{{ panel_awg_server.i1 | default('', true) }}'; desired I1: '{{ panel_awg_mimic_want.i1 | default('(unchanged)') }}'.
-      Set awg_obfuscation_apply=true to change it; every issued .conf must then be replaced.
+      {{ 'AmneziaWG 3.0 is not on yet: header protection (HeaderProtectionKey' ~ (', S1-S4 >= 12' if panel_awg_obf_diff
+         | select('in', ['s1', 's2', 's3', 's4']) | list | length > 0 else '') ~ ') waits for it. '
+         if 'headerProtectionKey' in panel_awg_obf_diff else '' }}Set awg_obfuscation_apply=true to change it; every issued .conf
+      must then be replaced.
   when:
     - panel_awg_obf_diff | length > 0
     - panel_awg_obf_patch | length == 0
@@ -67,6 +102,8 @@
       '{{ panel_awg_mimic_want.i1 | default('(unchanged)') }}'). Every .conf issued so far must be replaced: send the
       new ones through the bot (the AWG page's send-configs button, POST panel/api/awg/server/notify, which runs
       SendAwgConfigsToClients) or hand them out again. The monitoring probes take theirs from the panel by themselves.
+      {{- (' With header protection (AmneziaWG 3.0) an old .conf gets no handshake at all, and the clients need an'
+           ~ ' AmneziaWG 3.0 app (amneziawg-go with HeaderProtectionKey).') if 'headerProtectionKey' in panel_awg_obf_patch else '' }}
   when:
     - panel_awg_obf_patch | length > 0
     - not panel_awg_obf_new | bool

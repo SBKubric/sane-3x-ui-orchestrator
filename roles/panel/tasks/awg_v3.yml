@@ -1,0 +1,56 @@
+---
+# AmneziaWG 3.0 (awg_v3, README "AmneziaWG 3.0") for the server as read (panel_awg_server, awg_server.yml), on top of
+# the mimicry and awg_obfuscation (panel_awg_mimic_want, awg_mimic_want.yml, which also checked the inputs):
+#   - HeaderProtectionKey: awg_header_protection_key from the vault when given, else the server's own; a server
+#     without one gets a new one from the panel (POST awg/server/generate?std=3, awg_obfuscation.yml) with the save;
+#   - S1-S4 >= 12 (header protection carries its nonce in the padding): a smaller one is raised by 12, and S1 one
+#     more where that would make S1 + 56 = S2 (the kernel refuses two handshake messages of one size);
+#   - the ranges: panel_awg_v3_defaults with awg_v3_params over them.
+# Nothing on a host whose kernel module does not take 3.0 (the panel's own probe, awg/server/status supportsV3):
+# a WARNING. Result: fact panel_awg_v3_want, the fields to set (empty: none), for awg_obfuscation.yml.
+- name: Ask the panel whether the kernel takes AmneziaWG 3.0
+  ansible.builtin.include_tasks: api.yml
+  vars:
+    panel_call_path: awg/server/status
+    panel_call_method: GET
+  when: panel_awg_v3 | bool
+
+- name: Keep the AmneziaWG 3.0 support
+  ansible.builtin.set_fact:
+    panel_awg_v3_supported: "{{ panel_awg_v3 | bool and panel_call.obj.supportsV3 | default(false) | bool }}"
+
+- name: Warn that the host does not take AmneziaWG 3.0
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: AmneziaWG 3.0: the kernel module on {{ inventory_hostname }} does not take the 3.0 parameters
+      (awg/server/status: supportsV3 false, version {{ panel_call.obj.awgVersion | default('unknown') }}), so awg_v3 is
+      skipped: no header protection, S1-S4 and the ranges stay as they are. Upgrade amneziawg (kernel module and tools)
+      and run site.yml again.
+  when:
+    - panel_awg_v3 | bool
+    - not panel_awg_v3_supported | bool
+
+- name: Resolve the AmneziaWG 3.0 fields to set
+  ansible.builtin.set_fact:
+    panel_awg_v3_want: >-
+      {%- set want = {} -%}
+      {%- if panel_awg_v3_supported | bool -%}
+      {%-   set pad = {} -%}
+      {%-   for i in [1, 2, 3, 4] -%}
+      {%-     set key = 's' ~ i -%}
+      {%-     set s = (panel_awg_mimic_want[key] if panel_awg_mimic_want[key] is defined else panel_awg_server[key] | default(0, true)) | int -%}
+      {%-     set _ = pad.update({key: s + panel_awg_v3_min_padding if s < panel_awg_v3_min_padding else s}) -%}
+      {%-   endfor -%}
+      {%-   if pad.s1 + 56 == pad.s2 and pad.s1 != panel_awg_server.s1 | default(0, true) | int -%}
+      {%-     set _ = pad.update({'s1': pad.s1 + 1}) -%}
+      {%-   endif -%}
+      {%-   set _ = want.update(pad) -%}
+      {%-   set own = panel_awg_server.headerProtectionKey | default('', true) | trim -%}
+      {%-   set _ = want.update({'headerProtectionKey': panel_awg_header_protection_key | trim
+                                 if panel_awg_header_protection_key | trim | length > 0 else (own or panel_awg_v3_new_key)}) -%}
+      {%-   for key, value in (panel_awg_v3_defaults | combine(panel_awg_v3_params)).items() -%}
+      {%-     set _ = want.update({key: value | string}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ want }}
+  no_log: true
