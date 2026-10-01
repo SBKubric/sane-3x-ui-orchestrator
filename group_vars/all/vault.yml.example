@@ -21,3 +21,7 @@ tg_chat_id: "-1000000000000"
 
 # WARP+ license key for the panel's WARP (#41), optional; empty = the free account.
 warp_license: ""
+
+# DNSExit API key for the records of dns_zone (role showcase: sub.<dns_zone>, #53), optional; empty = the records are
+# only read, the owner sets them by hand.
+dnsexit_api_key: ""

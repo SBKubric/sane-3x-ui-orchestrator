@@ -23,6 +23,10 @@
 #   panel+hops (front_mode only443) from the controller: the box answers TCP on 443 and not on its old ports (the
 #              panel's port, the sub port 2096, the inbounds' ports), waiting up to 2 minutes; 80 closed is a warning;
 #              on the panel <base>panel/ gets the cover page, not the UI, and POST <base>login works on 443
+#   showcase   nginx config; 80 -> https://<domain>/; 443 with a certificate for the name and the cover page; an unknown
+#              subscription through every edge ends on the cover page; showcase_verify_sub comes back with
+#              Subscription-Userinfo; the fail2ban jail has an action; 80 and 443 from the controller; the DNS record
+#              (a warning, no failure)
 #   monserver  version; admin login; Settings -> Check says "Panel reachable." (so the panel speaks mon-server's
 #              contract) and counts probe links on direct and on every hop of group hops
 #   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
@@ -61,6 +65,16 @@
       when:
         - hop_front_mode | default(front_mode | default('only443')) == 'only443'
         - verify_front_scan | default(true) | bool
+
+- name: Verify subscription showcase
+  hosts: showcase
+  gather_facts: false
+  check_mode: false
+  tasks:
+    - name: Verify the showcase
+      ansible.builtin.include_role:
+        name: showcase
+        tasks_from: verify
 
 - name: Verify monitoring server
   hosts: monserver

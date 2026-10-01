@@ -1,0 +1,18 @@
+# {{ ansible_managed }} (role showcase, orchestrator#53)
+# The subscription showcase's protection, as on the fronts' HTTP side (SBKubric/sane-3x-ui#141): an address that
+# probes subscriptions (an unknown one ended on the cover page) or runs into the limit is banned from 80 and 443.
+# SSH stays open to it. Change a value in /etc/fail2ban/jail.local: fail2ban reads it after this file.
+
+[3ax-ui-showcase-probe]
+enabled           = true
+backend           = auto
+filter            = 3ax-ui-showcase-probe
+logpath           = {{ showcase_miss_log }}
+port              = http,https
+banaction         = {{ showcase_fail2ban_action }}
+maxretry          = {{ showcase_fail2ban_maxretry }}
+findtime          = {{ showcase_fail2ban_findtime }}
+bantime           = {{ showcase_fail2ban_bantime }}
+bantime.increment = true
+bantime.maxtime   = {{ showcase_fail2ban_bantime_max }}
+ignoreip          = {{ ((['127.0.0.1/8', '::1'] if showcase_exempt_loopback | bool else []) + (showcase_exempt | map('string') | map('trim') | reject('equalto', '') | unique | sort | list)) | join(' ') }}

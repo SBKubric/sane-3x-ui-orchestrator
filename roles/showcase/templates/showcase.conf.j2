@@ -1,0 +1,126 @@
+{#- Inputs (tasks/main.yml): showcase_edges_resolved [{name, address, port, scheme}], showcase_paths_resolved [paths],
+    showcase_cert_file, showcase_key_file. -#}
+{%- set intercept = showcase_failover_statuses | map('int') | unique | sort | list -%}
+{%- set edges = showcase_edges_resolved -%}
+{%- macro upstream(edge) -%}
+{{ edge.scheme }}://{{ ('[' ~ edge.address ~ ']') if ':' in edge.address else edge.address }}:{{ edge.port }}
+{%- endmacro -%}
+# {{ ansible_managed }} (role showcase, orchestrator#53)
+# The subscription showcase {{ showcase_domain }}: the panel's subscription paths go to the edges in order, the next
+# edge on a redirect or an error, the cover page when none answered; every other path gets the cover page.
+
+# The limits count per client address (as the fronts' HTTP side, SBKubric/sane-3x-ui#141). An exempt address has an
+# empty key, which limit_req and limit_conn do not count at all.
+geo $showcase_exempt {
+    default 0;
+{% for entry in (['127.0.0.0/8', '::1'] if showcase_exempt_loopback | bool else []) + (showcase_exempt | map('string') | map('trim') | reject('equalto', '') | unique | sort | list) %}
+    {{ entry }} 1;
+{% endfor %}
+}
+
+map $showcase_exempt $showcase_limit_key {
+    1       "";
+    default $binary_remote_addr;
+}
+
+limit_req_zone $showcase_limit_key zone=showcase_sub:5m rate={{ showcase_limit_rate }};
+limit_conn_zone $showcase_limit_key zone=showcase_conn:5m;
+
+# A request that ended on the cover page after the last edge refused it (an unknown subscription: 400, 401, 403, 404)
+# is a miss. $upstream_status lists every edge tried ("302 : 404"); the last one decides.
+map $upstream_status $showcase_upstream_miss {
+    "~(^|\s)40[0134]$" 1;
+    default            0;
+}
+
+# The address first and the request last, escaped by nginx, so a crafted path cannot put another address where the
+# jail looks for one.
+log_format showcase_miss '$remote_addr [$time_local] miss "$request_method $request_uri" $upstream_status';
+log_format showcase_limit '$remote_addr [$time_local] limit "$request_method $request_uri" $status';
+
+server {
+    listen {{ showcase_listen_https }} ssl default_server;
+{% if showcase_listen_ipv6 | bool %}
+    listen [::]:{{ showcase_listen_https }} ssl default_server;
+{% endif %}
+    server_name {{ showcase_domain }};
+
+    ssl_certificate     {{ showcase_cert_file }};
+    ssl_certificate_key {{ showcase_key_file }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:showcase:10m;
+    ssl_session_timeout 1d;
+    ssl_prefer_server_ciphers off;
+
+    access_log off;
+    server_tokens off;
+
+    root {{ showcase_webroot }};
+    index index.html;
+
+    limit_req_status 429;
+    limit_conn_status 429;
+    limit_req_log_level warn;
+    limit_conn_log_level warn;
+
+    # Every edge is asked the same way: by address, without SNI (its front sends a request without SNI to its HTTP
+    # side), the TLS leg unverified (an IP certificate, which proxy_ssl_verify cannot match), the client's Host kept.
+    # The edge's answer goes back unchanged, headers included (Subscription-Userinfo, Profile-Update-Interval,
+    # Content-Disposition, ...).
+    proxy_http_version 1.1;
+    proxy_ssl_server_name off;
+    proxy_ssl_verify off;
+    proxy_connect_timeout {{ showcase_edge_connect_timeout }};
+    proxy_read_timeout {{ showcase_edge_read_timeout }};
+    proxy_send_timeout {{ showcase_edge_read_timeout }};
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header Connection "";
+    proxy_intercept_errors on;
+    # One edge's refusal sends the request to the next one: the error_page of a named location runs again.
+    recursive_error_pages on;
+
+{% for path in showcase_paths_resolved %}
+    # subscription path {{ path }}: {{ edges | map(attribute='name') | join(' -> ') }} -> cover page
+    location {{ path }} {
+        limit_req zone=showcase_sub burst={{ showcase_limit_burst }} nodelay;
+        limit_conn showcase_conn {{ showcase_limit_conns }};
+        # 429 here is this location's own limit (the edges answer theirs with a page, not 429)
+        error_page 429 = @showcase_limited;
+        error_page {{ intercept | reject('equalto', 429) | join(' ') }} = {{ '@showcase_edge_2' if edges | length > 1 else '@showcase_cover' }};
+        proxy_pass {{ upstream(edges[0]) }};
+    }
+
+    # without the slash: the cover page (nginx would answer it with its own redirect to the slash, an "error" here)
+    location = {{ path[:-1] }} {
+        try_files /index.html =404;
+    }
+
+{% endfor %}
+{% for edge in edges[1:] %}
+    # edge {{ loop.index + 1 }}: {{ edge.name }}
+    location @showcase_edge_{{ loop.index + 1 }} {
+        error_page {{ intercept | join(' ') }} = {{ ('@showcase_edge_' ~ (loop.index + 2)) if not loop.last else '@showcase_cover' }};
+        proxy_pass {{ upstream(edge) }};
+    }
+
+{% endfor %}
+    # No edge answered: the cover page, and a miss when the last edge did not know the subscription.
+    location @showcase_cover {
+        access_log {{ showcase_miss_log }} showcase_miss if=$showcase_upstream_miss;
+        try_files /index.html =404;
+    }
+
+    # Over the limit: the cover page as well, so a prober cannot tell the limit from a miss.
+    location @showcase_limited {
+        access_log {{ showcase_miss_log }} showcase_limit;
+        try_files /index.html =404;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

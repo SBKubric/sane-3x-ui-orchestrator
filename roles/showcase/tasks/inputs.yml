@@ -1,0 +1,145 @@
+---
+# What the showcase passes where: showcase_edges_resolved (the edges, active first) and showcase_paths_resolved (the
+# panel's subscription paths). Both can be given by hand (showcase_edges, showcase_sub_paths); otherwise the edges come
+# from group hops and the paths from the panel's settings.
+
+# --- edges -----------------------------------------------------------------------------------------------------------
+- name: Find the edges of group hops
+  ansible.builtin.set_fact:
+    showcase_edge_hosts: >-
+      {%- set edges = groups['hops'] | default([]) | select('in', hostvars) | list -%}
+      {%- set edges = edges | map('extract', hostvars) | selectattr('hop_role', 'defined')
+                      | selectattr('hop_role', 'equalto', 'edge') | map(attribute='inventory_hostname') | list -%}
+      {%- set active = edges | map('extract', hostvars) | selectattr('hop_active', 'defined') | selectattr('hop_active')
+                       | map(attribute='inventory_hostname') | list -%}
+      {{ active + (edges | reject('in', active) | list) }}
+  when: showcase_edges | length == 0
+
+# An edge's address is hop_host from its host_vars, else its default IPv4: the facts of the hops play when it ran, else
+# gathered here.
+- name: Gather the edges' addresses
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  delegate_to: "{{ item }}"
+  delegate_facts: true
+  loop: "{{ showcase_edge_hosts | default([]) }}"
+  when:
+    - showcase_edges | length == 0
+    - hostvars[item].hop_host is not defined
+    - hostvars[item].ansible_facts.default_ipv4.address is not defined
+
+- name: Resolve the edges
+  ansible.builtin.set_fact:
+    showcase_edges_resolved: >-
+      {%- set out = [] -%}
+      {%- if showcase_edges | length > 0 -%}
+      {%-   for edge in showcase_edges -%}
+      {%-     set _ = out.append({'name': edge.name | default(edge.address) | string, 'address': edge.address | string,
+                                  'port': edge.port | default(443) | int, 'scheme': edge.scheme | default('https')}) -%}
+      {%-   endfor -%}
+      {%- else -%}
+      {%-   for host in showcase_edge_hosts -%}
+      {%-     set hv = hostvars[host] -%}
+      {%-     set front = hv.hop_front_mode | default(front_mode | default('only443')) -%}
+      {%-     set tls = hv.hop_tls | default('letsencrypt-ip') -%}
+      {%-     set _ = out.append({'name': hv.hop_name | default(host) | string,
+                                  'address': hv.hop_host | default(hv.ansible_facts.default_ipv4.address) | string,
+                                  'port': 443 if front == 'only443' else hv.hop_sub_port | default(2096) | int,
+                                  'scheme': 'https' if front == 'only443' or tls != 'none' else 'http'}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: Check the edges
+  ansible.builtin.assert:
+    that:
+      - showcase_edges_resolved | length > 0
+      - showcase_edges_resolved | map(attribute='name') | reject('match', '^[A-Za-z0-9._-]{1,64}$') | list | length == 0
+      - showcase_edges_resolved | map(attribute='address') | reject('match', '^([A-Za-z0-9.-]+|[0-9A-Fa-f:.]+)$') | list | length == 0
+      - showcase_edges_resolved | map(attribute='port') | select('lt', 1) | list | length == 0
+      - showcase_edges_resolved | map(attribute='port') | select('gt', 65535) | list | length == 0
+      - showcase_edges_resolved | map(attribute='scheme') | reject('in', ['http', 'https']) | list | length == 0
+    fail_msg: >-
+      showcase {{ inventory_hostname }}: no usable edge ({{ showcase_edges_resolved }}). Group hops needs a hop with
+      hop_role edge (or set showcase_edges: [{name, address, port, scheme}]); names [A-Za-z0-9._-], addresses as IP or
+      DNS name, ports 1-65535, scheme http|https.
+    quiet: true
+
+# --- subscription paths ----------------------------------------------------------------------------------------------
+- name: Read the subscription paths from the panel
+  when: showcase_sub_paths | length == 0
+  block:
+    - name: Require the panel in the inventory
+      ansible.builtin.assert:
+        that:
+          - groups['panel'] | default([]) | length > 0
+        fail_msg: >-
+          showcase {{ inventory_hostname }}: the subscription paths come from the panel's settings, and group panel is
+          empty; list them in showcase_sub_paths (e.g. [/sub-abc123/, /json/, /tun/]).
+        quiet: true
+
+    - name: Log in to the panel
+      ansible.builtin.include_role:
+        name: panel
+        tasks_from: api_login
+        apply:
+          check_mode: false
+
+    - name: Read the panel's settings
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/setting/all"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+        status_code: [200]
+      # delegate_to is templated before the block's condition: the default keeps a skipped run from failing on it.
+      delegate_to: "{{ panel_api_host | default(inventory_hostname) }}"
+      register: showcase_panel_settings
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Require the panel's settings
+      ansible.builtin.assert:
+        that:
+          - showcase_panel_settings.status | default(0) == 200
+          - showcase_panel_settings.json.success | default(false) | bool
+        fail_msg: >-
+          POST panel/setting/all failed: HTTP {{ showcase_panel_settings.status | default('?') }}
+          {{ showcase_panel_settings.json.msg | default('') }}; or list the paths in showcase_sub_paths
+        quiet: true
+
+    - name: Take the subscription paths from the settings
+      ansible.builtin.set_fact:
+        showcase_panel_sub: "{{ showcase_panel_settings.json.obj }}"
+        showcase_paths_from_panel: >-
+          {%- set s = showcase_panel_settings.json.obj -%}
+          {{ [s.subPath | default('')]
+             + ([s.subJsonPath | default('')] if s.subJsonEnable | default(false) | bool else [])
+             + ([s.subClashPath | default('')] if s.subClashEnable | default(false) | bool else [])
+             + [s.subTunPath | default('/tun/', true)] }}
+      no_log: true
+
+    - name: Warn about subscriptions switched off
+      ansible.builtin.debug:
+        msg: "WARNING: the panel's subscriptions are switched off (subEnable false): the showcase passes paths nobody answers"
+      when: not showcase_panel_sub.subEnable | default(true) | bool
+
+- name: Resolve the subscription paths
+  ansible.builtin.set_fact:
+    showcase_paths_resolved: >-
+      {{ (showcase_sub_paths if showcase_sub_paths | length > 0 else showcase_paths_from_panel)
+         | map('string') | map('trim') | reject('equalto', '') | reject('equalto', '/') | unique | list }}
+
+- name: Check the subscription paths
+  ansible.builtin.assert:
+    that:
+      - showcase_paths_resolved | length > 0
+      - showcase_paths_resolved | reject('match', '^/([A-Za-z0-9._~-]+/)+$') | list | length == 0
+    fail_msg: >-
+      showcase {{ inventory_hostname }}: the subscription paths {{ showcase_paths_resolved }} must each start and end
+      with / and hold only [A-Za-z0-9._~-] between the slashes.
+    quiet: true

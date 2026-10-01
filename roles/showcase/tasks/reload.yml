@@ -1,0 +1,24 @@
+---
+# Tests nginx's config and reloads it; a config nginx refuses stops the run and the running nginx keeps the old one.
+- name: Test nginx's config
+  ansible.builtin.command:
+    argv: "{{ showcase_nginx_test_command }}"
+  register: showcase_nginx_test
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require a config nginx accepts
+  ansible.builtin.assert:
+    that:
+      - showcase_nginx_test.rc == 0
+    fail_msg: >-
+      nginx refuses its config on {{ inventory_hostname }}, nothing was reloaded:
+      {{ (showcase_nginx_test.stderr_lines + showcase_nginx_test.stdout_lines)[-10:] }}
+    quiet: true
+
+- name: Reload nginx
+  ansible.builtin.command:
+    argv: "{{ showcase_nginx_reload_command }}"
+  changed_when: true
+  when: not ansible_check_mode

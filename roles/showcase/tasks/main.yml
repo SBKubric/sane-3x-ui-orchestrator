@@ -1,0 +1,148 @@
+---
+# Role showcase (orchestrator#53). In order: the inputs (the edges from group hops, the subscription paths from the
+# panel), nginx with the cover page and port 80 for ACME, the DNS record sub.<domain> -> this box (DNSExit), the
+# certificate, then the showcase itself on 443 and fail2ban's jail. nginx is tested (`nginx -t`) before every reload,
+# so a bad config never replaces a working one.
+- name: Check the showcase inputs
+  ansible.builtin.assert:
+    that:
+      - groups['showcase'] | length == 1
+      - showcase_domain | length > 0
+      - showcase_domain is match('^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
+      - showcase_tls in ['letsencrypt', 'manual']
+      - showcase_tls != 'manual' or (showcase_cert | length > 0 and showcase_key | length > 0)
+      - showcase_listen_http | int >= 1 and showcase_listen_http | int <= 65535
+      - showcase_listen_https | int >= 1 and showcase_listen_https | int <= 65535
+      - showcase_limit_rate is match('^[0-9]+r/[sm]$')
+      - showcase_failover_statuses | map('int') | select('ge', 300) | select('le', 599) | list | length == showcase_failover_statuses | length
+    fail_msg: >-
+      showcase {{ inventory_hostname }}: needs exactly one host in group showcase (it has {{ groups['showcase'] | length }}),
+      showcase_domain as a lower-case DNS name (set dns_zone for sub.<dns_zone>; now '{{ showcase_domain }}'),
+      showcase_tls letsencrypt|manual (manual needs showcase_cert and showcase_key), ports 1-65535, showcase_limit_rate
+      like 30r/m, showcase_failover_statuses 300-599.
+    quiet: true
+
+- name: Gather network facts for the showcase's address
+  ansible.builtin.setup:
+    gather_subset: ["!all", "!min", network]
+  when: ansible_facts['default_ipv4']['address'] is not defined
+
+- name: Check the showcase's address
+  ansible.builtin.assert:
+    that:
+      - showcase_public_ip | string is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+    fail_msg: "showcase {{ inventory_hostname }}: showcase_public_ip '{{ showcase_public_ip }}' is not an IPv4 address"
+    quiet: true
+
+- name: Edges and subscription paths
+  ansible.builtin.include_tasks: inputs.yml
+
+- name: Install nginx and fail2ban
+  ansible.builtin.apt:
+    name: "{{ showcase_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: showcase_install_packages | bool
+
+- name: Create the webroots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ showcase_webroot }}"
+    - "{{ showcase_acme_webroot }}"
+    - "{{ showcase_nginx_conf_dir }}"
+  register: showcase_dirs
+
+# Check mode on a fresh box: what follows writes into these directories, which do not exist yet.
+- name: Stop here on a fresh box (check mode)
+  when:
+    - ansible_check_mode
+    - showcase_dirs is changed
+  block:
+    - name: Show what a real run would do
+      ansible.builtin.debug:
+        msg: >-
+          check mode on a fresh box: a real run installs the showcase https://{{ showcase_domain }}/ passing
+          {{ showcase_paths_resolved | join(', ') }} to {{ showcase_edges_resolved | map(attribute='name') | join(' -> ') }}
+
+    - name: End the host's run
+      ansible.builtin.meta: end_host
+
+# The cover page (#153/#160 of the panel): the welcome page this box's nginx package installed, the bytes any fresh
+# nginx on this distribution shows; the stock page shipped with the role only when the package left none.
+- name: Look for nginx's welcome page
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ showcase_welcome_pages }}"
+  register: showcase_welcome
+
+- name: Copy the welcome page as the cover page
+  ansible.builtin.copy:
+    src: "{{ (showcase_welcome.results | selectattr('stat.exists') | selectattr('stat.isreg') | first).stat.path }}"
+    dest: "{{ showcase_webroot }}/index.html"
+    remote_src: true
+    mode: "0644"
+  when: showcase_welcome.results | selectattr('stat.exists') | selectattr('stat.isreg') | list | length > 0
+
+- name: Install the stock welcome page as the cover page
+  ansible.builtin.copy:
+    src: nginx-welcome.html
+    dest: "{{ showcase_webroot }}/index.html"
+    mode: "0644"
+  when: showcase_welcome.results | selectattr('stat.exists') | selectattr('stat.isreg') | list | length == 0
+
+- name: Take the distro's default site off port 80
+  ansible.builtin.file:
+    path: "{{ showcase_nginx_default_site }}"
+    state: absent
+  when: showcase_nginx_default_site | length > 0
+  register: showcase_default_site
+
+- name: Write port 80 (ACME challenge, redirect to https)
+  ansible.builtin.template:
+    src: showcase-acme.conf.j2
+    dest: "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase-acme.conf"
+    mode: "0644"
+  register: showcase_acme_conf
+
+- name: Start nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started
+  when: showcase_manage_services | bool
+
+- name: Reload nginx with port 80
+  ansible.builtin.include_tasks: reload.yml
+  when: showcase_acme_conf is changed or showcase_default_site is changed
+
+- name: The DNS record
+  ansible.builtin.include_tasks: dns.yml
+  when: showcase_dns_check | bool or showcase_dns_manage | bool
+
+- name: The certificate
+  ansible.builtin.include_tasks: cert.yml
+
+- name: Write the showcase
+  ansible.builtin.template:
+    src: showcase.conf.j2
+    dest: "{{ showcase_nginx_conf_dir }}/3ax-ui-showcase.conf"
+    mode: "0644"
+  register: showcase_site_conf
+
+- name: Reload nginx with the showcase
+  ansible.builtin.include_tasks: reload.yml
+  when: showcase_site_conf is changed or showcase_cert_installed | default(false) | bool
+
+- name: Fail2ban for the showcase
+  ansible.builtin.include_tasks: fail2ban.yml
+  when: showcase_fail2ban_enabled | bool
+
+- name: Show the showcase
+  ansible.builtin.debug:
+    msg: >-
+      showcase https://{{ showcase_domain }}/ on {{ showcase_public_ip }}: {{ showcase_paths_resolved | join(', ') }}
+      -> {{ showcase_edges_resolved | map(attribute='name') | join(' -> ') }} -> cover page

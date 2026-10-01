@@ -13,3 +13,6 @@ front_mode: only443
 acme_production: false
 # Approve new mon-client pairing requests automatically through the mon-server admin API.
 mon_auto_approve: true
+# The project's domain at DNSExit (map #52): the subscription showcase answers sub.<dns_zone> (group showcase, role
+# showcase); the A record is written through the DNSExit API when the vault has dnsexit_api_key. Not set on the stand.
+# dns_zone: example.com

@@ -1,7 +1,7 @@
 ---
 # Converges the whole installation described by the inventory profile:
 #   ansible-playbook -i inventories/<profile> site.yml
-# One play per group, in order panel -> hops -> (panel inbounds again) -> monserver -> monclient.
+# One play per group, in order panel -> hops -> (panel inbounds again) -> showcase -> monserver -> monclient.
 # front_mode only443 (default) converges from the inside out: the panel behind its front, then each hop from the
 # panel outward, each waiting for its front report (443/https in the registry) before the next (README "Front").
 # An empty group (e.g. monserver/monclient in stand-chain) matches no hosts and is skipped.
@@ -40,6 +40,15 @@
         name: panel
         tasks_from: inbounds
       when: panel_inbounds | default([]) | selectattr('followChain', 'defined') | selectattr('followChain') | list | length > 0
+
+# The subscription showcase (orchestrator#53): a VPS of its own that passes the panel's subscription paths to the edges,
+# so it comes after the hops; empty group showcase = skipped.
+- name: Subscription showcase
+  hosts: showcase
+  gather_facts: false
+  tags: [showcase]
+  roles:
+    - role: showcase
 
 - name: Monitoring server
   hosts: monserver
