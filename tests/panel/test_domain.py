@@ -123,6 +123,7 @@ class DomainTest(unittest.TestCase):
         variables = dict({"panel_bin": str(self.tmp / "x-ui"), "panel_dnsexit_key_state": str(self.tmp / "dnsexit-key.sha256"),
                           "panel_vpn_name_nameservers": [self.dns.nameserver],
                           "panel_vpn_name_dns_state": str(self.tmp / "dnsexit-state.json")}, **extra, panel_test_tasks=tasks)
+        variables = {name: value for name, value in variables.items() if value is not None}  # None = the role's default
         files = []
         for suffix, text in ((".json", json.dumps(variables)), (".yml", yaml_extra or "{}\n")):
             with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as f:
@@ -421,6 +422,29 @@ class DomainTest(unittest.TestCase):
         self.edges(active="")
         out = flat(self.play("verify_vpn_name", vpn_name="vpn.example.com", dns_zone="example.com"))
         self.assertIn("WARNING: VPN name vpn.example.com: the chain registry has no active edge", out)
+
+    def test_verify_finds_the_zone_nameservers_by_default(self):
+        # orchestrator#64: the zone box.example.com has no NS of its own; its parent's servers are ns1 (SERVFAIL for
+        # it) and ns11 (self.dns), all on one port as real ones on 53. The resolver knows the delegation.
+        port = int(self.dns.nameserver.rsplit(":", 1)[1])
+        broken = mock_dnsexit.MockDNSExit(host="127.0.0.3", port=port).start()
+        self.addCleanup(broken.stop)
+        broken.servfail = True
+        resolver = mock_dnsexit.MockDNSExit()
+        resolver.authoritative = False
+        resolver.ns["example.com"] = ["ns1.example.net", "ns11.example.net"]
+        resolver.records.update({"box.example.com": [], "ns1.example.net": ["127.0.0.3"], "ns11.example.net": ["127.0.0.1"]})
+        resolver.start()
+        self.addCleanup(resolver.stop)
+        self.edges()
+        self.records("vpn.box.example.com", ["203.0.113.20"])
+        command = ["{{ ansible_playbook_python }}", str(REPO / "roles/showcase/files/dnsexit.py"),
+                   "--resolvers", resolver.nameserver, "--ns-port", str(port)]
+        out = flat(self.play("verify_vpn_name", vpn_name="vpn.box.example.com", dns_zone="box.example.com",
+                             panel_vpn_name_nameservers=None, panel_vpn_name_dns_command=command))
+        self.assertIn("VPN name: vpn.box.example.com already points at 203.0.113.20 (ns11.example.net)", out)
+        self.assertNotIn("WARNING", out)
+        self.assertGreater(broken.queries, 0, "the first nameserver found was not asked")
 
 
 if __name__ == "__main__":

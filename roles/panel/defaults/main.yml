@@ -281,14 +281,17 @@ panel_dnsexit_key_state: "{{ panel_etc_dir }}/3ax-dnsexit-key.sha256"
 # Compared with the panel's list as a set, both normalised the way the panel stores them (filter_plugins/front_trusted.py).
 panel_front_trusted_addrs: "{{ front_trusted_addrs | default([]) }}"
 panel_front_trusted_ipv4_re: '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$'
-# verify.yml (tasks/verify_vpn_name.yml): the VPN name's A record read from DNSExit's nameservers (role showcase's
+# verify.yml (tasks/verify_vpn_name.yml): the VPN name's A record read from the zone's nameservers (role showcase's
 # files/dnsexit.py --check-only, on the controller) against the active edge's address in the chain registry; a
 # mismatch is a WARNING (the panel moves the record at most once in 4 minutes, and resolvers keep the old answer for
 # vpnNameTtl minutes).
 panel_vpn_name_zone: >-
   {{ dns_zone if dns_zone | default('') | length > 0 and (panel_vpn_name | lower | regex_replace('\.$', '')).endswith('.' ~ dns_zone)
      else panel_vpn_name | lower | regex_replace('\.$', '') | regex_replace('^[^.]*\.', '') }}
-panel_vpn_name_nameservers: [ns1.dnsexit.com, ns2.dnsexit.com, ns3.dnsexit.com, ns4.dnsexit.com]
+# The nameservers the record is read from; empty = found by dnsexit.py through the controller's resolvers (the NS
+# records of panel_vpn_name_zone, else of its parent, and so on: orchestrator#64, as role showcase's
+# showcase_dns_nameservers). A list here overrides the search.
+panel_vpn_name_nameservers: []
 panel_vpn_name_dns_state: "{{ playbook_dir }}/.cache/dnsexit/state.json"
 panel_vpn_name_dns_command: ["{{ ansible_playbook_python }}", "{{ role_path }}/../showcase/files/dnsexit.py"]
 

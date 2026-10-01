@@ -4,7 +4,8 @@
 
 The record already right (no post), wrong or missing (one post, read back from the nameserver), the API refusing (the
 key never printed), the 4-minute limit kept across runs through the state file, a nameserver that does not answer
-(the state decides), --check-only, bad arguments.
+(the state decides), SERVFAIL and non-authoritative answers taken for no answer, the zone's nameservers found through a
+resolver above the zone (orchestrator#64), --check-only, bad arguments.
 """
 
 import json
@@ -38,10 +39,11 @@ class DNSExitScriptTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_script(self, *extra, key=KEY, content="203.0.113.10", name="sub.example.test", interval="240",
-                   nameservers=None):
+                   nameservers=None, zone="example.test"):
         env = dict(os.environ, DNSEXIT_API_KEY=key)
-        run = subprocess.run([sys.executable, str(SCRIPT), "--api-url", self.dns.api_url, "--zone", "example.test",
-                              "--name", name, "--content", content, "--nameservers", nameservers or self.dns.nameserver,
+        nameservers = self.dns.nameserver if nameservers is None else nameservers
+        run = subprocess.run([sys.executable, str(SCRIPT), "--api-url", self.dns.api_url, "--zone", zone,
+                              "--name", name, "--content", content, "--nameservers", nameservers,
                               "--state", str(self.tmp / "state.json"), "--min-interval", interval, "--wait", "3",
                               "--poll", "0.2", "--timeout", "0.5", *extra],
                              env=env, capture_output=True, text=True, check=False)
@@ -107,6 +109,88 @@ class DNSExitScriptTest(unittest.TestCase):
         self.dns.records["sub.example.test"] = ["203.0.113.10"]
         rc, out = self.run_script(nameservers=f"127.0.0.1:9,{self.dns.nameserver}")
         self.assertEqual((rc, out["action"], out["nameserver"]), (0, "none", self.dns.nameserver))
+
+    def other_nameserver(self, host="127.0.0.3", **state):
+        server = MockDNSExit(zone="example.test", host=host, port=int(self.dns.nameserver.rsplit(":", 1)[1])).start()
+        self.addCleanup(server.stop)
+        for key, value in state.items():
+            setattr(server, key, value)
+        return server
+
+    def test_a_servfail_is_not_an_empty_record(self):
+        # orchestrator#64: DNSExit's ns1 answers SERVFAIL for a zone their ns11/ns13 serve.
+        self.dns.records["sub.example.test"] = ["203.0.113.10"]
+        broken = self.other_nameserver(servfail=True)
+        rc, out = self.run_script(nameservers=f"{broken.nameserver},{self.dns.nameserver}")
+        self.assertEqual((rc, out["action"], out["nameserver"]), (0, "none", self.dns.nameserver), out)
+        self.assertEqual(self.dns.posts, [])
+
+    def test_a_non_authoritative_answer_is_not_the_record(self):
+        # A server that does not serve the zone (no AA flag) answering "nothing" is no answer: ask the next one.
+        self.dns.records["sub.example.test"] = ["203.0.113.10"]
+        cache = self.other_nameserver(authoritative=False)
+        rc, out = self.run_script(nameservers=f"{cache.nameserver},{self.dns.nameserver}")
+        self.assertEqual((rc, out["action"], out["nameserver"]), (0, "none", self.dns.nameserver), out)
+        self.assertGreater(cache.queries, 0)
+        self.assertEqual(self.dns.posts, [])
+
+    def test_only_servers_that_do_not_answer_leave_it_to_the_state(self):
+        broken = self.other_nameserver(servfail=True)
+        cache = self.other_nameserver(host="127.0.0.4", authoritative=False)
+        rc, out = self.run_script("--check-only", key="", nameservers=f"{broken.nameserver},{cache.nameserver}")
+        self.assertEqual((rc, out["action"], out["current"]), (0, "unknown", None), out)
+
+    def discovery(self):
+        """orchestrator#64 as on the stand: the zone box.example.test has no NS of its own, its parent example.test is
+        served by ns1 (SERVFAIL for it) and ns11 (self.dns), not by the servers a default would name. The resolver
+        knows the delegation; every nameserver listens on the same port (--ns-port), as real ones all on 53."""
+        self.dns.zone = "box.example.test"
+        port = self.dns.nameserver.rsplit(":", 1)[1]
+        self.other_nameserver(servfail=True)
+        resolver = MockDNSExit(zone="example.test")
+        resolver.authoritative = False
+        resolver.ns["example.test"] = ["ns1.example.net", "ns11.example.net"]
+        resolver.records.update({"box.example.test": [], "ns1.example.net": ["127.0.0.3"],
+                                 "ns11.example.net": ["127.0.0.1"]})
+        resolver.start()
+        self.addCleanup(resolver.stop)
+        return resolver, ["--resolvers", resolver.nameserver, "--ns-port", port]
+
+    def test_the_zone_nameservers_are_found_above_the_zone(self):
+        resolver, flags = self.discovery()
+        self.dns.records["vpn.box.example.test"] = ["198.51.100.7"]
+        rc, out = self.run_script("--check-only", *flags, key="", zone="box.example.test", name="vpn.box.example.test",
+                                  nameservers="")
+        self.assertEqual((rc, out["action"], out["current"], out["nameserver"]),
+                         (0, "mismatch", ["198.51.100.7"], "ns11.example.net"), out)
+        self.assertEqual((out["nameservers"], out["nameservers_of"]),
+                         (["ns1.example.net", "ns11.example.net"], "example.test"))
+
+    def test_a_record_is_posted_and_read_back_from_the_found_nameservers(self):
+        _, flags = self.discovery()
+        rc, out = self.run_script(*flags, zone="box.example.test", name="vpn.box.example.test", nameservers="")
+        self.assertEqual((rc, out["action"], out["current"], out["nameserver"]),
+                         (0, "posted", ["203.0.113.10"], "ns11.example.net"), out)
+        self.assertEqual(self.dns.posts[0]["body"]["add"]["name"], "vpn")
+        rc, out = self.run_script(*flags, zone="box.example.test", name="vpn.box.example.test", nameservers="")
+        self.assertEqual((rc, out["action"]), (0, "none"), out)
+        self.assertEqual(len(self.dns.posts), 1)
+
+    def test_a_silent_resolver_leaves_it_to_the_state(self):
+        resolver, flags = self.discovery()
+        resolver.silent = True
+        rc, out = self.run_script("--check-only", *flags, key="", zone="box.example.test", name="vpn.box.example.test",
+                                  nameservers="")
+        self.assertEqual((rc, out["action"], out["current"], out["nameservers"]), (0, "unknown", None, []), out)
+        self.assertIn("could not find the nameservers of box.example.test", out["message"])
+
+    def test_given_nameservers_are_asked_without_discovery(self):
+        resolver, flags = self.discovery()
+        self.dns.records["vpn.box.example.test"] = ["203.0.113.10"]
+        rc, out = self.run_script(*flags, zone="box.example.test", name="vpn.box.example.test")
+        self.assertEqual((rc, out["action"], out["nameserver"], out["nameservers_of"]),
+                         (0, "none", self.dns.nameserver, None), out)
+        self.assertEqual(resolver.queries, 0, "given nameservers, yet the resolver was asked")
 
     def test_check_only_reads_and_never_posts(self):
         self.dns.records["sub.example.test"] = ["198.51.100.1"]
