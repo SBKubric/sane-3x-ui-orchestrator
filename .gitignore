@@ -6,3 +6,5 @@ vault.yml
 .ansible/
 # Scanner and xray the hop role downloads for the neighbour target (hop_neighbour_cache).
 .cache/
+# Output of run.sh.
+/logs/

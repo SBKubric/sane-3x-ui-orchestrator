@@ -20,6 +20,7 @@ site.yml               converge: common -> panel -> hops -> panel inbounds again
 wipe.yml               destroy state for a fresh start; refuses without -e wipe_confirm=yes
                        (steps: roles/<role>/tasks/wipe.yml)
 verify.yml             non-destructive checks; also imported last by site.yml (tag verify)
+run.sh                 runs site/verify/wipe/ping for a profile in the ansible image, logs in logs/
                        (steps: roles/<role>/tasks/verify.yml)
 vault_guard.yml        imported first by the three: refuses a vault shared by every profile (group_vars/all/vault.yml)
 inventories/
@@ -1090,6 +1091,21 @@ Give the password to each run with `--ask-vault-pass`, or keep it in a file outs
 `ANSIBLE_VAULT_PASSWORD_FILE`).
 
 ## Running
+
+`run.sh` wraps the commands below: it runs them in the operator's ansible image (`ANSIBLE_IMAGE`, default
+`o1-ansible:latest`; `native` for a local ansible) with the vault password file (`VAULT_PASS_FILE`, default
+`~/.3ax-vault-pass`) and ssh keys from `~/.ssh`, checks that the profile's vault exists, asks to type the profile's
+name before a wipe, and keeps each run's output in `logs/`:
+
+```sh
+./run.sh production ping                       # reach every host of the profile
+./run.sh production wipe                       # destroy everything on the profile's hosts (asks first)
+./run.sh production site                       # converge, ends with verify.yml
+./run.sh production verify
+./run.sh stand-full site --tags panel,hops     # extra arguments go to ansible-playbook
+```
+
+The same by hand:
 
 ```sh
 # Converge (install or update to the tags in group_vars, configure, join, verify):
