@@ -1,5 +1,5 @@
 ---
-# Spare edge hop (standby); hop_next is derived: no inner hop, so the panel.
+# Spare edge hop (standby); hop_next is derived (outermost inner hop = bridge).
 # Switching the active edge to it is the owner's step (bot /proxy, chain editor or API);
 # the neighbour target is scanned around its own /24 like proxy's.
 hop_name: proxy2
