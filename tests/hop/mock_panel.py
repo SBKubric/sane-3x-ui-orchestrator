@@ -41,6 +41,13 @@ which panel/setting/all shows only as the mask "********" and a save of the mask
 frontTrustedAddrs): the form shows them as stored, `x-ui setting -frontTrustedAddrs` stores them normalised the way
 web/entity/front_trusted.go does (comma-separated, masked networks, v4-mapped as v4, order kept, no repeats).
 POST /test/panel/reset {"without": [key, ...]} drops form keys (a panel from before a setting).
+
+And the bot's captcha host (#243, tgCaptchaHost: "" = the active edge, edge, panel or a hop name): the form shows it,
+`x-ui setting -tgCaptchaHost` stores it (trimmed; empty clears it). POST panel/setting/botPath answers the bot's path
+/third-party/<secret>/ and captchaUrl = <base>/third-party/<secret>/captcha, the base being the one seeded for the chosen
+host (POST /test/panel/reset {"captchaBases": {"edge"|"panel"|<hop>: "https://..."}}; "" = edge), "" when none is seeded
+(the host is unusable). GET /third-party/<secret>/captcha is the captcha page; with {"captchaCover": true} the cover page
+the front answers an unknown path with (200 too); any other path under /third-party/ is a bare 404.
 """
 
 import base64
@@ -92,6 +99,11 @@ DEFAULT_WARP_DEVICE = {
 BASE = "/base/"
 USER, PASSWORD = "admin", "secret-pass"
 COOKIE = "3ax-ui=mock-session"
+# The bot's path with its secret (web/service ThirdPartyPath), the captcha page (captcha/page.html: the ALTCHA widget)
+# and the front's cover page.
+BOT_PATH = "/third-party/bot-secret-4d2c/"
+CAPTCHA_PAGE = b'<!doctype html><main data-base="captcha/"><altcha-widget id="altcha"></altcha-widget></main>'
+COVER_PAGE = b"<!DOCTYPE html><title>Welcome to nginx!</title>"
 NAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
@@ -488,7 +500,7 @@ class Panel:
                          "subPath": "/sub/", "subJsonEnable": True, "subJsonPath": "/json/", "chainPanelHost": "",
                          "timeLocation": "Local", "externalTrafficInformEnable": False,
                          "subPublicURL": "", "dnsExitApiKey": "", "vpnName": "", "vpnNameTtl": 5, "domainExpiry": "",
-                         "frontTrustedAddrs": "", "tgNotifyChatId": ""}
+                         "frontTrustedAddrs": "", "tgNotifyChatId": "", "tgCaptchaHost": ""}
     # entity.DnsExitApiKeyMask: what the form and the API show for a stored DNSExit API key.
     KEY_MASK = "********"
 
@@ -500,6 +512,8 @@ class Panel:
         self.settings = dict(self.SETTINGS_DEFAULTS, **seed.get("settings", {}))
         for key in seed.get("without", []):
             self.settings.pop(key, None)
+        self.captcha_bases = dict(seed.get("captchaBases", {}))
+        self.captcha_cover = seed.get("captchaCover", False)
         self.inbounds = []
         self.next_id = 1
         self.x25519 = list(seed.get("x25519", []))
@@ -836,7 +850,8 @@ class Panel:
     def cli_settings(self, values):
         """What `x-ui setting -dnsExitApiKey/-vpnName/-vpnNameTtl/-domainExpiry` stores (the fake x-ui of the tests)."""
         for key, value in values.items():
-            if key not in ("dnsExitApiKey", "vpnName", "vpnNameTtl", "domainExpiry", "frontTrustedAddrs") or key not in self.settings:
+            if key not in ("dnsExitApiKey", "vpnName", "vpnNameTtl", "domainExpiry", "frontTrustedAddrs",
+                           "tgCaptchaHost") or key not in self.settings:
                 raise BadRequest(f"no such flag -{key}")
             if key == "vpnNameTtl":
                 self.settings[key] = int(value)
@@ -846,6 +861,12 @@ class Panel:
                 self.settings[key] = normalize_front_trusted(value)
             else:
                 self.settings[key] = value.strip()
+
+    # --- the bot's path and its captcha ------------------------------------------------------------------------
+    def bot_path(self):
+        """POST panel/setting/botPath: the path and the captcha's address at the chosen host ("" when unusable)."""
+        base = self.captcha_bases.get(self.settings.get("tgCaptchaHost") or "edge", "")
+        return {"path": BOT_PATH, "captchaUrl": base + BOT_PATH + "captcha" if base else ""}
 
     # --- the Xray template ----------------------------------------------------------------------------------
     def xray_setting(self):
@@ -1065,6 +1086,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"success": True, "obj": reg.join(body["token"], reported=body)})
                 except Refusal as err:
                     return self._send(404, {"success": False, "msg": str(err)})
+            if path.startswith("/third-party/") and method == "GET":
+                reg.calls.append({"method": method, "path": "third-party"})
+                if path != BOT_PATH + "captcha":
+                    return self._send(404, None, raw=b"")
+                return self._send(200, None, raw=COVER_PAGE if reg.panel.captcha_cover else CAPTCHA_PAGE)
             if path == BASE + "login" and method == "POST":
                 form = parse_qs(raw)
                 ok = form.get("username") == [USER] and form.get("password") == [PASSWORD]
@@ -1081,6 +1107,8 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "POST" and route == "update":
                     reg.panel.update_settings(raw)
                     return self._send(200, {"success": True, "msg": "", "obj": None})
+                if method == "POST" and route == "botPath":
+                    return self._send(200, {"success": True, "msg": "", "obj": reg.panel.bot_path()})
                 return self._send(404, None, raw=b"404 page not found")
             if path.startswith(BASE + "panel/xray/") and COOKIE in (self.headers.get("Cookie") or ""):
                 route = path[len(BASE + "panel/xray/"):]

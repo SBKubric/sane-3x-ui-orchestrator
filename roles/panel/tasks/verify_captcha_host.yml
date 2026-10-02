@@ -1,0 +1,101 @@
+---
+# verify.yml on the panel host, with tg_captcha_host set (orchestrator#80): the panel's tgCaptchaHost is the
+# inventory's. With panel, the captcha's address the bot hands out (POST panel/setting/botPath, captchaUrl) is not empty
+# and answers 200 from the controller with the captcha page (the front answers an unknown path with its cover page, also
+# 200), the certificate verified as for the front. The address carries the bot's secret: it is printed masked. Read-only;
+# needs api_login.
+- name: Read the panel's settings form
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_verify_captcha_form
+  failed_when: false
+  no_log: true
+
+- name: Check the captcha host
+  ansible.builtin.assert:
+    that:
+      - panel_verify_captcha_form.json.success | default(false) | bool
+      - "'tgCaptchaHost' in panel_verify_captcha_form.json.obj"
+      - panel_verify_captcha_form.json.obj.tgCaptchaHost | string == panel_tg_captcha_host
+    fail_msg: >-
+      {{ ('POST panel/setting/all failed: HTTP ' ~ panel_verify_captcha_form.status | default('?') ~ ' '
+          ~ panel_verify_captcha_form.json.msg | default(''))
+         if not panel_verify_captcha_form.json.success | default(false) | bool else
+         ('the panel has no tgCaptchaHost (it predates v1.9.1, SBKubric/sane-3x-ui#243); run site.yml')
+         if 'tgCaptchaHost' not in panel_verify_captcha_form.json.obj else
+         ('the panel has tgCaptchaHost "' ~ panel_verify_captcha_form.json.obj.tgCaptchaHost ~ '", the inventory tg_captcha_host "'
+          ~ panel_tg_captcha_host ~ '" (changed in the settings form?); run site.yml --tags panel') }}
+    success_msg: "the bot's captcha host is {{ panel_tg_captcha_host }}"
+
+- name: Check the captcha on the panel's front
+  when: panel_tg_captcha_host == 'panel'
+  block:
+    - name: Read the bot's path
+      ansible.builtin.uri:
+        url: "{{ panel_api_url }}panel/setting/botPath"
+        method: POST
+        headers:
+          Cookie: "{{ panel_api_cookie }}"
+          X-Requested-With: XMLHttpRequest
+        ca_path: "{{ panel_api_ca_path }}"
+        return_content: true
+        status_code: [200]
+      delegate_to: "{{ panel_api_host }}"
+      register: panel_verify_captcha_path
+      failed_when: false
+      no_log: true
+
+    - name: Keep the captcha's address
+      ansible.builtin.set_fact:
+        panel_verify_captcha_url: "{{ panel_verify_captcha_path.json.obj.captchaUrl | default('', true) }}"
+        panel_verify_captcha_shown: >-
+          {{ panel_verify_captcha_path.json.obj.captchaUrl | default('', true)
+             | regex_replace('/third-party/[^/]+/', '/third-party/<secret>/') }}
+      no_log: true
+
+    - name: Require the captcha's address
+      ansible.builtin.assert:
+        that:
+          - panel_verify_captcha_path.json.success | default(false) | bool
+          - panel_verify_captcha_url | length > 0
+        fail_msg: >-
+          {{ ('POST panel/setting/botPath failed: HTTP ' ~ panel_verify_captcha_path.status | default('?') ~ ' '
+              ~ panel_verify_captcha_path.json.msg | default(''))
+             if not panel_verify_captcha_path.json.success | default(false) | bool else
+             'the panel hands out no captcha address with tgCaptchaHost panel: its front has no https address (nginx off,'
+             ~ ' no domain and no IP certificate?); the panel log says why' }}
+        quiet: true
+
+    - name: Open the captcha from the controller
+      ansible.builtin.uri:
+        url: "{{ panel_verify_captcha_url }}"
+        follow_redirects: none
+        validate_certs: "{{ panel_tg_captcha_validate_certs | bool }}"
+        return_content: true
+        timeout: 10
+      delegate_to: localhost
+      register: panel_verify_captcha_page
+      failed_when: false
+      no_log: true
+
+    - name: Require the captcha page
+      ansible.builtin.assert:
+        that:
+          - panel_verify_captcha_page.status | default(-1) | int == 200
+          - panel_tg_captcha_page_marker in panel_verify_captcha_page.content | default('')
+        fail_msg: >-
+          {{ ('GET ' ~ panel_verify_captcha_shown ~ ' from the controller got no answer: '
+              ~ panel_verify_captcha_page.msg | default('?') | replace(panel_verify_captcha_url, panel_verify_captcha_shown))
+             if panel_verify_captcha_page.status | default(-1) | int <= 0 else
+             ('GET ' ~ panel_verify_captcha_shown ~ ' from the controller: HTTP ' ~ panel_verify_captcha_page.status
+              ~ (', not the captcha page (the cover page? the front does not pass /third-party/ to the panel, or the bot is off)'
+                 if panel_verify_captcha_page.status | int == 200 else '')) }}
+        success_msg: "the captcha answers on the front of the panel: {{ panel_verify_captcha_shown }}"

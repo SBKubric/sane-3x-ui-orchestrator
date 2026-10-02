@@ -7,6 +7,9 @@
 #   panel_user, panel_password, panel_port, panel_base_path   applied with `x-ui setting`
 #   tg_bot_token, tg_chat_id                                  applied with `x-ui setting -tgbottoken ...` (optional)
 #   tg_channel_id                                             the notification channel (tgNotifyChatId, optional)
+# Inputs from the inventory (group_vars/all, optional):
+#   tg_captcha_host    edge | panel | <hop_name>: where the bot's captcha link points (tgCaptchaHost, tasks/captcha_host.yml,
+#                      README "Captcha host"); empty = left as the panel has it
 # Inputs from the inventory (group_vars/panel.yml, optional):
 #   panel_inbounds     inbounds converged through panel/api/inbounds (tasks/inbounds.yml, README "Inbounds")
 # Monitoring is switched on only when group `monserver` is not empty.
@@ -78,6 +81,18 @@ panel_tg_chat_id: "{{ tg_chat_id | default('') }}"
 # posts notifications to, the bot being an admin there; set through the settings form (tasks/domain.yml, no CLI flag).
 # Empty = the panel's channel is left alone.
 panel_tg_notify_chat_id: "{{ tg_channel_id | default('') }}"
+# Where the bot's captcha Mini App link points (tgCaptchaHost, SBKubric/sane-3x-ui#243, orchestrator#80; tasks/
+# captcha_host.yml), from the inventory's tg_captcha_host: edge (the active edge, the panel's default), panel (the
+# panel's own front: its domain, else its IP certificate's address) or the hop_name of a hop in group hops. Only the
+# captcha moves: subscriptions, subPublicURL, the VPN name and the showcase stay where they are. Set with `x-ui setting
+# -tgCaptchaHost` and a panel restart, only when panel/setting/all differs; the panel needs v1.9.1 or later. Empty = the
+# panel's setting is left alone (a fresh panel: the active edge).
+panel_tg_captcha_host: "{{ tg_captcha_host | default('') }}"
+# verify.yml with tg_captcha_host panel: the captcha's address (panel/setting/botPath captchaUrl) is fetched from the
+# controller, the certificate verified as for the front (common_front_validate_certs: Let's Encrypt IP certificate or
+# the domain's), and the page must carry this marker: the front answers any unknown path with its cover page, also 200.
+panel_tg_captcha_validate_certs: true
+panel_tg_captcha_page_marker: altcha-widget
 
 # Inbounds of the panel (tasks/inbounds.yml), matched by remark: missing ones are added, declared fields
 # that differ are updated, inbounds the list does not name are left alone. One entry:
@@ -184,7 +199,7 @@ panel_front_firewall_keep: ["80"]
 # IP-only front it must be an address the IP certificate names.
 panel_web_listen: 127.0.0.1
 panel_chain_host: "{{ panel_public_ip }}"
-# A new webListen takes a restart of the panel.
+# How the panel is restarted: the handler `panel restart` and a new webListen (tasks/web_settings.yml).
 panel_restart_command: [systemctl, restart, "{{ panel_service }}"]
 # The Let's Encrypt IP certificate of the HTTP side on 443 (tasks/ip_cert.yml), issued once through nginx's webroot on
 # port 80 the way install.sh issues it (acme_issue_webroot) and renewed by acme.sh's cron every 3 days; a valid one for

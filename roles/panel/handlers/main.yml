@@ -1,8 +1,9 @@
 ---
+# panel_restart_command: systemctl restart <panel_service>; the tests put a stand-in there.
 - name: Restart panel
-  ansible.builtin.systemd_service:
-    name: "{{ panel_service }}"
-    state: restarted
+  ansible.builtin.command:
+    argv: "{{ panel_restart_command }}"
+  changed_when: true
   listen: panel restart
 
 - name: Wait for panel port
