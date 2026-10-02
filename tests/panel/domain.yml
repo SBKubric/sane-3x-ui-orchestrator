@@ -1,7 +1,8 @@
 ---
 # Role panel's domain settings (tasks/domain.yml) or the VPN name and front trusted steps of verify.yml
 # (tasks/verify_vpn_name.yml, tasks/verify_front_trusted.yml) against
-# mock_panel.py, a fake x-ui and a stand-in for DNSExit's nameserver (see test_domain.py).
+# mock_panel.py, a fake x-ui and a stand-in for DNSExit's nameserver (see test_domain.py); and the bot's captcha host
+# (tasks/captcha_host.yml, tasks/verify_captcha_host.yml, see test_captcha_host.py).
 - name: Panel domain settings
   hosts: panel
   gather_facts: false

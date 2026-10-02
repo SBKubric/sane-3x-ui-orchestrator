@@ -66,6 +66,9 @@ jobs:
       - name: Role panel's domain settings (public sub address, VPN name, DNSExit key, domain expiry, trusted front addresses) and verify.yml checks
         run: python3 tests/panel/test_domain.py
 
+      - name: Role panel's captcha host (tgCaptchaHost through the CLI, a restart on a change, an old panel) and its verify.yml check
+        run: python3 tests/panel/test_captcha_host.py
+
       - name: Probe links per path in verify.yml (mon-server)
         run: python3 tests/monserver/test_verify_paths.py
 

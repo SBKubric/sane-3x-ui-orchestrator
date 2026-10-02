@@ -7,7 +7,8 @@
 # The subscription page template, Copy JSON and the firefox fingerprint default need v1.9.0-chain.24
 # (SBKubric/sane-3x-ui#230, #231, #235).
 # v1.9.0 = chain.24 + the bot expiry editor for AmneziaWG/WireGuard clients (SBKubric/sane-3x-ui#242).
-xui_version: v1.9.0
+# The bot's captcha host (tgCaptchaHost, tg_captcha_host) needs v1.9.1 or later (SBKubric/sane-3x-ui#243).
+xui_version: v1.9.1
 # Release tag of SBKubric/sane-3x-ui-monitoring for mon-server and mon-client (contract 3, same code as v1.9.0-chain.13).
 mon_version: v1.9.0
 # The profile «only 443» (README "Front: only 443"): only443 (the default, spelled out) or off.
@@ -29,4 +30,8 @@ mon_auto_approve: true
 # vpn_name: vpn.example.com
 # vpn_name_ttl: 5
 # domain_expiry: "2027-05-01"
+# The bot's captcha host (role panel, README "Captcha host"): the panel's own front, not the active edge. Users open
+# the captcha Mini App in Telegram while connected to our VPN: a captcha on an edge in Russia is reached through the
+# tunnel, out of real and back into Russia (ru-inside may drop it on the way); real's front has no such detour.
+tg_captcha_host: panel
 # Real addresses live only in the vault (vault_hosts); each host in hosts.yml picks its own entry.

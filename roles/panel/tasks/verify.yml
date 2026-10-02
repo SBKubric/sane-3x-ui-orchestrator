@@ -6,7 +6,8 @@
 # against awg_mimic_protocol (verify_awg_mimic.yml, a warning), AmneziaWG 3.0 (verify_awg_v3.yml: awg0.conf and a
 # client's .conf against the panel, a failure; a server still without header protection, a warning); with vpn_name, its record at DNSExit's nameservers against
 # the active edge (verify_vpn_name.yml, a warning); with a showcase, its address among the panel's frontTrustedAddrs
-# (verify_front_trusted.yml, a warning). Read-only.
+# (verify_front_trusted.yml, a warning); with tg_captcha_host, the panel's tgCaptchaHost, and with panel the captcha page
+# on its front from the controller (verify_captcha_host.yml, a failure). Read-only.
 - name: Read the panel version
   ansible.builtin.command:
     argv: ["{{ panel_bin }}", "-v"]
@@ -130,6 +131,10 @@
 - name: Check the VPN name
   ansible.builtin.include_tasks: verify_vpn_name.yml
   when: panel_vpn_name | string | trim | length > 0
+
+- name: Check the bot's captcha host
+  ansible.builtin.include_tasks: verify_captcha_host.yml
+  when: panel_tg_captcha_host | string | length > 0
 
 - name: Check the showcase among the front's trusted addresses
   ansible.builtin.include_tasks: verify_front_trusted.yml

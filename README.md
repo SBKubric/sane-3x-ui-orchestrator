@@ -100,6 +100,7 @@ Profile-wide (`inventories/<profile>/group_vars/all/main.yml`):
 | `vpn_name_ttl` | TTL of the VPN name's A record in minutes, 1-1440 (default `5`), applied with `vpn_name` |
 | `domain_expiry` | the domain's registration expiry date `YYYY-MM-DD` (quote it or not), for the panel's renewal reminders in the notify channel; empty = left as the panel has it |
 | `front_trusted_addrs` | more trusted front addresses (IPv4/IPv6 addresses or CIDR networks, a list or a comma-separated string) after the showcase's address in the panel's `frontTrustedAddrs`; neither the panel's front nor any hop's limits or bans them. See [Domain](#domain-public-subscription-address-and-vpn-name) |
+| `tg_captcha_host` | where the bot's captcha link points: `edge` (the active edge), `panel` (the panel's own front) or a hop's `hop_name`; empty (default) = left as the panel has it, the active edge on a fresh panel. Only the captcha moves. Production: `panel`. See [Captcha host](#captcha-host) |
 | `awg_route_via_xray` | `true` (default): the AmneziaWG server's `routeViaXray`, so AWG clients go through xray's routing (ru-inside, WARP); `false` = the kernel NATs them out directly |
 
 Per hop (`inventories/<profile>/host_vars/<hop>.yml`); the inventory is the source of truth for the
@@ -185,7 +186,8 @@ skipped when the host already matches, so a second run reports `changed=0`.
    Empty vault values leave the panel's Telegram settings alone. The notification channel (`tg_channel_id` →
    `tgNotifyChatId`, a channel id or @username, the bot an admin there) has no CLI flag: it goes through the
    settings form in the same save as the public subscription address (step «Domain», the whole form read back and
-   sent with only these changed); empty leaves the panel's channel alone.
+   sent with only these changed); empty leaves the panel's channel alone. The bot's captcha host (`tg_captcha_host`)
+   follows, with or without a bot token in the vault, see [Captcha host](#captcha-host).
 5. **Monitoring** (only when group `monserver` is not empty). `x-ui setting -showMonToken`; `-monEnable true`
    if it is off, `-resetMonToken` only when it says `(not issued)`, so a running mon-server keeps its token.
    The token is read back every run and never stored in the vault.
@@ -269,6 +271,42 @@ panel's Subscription tab, keys as in the panel's `docs/spec/users.md` §14-§15 
     fails, and check mode prints a `WARNING`.
   - `verify.yml` (with a showcase): the showcase's address is among the panel's `frontTrustedAddrs`, either as an entry
     or inside a network. Otherwise it prints a `WARNING`, not a failure.
+
+### Captcha host
+
+Where the bot's captcha link points (orchestrator#80, [SBKubric/sane-3x-ui#243](https://github.com/SBKubric/sane-3x-ui/issues/243);
+`xui_version` v1.9.1 or later). The bot sends a new user a Telegram Mini App, the captcha at
+`https://<host>/third-party/<secret>/captcha`, and the panel's `tgCaptchaHost` picks the host
+(`roles/panel/tasks/captcha_host.yml`):
+
+| `tg_captcha_host` | The captcha's address |
+|---|---|
+| empty (default) | the role leaves the setting as the panel has it; a fresh panel uses the active edge |
+| `edge` | the active edge; it follows an edge switch |
+| `panel` | the panel's own front: its domain, else the address of its IP certificate |
+| a hop's `hop_name` | that hop of group `hops`, with the same address rule as the active edge |
+
+- **Only the captcha moves.** Subscriptions and their public address (`subPublicURL`), the VPN name, the showcase and
+  every other path stay where they are.
+- **Production uses `panel`.** Users open the Mini App in Telegram while they are already connected to our VPN. A
+  captcha on an edge in Russia is then reached through the tunnel: the request leaves from `real` and comes back into
+  Russia, and ru-inside rules may drop it on the way, so it opens unpredictably. `real`'s front has no such detour. The
+  catch: users see `real`'s address in the Mini App link and in their Telegram history. That is the owner's decision.
+- **What `panel` needs:** https on 443 on `real`. `front_mode: only443` (the default) gives the panel's front its
+  Let's Encrypt IP certificate, and the front passes `/third-party/` to the panel. With `front_mode: off`, the panel's
+  front may have no https address. The panel then hands out no captcha link (`captchaUrl` is empty), and `verify.yml`
+  fails.
+- **How it is set:** with `x-ui setting -tgCaptchaHost <value>` and a panel restart, and only when
+  `panel/setting/all` shows another value, so a second run reports `changed=0`. `panel/setting/update` is not used:
+  it zeroes the fields it is not given. A value other than `edge`, `panel` or a `hop_name` of group `hops` fails before
+  anything is written.
+- **Older panels:** a panel before v1.9.1 has no such setting. A real run fails with that message, and check mode
+  prints a `WARNING`.
+- **`verify.yml`:** the panel's `tgCaptchaHost` must equal `tg_captcha_host`. With `panel`, the captcha's address
+  from `POST <base>panel/setting/botPath` (`captchaUrl`) must be non-empty. The controller then fetches it: the
+  answer must be 200 with the captcha page (the front also answers unknown paths with 200, its cover page), and the
+  certificate must verify as for the front (`panel_tg_captcha_validate_certs`). The secret in the path is printed as
+  `<secret>`.
 
 ### Inbounds
 
@@ -1049,7 +1087,7 @@ to look; the first group that fails ends the run.
 
 | Play | Checks |
 |---|---|
-| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `awg_v3` (AmneziaWG 3.0) the server's `/etc/amnezia/amneziawg/awg0.conf` has the panel's `HeaderProtectionKey`, S1-S4 and 3.0 fields, and the `.conf` the panel hands a client (`awg_verify_client`, default the first enabled AWG client) the same key (a failure otherwise), a `WARNING` for a server without a key or with S1-S4 below 12 (it waits for `awg_obfuscation_apply`) and for a kernel module without 3.0; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
+| panel | `x-ui -v` = `xui_version`; API login with the vault account (`POST <base>login`); `GET <base>panel/api/chain/list`: every hop of group `hops` (by `hop_name`, default the inventory hostname) is `joined` (with `front_mode: only443` on 443/https: its front reported), and `activeEdge` is the hop with `hop_active: true`; registry hops the inventory does not list are reported; geosite ru-inside (with `panel_ru_inside_enabled`): the rule in the Xray template, `/usr/local/x-ui/bin/ru-inside.dat` present, a `WARNING` when its last good check is older than `panel_ru_inside_max_age_days`, `3ax-ru-inside.timer` active; AmneziaWG (with an `amneziawg` entry): `routeViaXray` on and the TPROXY inbound (`awg-tproxy-in`) in `/usr/local/x-ui/bin/config.json`, a `WARNING` otherwise; with `awg_mimic_protocol` other than `none`, a `WARNING` when the AWG server's I1 is empty or not the chosen template; with `awg_v3` (AmneziaWG 3.0) the server's `/etc/amnezia/amneziawg/awg0.conf` has the panel's `HeaderProtectionKey`, S1-S4 and 3.0 fields, and the `.conf` the panel hands a client (`awg_verify_client`, default the first enabled AWG client) the same key (a failure otherwise), a `WARNING` for a server without a key or with S1-S4 below 12 (it waits for `awg_obfuscation_apply`) and for a kernel module without 3.0; with `vpn_name`, its A record at DNSExit's nameservers is the active edge's address in the chain registry (a `WARNING` otherwise: the panel moves it at most once in 4 minutes, resolvers keep the old one for its TTL); with a host in group `showcase`, the showcase's address is among the panel's `frontTrustedAddrs` (a `WARNING` otherwise); with `tg_captcha_host`, the panel's `tgCaptchaHost` is the same, and with `panel` the captcha address from `panel/setting/botPath` answers 200 with the captcha page from the controller (a failure otherwise); WARP (with `warp_enabled`): the `warp` outbound (WireGuard, `noKernelTun`) and the rule `tcp,udp` → `warp` last in the Xray template, and the panel host's own `cdn-cgi/trace` reported (`warp=off` there is the baseline, a `WARNING` when it does not answer) |
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
@@ -1272,6 +1310,12 @@ the address from the showcase or `sub_public_url` and compared normalised, the r
 by the save, a new or hand-set or cleared key applied once (never printed), TTL and date alone, an unquoted YAML date,
 bad values refused before any write, check mode, a CLI refusal; the VPN name check of `verify.yml` (on the active edge,
 elsewhere, no answer, no active edge, the zone's nameservers found by default);
+`tests/panel/test_captcha_host.py`: the captcha host against the same mock (`tgCaptchaHost` in its form,
+`panel/setting/botPath`, the captcha page under `/third-party/`) and a fake `x-ui` — a new value set with a restart
+and an idempotent rerun, an equal value left alone, a value changed in the panel put back, a hop by its `hop_name`,
+unknown values refused before any write, a panel without the setting (a failure, a `WARNING` in check mode), check mode,
+a CLI refusal; the check of `verify.yml` (the captcha page, another value in the panel, no captcha address, the cover
+page, a 404 and no answer, an old panel), the bot's secret never printed;
 `tests/monserver/test_settings.py`: mon-server's Settings against a mock admin API — `panelUrl` on 443 without
 `panelCa`, idempotent, the panel's own port with `panelCa` for `front_mode: off`;
 `tests/common/test_verify_front.py`: `portscan.py` and verify's «only 443» step on local listeners — the front port
@@ -1315,6 +1359,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/panel/test_panel_front.py && python3 tests/panel/test_ru_inside.py &&
   python3 tests/panel/test_warp.py &&
   python3 tests/panel/test_awg_mimic.py &&
+  python3 tests/panel/test_domain.py && python3 tests/panel/test_captcha_host.py &&
   python3 tests/monserver/test_settings.py &&
   python3 tests/common/test_verify_front.py && python3 tests/common/test_dns.py &&
   python3 tests/wipe/test_wipe.py &&

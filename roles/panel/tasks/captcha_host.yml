@@ -1,0 +1,103 @@
+---
+# The bot's captcha host (orchestrator#80, SBKubric/sane-3x-ui#243): where the link to the captcha Mini App
+# (/third-party/<secret>/captcha) points, tgCaptchaHost = tg_captcha_host (edge, panel or a hop's hop_name). Only the
+# captcha moves. Set through `x-ui setting -tgCaptchaHost` (panel/setting/update would zero every field it is not given),
+# only when panel/setting/all differs; the panel takes it on a restart. Runs only with tg_captcha_host set.
+- name: Check the captcha host
+  ansible.builtin.assert:
+    that:
+      - panel_tg_captcha_host in ['edge', 'panel'] + panel_tg_captcha_hops
+    fail_msg: >-
+      tg_captcha_host '{{ panel_tg_captcha_host }}' must be edge (the active edge), panel (the panel's own front) or the
+      hop_name of a hop in group hops ({{ panel_tg_captcha_hops | join(', ') or 'none' }})
+    quiet: true
+  vars:
+    # The names in the chain registry, as role hop registers them (hop_name, default the inventory hostname).
+    panel_tg_captcha_hops: >-
+      {%- set names = [] -%}
+      {%- for h in groups['hops'] | default([]) -%}
+      {%-   set _ = names.append(hostvars[h].hop_name | default(h)) -%}
+      {%- endfor -%}
+      {{ names }}
+
+- name: Log in to the panel
+  ansible.builtin.include_tasks:
+    file: api_login.yml
+    apply:
+      check_mode: false
+
+- name: Read the panel's settings form
+  ansible.builtin.uri:
+    url: "{{ panel_api_url }}panel/setting/all"
+    method: POST
+    headers:
+      Cookie: "{{ panel_api_cookie }}"
+      X-Requested-With: XMLHttpRequest
+    ca_path: "{{ panel_api_ca_path }}"
+    return_content: true
+    status_code: [200]
+  delegate_to: "{{ panel_api_host }}"
+  register: panel_captcha_form
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Require the settings form
+  ansible.builtin.assert:
+    that:
+      - panel_captcha_form.status | default(0) == 200
+      - panel_captcha_form.json.success | default(false) | bool
+    fail_msg: "POST panel/setting/all failed: HTTP {{ panel_captcha_form.status | default('?') }} {{ panel_captcha_form.json.msg | default('') }}"
+    quiet: true
+
+- name: Require tgCaptchaHost in the panel
+  ansible.builtin.assert:
+    that:
+      - "'tgCaptchaHost' in panel_captcha_form.json.obj"
+    fail_msg: >-
+      the panel has no tgCaptchaHost setting (SBKubric/sane-3x-ui#243): xui_version must be v1.9.1 or later to point the
+      bot's captcha at {{ panel_tg_captcha_host }}
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Warn about a panel without tgCaptchaHost (check mode)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: the panel has no tgCaptchaHost yet (it predates v1.9.1): a real run installs xui_version first, then
+      points the captcha at {{ panel_tg_captcha_host }}
+  when:
+    - ansible_check_mode
+    - "'tgCaptchaHost' not in panel_captcha_form.json.obj"
+
+- name: Compare the captcha host
+  ansible.builtin.set_fact:
+    panel_captcha_current: "{{ panel_captcha_form.json.obj.tgCaptchaHost | default('') | string }}"
+    panel_captcha_drift: >-
+      {{ 'tgCaptchaHost' in panel_captcha_form.json.obj
+         and panel_captcha_form.json.obj.tgCaptchaHost | default('') | string != panel_tg_captcha_host }}
+
+- name: "Show the plan: captcha host"
+  ansible.builtin.debug:
+    msg: >-
+      panel captcha host: tgCaptchaHost "{{ panel_captcha_current }}"{{
+      (' -> "' ~ panel_tg_captcha_host ~ '" (a panel restart)') if panel_captcha_drift | bool
+      or 'tgCaptchaHost' not in panel_captcha_form.json.obj else ' (as wanted)' }}
+
+- name: Set the captcha host
+  ansible.builtin.command:
+    argv: ["{{ panel_bin }}", setting, -tgCaptchaHost, "{{ panel_tg_captcha_host }}"]
+  register: panel_captcha_cli
+  failed_when: false
+  changed_when: panel_captcha_cli.rc == 0
+  when: panel_captcha_drift | bool
+  notify: panel restart
+
+- name: Require the captcha host stored
+  ansible.builtin.assert:
+    that:
+      - panel_captcha_cli.rc | default(1) == 0
+    fail_msg: >-
+      x-ui setting refused tgCaptchaHost {{ panel_tg_captcha_host }}: {{ panel_captcha_cli.stdout | default('') }}
+      {{ panel_captcha_cli.stderr | default('') }}
+    quiet: true
+  when: panel_captcha_cli is not skipped
