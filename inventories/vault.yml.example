@@ -52,6 +52,13 @@ tg_chat_id: "-1000000000000"
 # stays, or the panel makes one for a server without. Every client .conf carries it.
 # awg_header_protection_key: ""
 
+# --- Neighbour targets ----------------------------------------------------------------------------------------------
+# An edge's neighbour target (host:port) chosen by the owner, instead of the /24 scan; read by the edges' host_vars
+# as hop_reality_target. Kept here because the inventory is public and the target names the site the edge imitates.
+# The chain editor's «Neighbour» is overwritten by the next run unless the same target is set here.
+# vault_reality_targets:
+#   proxy: www.example.com:443
+
 # --- Hosts -----------------------------------------------------------------------------------------------------------
 # Real host addresses: inventory hostname → public IPv4. The only place they are kept; never put an address
 # into an inventory, README or test. A host without an entry is reached through its ssh alias.

@@ -4,3 +4,6 @@ hop_name: proxy
 hop_role: edge
 hop_active: true
 hop_tls: letsencrypt-ip
+# Neighbour target kept in the vault (vault_reality_targets), not here: this repository is public and the
+# target names the site the edge imitates. Unset there, the role scans the edge's /24 (README "Neighbour target").
+hop_reality_target: "{{ (vault_reality_targets | default({}))['proxy'] | default('') }}"
