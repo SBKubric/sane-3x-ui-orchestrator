@@ -58,6 +58,9 @@ tg_chat_id: "-1000000000000"
 # The chain editor's «Neighbour» is overwritten by the next run unless the same target is set here.
 # vault_reality_targets:
 #   proxy: www.example.com:443
+# Its server name (SNI), required when the target is an address; default: the target's host.
+# vault_reality_server_names:
+#   proxy: www.example.com
 
 # --- Hosts -----------------------------------------------------------------------------------------------------------
 # Real host addresses: inventory hostname → public IPv4. The only place they are kept; never put an address
