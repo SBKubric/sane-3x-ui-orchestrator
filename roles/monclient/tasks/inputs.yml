@@ -13,7 +13,7 @@
       - monclient_server_url | length > 0 or monclient_server_host | length > 0
     fail_msg: >-
       role monclient needs mon_version (group_vars/all), mon_xray_version (group_vars/monclient), a non-empty
-      mon_name, a non-empty mon_paths list of direct, hops, edge:<hop_name> or inner:<hop_name> (not proxy:
+      mon_name, a non-empty mon_paths list of edges, hops, direct, edge:<hop_name> or inner:<hop_name> (not proxy:
       contract 3 calls it hops; got {{ monclient_paths }}), mon_gomemlimit as <n>[B|KiB|MiB|GiB|TiB] or empty,
       and a mon-server: a host in group monserver or monclient_server_url.
     quiet: true

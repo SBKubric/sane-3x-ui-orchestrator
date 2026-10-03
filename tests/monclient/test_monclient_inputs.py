@@ -34,19 +34,23 @@ class MonclientInputsTest(unittest.TestCase):
         self.assertEqual(run.returncode, expect_rc, out[-4000:])
         return out
 
-    def test_default_paths_are_direct_and_hops(self):
+    def test_default_paths_are_edges(self):
         out = self.play()
-        self.assertIn('paths ["direct", "hops"]', out)
+        self.assertIn('paths ["edges"]', out)
 
     def test_hop_paths_are_accepted(self):
         self.play({"mon_paths": ["direct", "edge:proxy", "inner:bridge-2"]})
+
+    def test_edges_hops_and_direct_are_accepted(self):
+        out = self.play({"mon_paths": ["edges", "hops", "direct"]})
+        self.assertIn('paths ["edges", "hops", "direct"]', out)
 
     def test_old_proxy_path_is_refused(self):
         out = self.play({"mon_paths": ["direct", "proxy"]}, expect_rc=2)
         self.assertIn("contract 3 calls it hops", out)
 
     def test_malformed_paths_are_refused(self):
-        for paths in (["edge:Proxy"], ["edge:"], ["hop:proxy"], [], "direct"):
+        for paths in (["edge:Proxy"], ["edge:"], ["hop:proxy"], ["edge"], [], "direct", "edges"):
             with self.subTest(paths=paths):
                 self.play({"mon_paths": paths}, expect_rc=2)
 

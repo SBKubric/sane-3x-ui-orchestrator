@@ -34,9 +34,12 @@
 #              on the panel <base>panel/ gets the cover page, not the UI, and POST <base>login works on 443
 #   monserver  version; admin login; Settings -> Check says "Panel reachable." (so the panel speaks mon-server's
 #              contract) and counts probe links on direct and on every hop of group hops
-#   monclient  version; ONLINE in mon-server's registry, waiting up to 3 minutes
+#   monclient  version; net.ipv4.ping_group_range takes in the mon-client group (running kernel and sysctl.d file: ICMP
+#              for the host reachability check of a diagnostic sweep); ONLINE in mon-server's registry, waiting up to
+#              3 minutes
 #   panel      (with mon-clients) every enabled inbound (AWG included) has a target per mon-client and path
-#              (mon_paths expanded over group hops: hops -> edge:/inner:<hop_name>), all UP, waiting up to 3 minutes
+#              (mon_paths expanded over group hops: edges -> edge:<hop_name>, hops -> edge:/inner:<hop_name>), all UP,
+#              waiting up to 3 minutes; paths outside the expansion (direct, inner:* under edges) are left alone
 #   all        DNS: one lookup the way the libc does it (resolv.conf order, timeout, attempts) slower than
 #              common_dns_slow_ms (1 s) or unanswered is a warning, no failure (verify_dns: false skips it)
 #   showcase   nginx config; 80 -> https://<domain>/; 443 with a certificate for the name and the cover page; an unknown

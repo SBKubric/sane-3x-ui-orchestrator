@@ -1,0 +1,40 @@
+---
+# net.ipv4.ping_group_range takes in the mon-client group (see monclient_ping_group_range_file in defaults): a range
+# that already holds its GID stays as it is, a valid one is widened to it, "1 0" (nobody) or a broken one becomes the
+# GID alone. The result goes to the sysctl.d file (read at boot, after systemd's own defaults) and, when it differs
+# from the running kernel's, to the kernel. Driven alone by tests/monclient/test_monclient_icmp.py.
+- name: Read the mon-client group
+  ansible.builtin.getent:
+    database: group
+    key: "{{ monclient_user }}"
+
+- name: Read net.ipv4.ping_group_range
+  ansible.builtin.slurp:
+    src: "{{ monclient_ping_group_range_proc }}"
+  register: monclient_ping_now
+
+- name: Choose the ping group range with the mon-client group
+  ansible.builtin.set_fact:
+    monclient_ping_range_now: "{{ monclient_ping_now_range | join(' ') }}"
+    monclient_ping_range: >-
+      {{ (([monclient_ping_now_range[0], monclient_ping_gid] | min) ~ ' ' ~ ([monclient_ping_now_range[1], monclient_ping_gid] | max))
+         if monclient_ping_now_range | length == 2 and monclient_ping_now_range[0] <= monclient_ping_now_range[1]
+         else monclient_ping_gid ~ ' ' ~ monclient_ping_gid }}
+  vars:
+    monclient_ping_gid: "{{ ansible_facts.getent_group[monclient_user][1] | int }}"
+    monclient_ping_now_range: "{{ (monclient_ping_now.content | b64decode).split() | map('int') | list }}"
+
+- name: Keep the ping group range for boots
+  ansible.builtin.copy:
+    dest: "{{ monclient_ping_group_range_file }}"
+    content: |
+      # 3ax-ui-orchestrator, role monclient: mon-client (group {{ monclient_user }}) opens unprivileged ICMP sockets
+      # for the host reachability check of a diagnostic sweep.
+      net.ipv4.ping_group_range = {{ monclient_ping_range }}
+    mode: "0644"
+
+- name: "Apply the ping group range in the running kernel: {{ monclient_ping_range }}"
+  ansible.builtin.shell:
+    cmd: printf '%s\n' {{ monclient_ping_range | quote }} > {{ monclient_ping_group_range_proc | quote }}
+  when: monclient_ping_range != monclient_ping_range_now
+  changed_when: true

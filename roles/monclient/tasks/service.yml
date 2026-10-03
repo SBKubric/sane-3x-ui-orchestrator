@@ -13,6 +13,9 @@
     create_home: false
     shell: /usr/sbin/nologin
 
+- name: Let the mon-client group send ICMP echo
+  ansible.builtin.include_tasks: icmp.yml
+
 - name: Create config directory
   ansible.builtin.file:
     path: "{{ monclient_le_staging_roots | dirname }}"

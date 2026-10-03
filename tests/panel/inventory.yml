@@ -32,3 +32,6 @@ all:
       hosts:
         mon-client:
           mon_name: monclient
+          # The paths probed all the time before mon-server v1.9.3 (and still by choice): the targets tests below
+          # expect every path of the chain; test_panel_inbounds.py passes [edges] (the default) where it says so.
+          mon_paths: [direct, hops]

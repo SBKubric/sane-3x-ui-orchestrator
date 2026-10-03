@@ -53,6 +53,7 @@ all:
     monclient_le_staging_roots: "{{ box }}/etc/mon-client/le-staging-roots.pem"
     monclient_state_dir: "{{ box }}/var/lib/mon-client"
     monclient_cache_dir: "{{ box }}/var/cache/3ax-ui-orchestrator"
+    monclient_ping_group_range_file: "{{ box }}/etc/sysctl.d/60-mon-client-ping.conf"
     # showcase
     showcase_domain: sub.example.test
     showcase_nginx_conf_dir: "{{ box }}/etc/nginx/conf.d"
