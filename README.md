@@ -741,7 +741,7 @@ a prober sees the neighbour's site. The role picks it after converging the hops 
 
 | Situation | What happens |
 |---|---|
-| `hop_reality_target` set in the edge's `host_vars` (production: `vault_reality_targets.<edge>` in the vault, the repository being public) | no scan; written as given (server name `hop_reality_server_name`, else the host); a failed handshake check prints a `WARNING` but does not stop the run |
+| `hop_reality_target` set in the edge's `host_vars` (production: `vault_reality_targets.<edge>` and `vault_reality_server_names.<edge>` in the vault, the repository being public) | no scan; written as given (server name `hop_reality_server_name`, else the host); a failed handshake check prints a `WARNING` but does not stop the run |
 | the registry already holds a target in the edge's /24, its server name still resolves into that /24 and it passes the handshake check | nothing: no scan, no write (`changed=0`) |
 | otherwise (no target, the DNS or the handshake check fails, the fallback, a former override, the edge moved) | scan, write the best candidate that passes the handshake check; a stored target that failed the DNS check is named in the run's line (`the stored ... failed the DNS check (...), scanned again`) |
 | the scan finds nothing that passes | `hop_reality_fallback_target` (`dl.google.com:443`, passed the xray 26.3.27 handshake in SBKubric/sane-3x-ui#129) and a `WARNING`; the next run scans again |
