@@ -898,6 +898,13 @@ Runs on every host of group `monclient` (decision #55, item 6).
    gathered on demand, or `monclient_server_url`), `StateDirectory=mon-client` (`state.json`, the token),
    `StateDirectoryMode=0700`, `UMask=0077`, `Restart=always`, and `GOMEMLIMIT` = `mon_gomemlimit`
    (default `128MiB`, empty = none): a guard against swap on a small box (SBKubric/sane-3x-ui-monitoring#85).
+   **ICMP.** mon-client runs without root and with `NoNewPrivileges=true`, so the host reachability check of a
+   diagnostic sweep (SBKubric/sane-3x-ui-monitoring#100) sends ICMP echo through unprivileged ICMP datagram sockets
+   (`SOCK_DGRAM`/`IPPROTO_ICMP`), which the kernel opens only for a group inside `net.ipv4.ping_group_range`. The
+   role takes the `mon-client` group's GID into the running range: a range that already holds it stays as it is, a
+   valid one is widened to it (never narrowed), `1 0` (the kernel's default: nobody) becomes the GID alone. The result
+   goes to `/etc/sysctl.d/60-mon-client-ping.conf` (read at boot, after systemd's own defaults) and, when it differs,
+   to `/proc/sys/net/ipv4/ping_group_range`; no `sysctl` binary needed (Debian bookworm/trixie, Ubuntu jammy/noble).
 3. **LE staging** (`acme_production: false`). The four Let's Encrypt staging roots (Pretend Pear X1,
    Bogus Broccoli X2, Yearning Yucca YE, Yonder Yam YR) are vendored in
    `roles/monclient/files/le-staging-roots.pem` (from letsencrypt.org/docs/staging-environment, with
@@ -915,9 +922,11 @@ Runs on every host of group `monclient` (decision #55, item 6).
    - a mon-client with that name exists (`suggestReplacement` names it, or the registry has it, e.g.
      after its token was revoked) → `{"mode": "replace", "existingId": <id>}`: keeps id and history;
    - otherwise → `{"mode": "new", "name": mon_name, "region": mon_region, "paths": mon_paths}`
-     (`mon_paths` default `[direct, hops]`: direct plus every probed hop of the chain, hops added later
-     included, or the proxy path while there is no chain; one hop by path is `edge:<hop_name>` /
-     `inner:<hop_name>`; the old `proxy` is refused, contract 3 calls it `hops`).
+     (`mon_paths` default `[edges]`, mon-server's own default since v1.9.3 (SBKubric/sane-3x-ui-monitoring#100):
+     every edge of the chain, active and standby, edges added later included, or the proxy path while there is no
+     chain; `direct` and `inner:*` are then probed only in a diagnostic sweep. `hops` (every probed hop of the
+     chain), `direct` and one hop by path, `edge:<hop_name>` / `inner:<hop_name>`, keep those paths probed all the
+     time; the old `proxy` is refused, contract 3 calls it `hops`. mon-server before v1.9.3 refuses `edges`.)
 
    It then waits for the box to collect its token and brings `region`/`paths` of the record back to the
    inventory values (`POST /admin/api/clients/<id>`) when they differ. With `mon_auto_approve: false`
@@ -1032,7 +1041,8 @@ The role's own panel API calls keep going to `https://127.0.0.1:<panel_port><bas
    old sub port open until every outer neighbour has polled it on 443, then closes it.
 4. the neighbour target of every edge and `setActive`; then the second pass over `panel_inbounds` flags the
    chain-following inbound if the active edge had no neighbour target before (its cover becomes the neighbour's).
-5. **mon-server** switches to 443; mon-clients probe `direct` (the real server's 443) and every hop.
+5. **mon-server** switches to 443; mon-clients probe every edge (`mon_paths: [edges]`), `direct` (the real server's 443)
+   and the inner hops in a diagnostic sweep.
 6. `verify.yml`.
 
 Clients: the links change (port 443, `type=xhttp`, the active edge's server name); they get them by refreshing the
@@ -1072,7 +1082,7 @@ then:
 | hops | unit `x-ui`; `/etc/x-ui` (`proxy.json`, `chain/` with the hop secret and chain document, `chain-join.url`), `/usr/local/x-ui`, `/usr/bin/x-ui`, `/var/log/x-ui`, `/root/3ax-ui-install.sh`, the join token file `/root/.3ax-ui-join-token` | the LE IP certificate `/root/cert/ip` and acme.sh with its renewal; `-e hop_wipe_le_cert=true` also deletes `/root/cert/ip` and acme.sh's IP certificate dirs (`/root/.acme.sh/<ip>[_ecc]`); fail2ban and its jails |
 | monserver | unit `mon-server`; `/usr/local/bin/mon-server`, `/etc/mon-server`, `/var/cache/3ax-ui-orchestrator/mon-server`, everything in `/var/lib/mon-server` (database: admin account, Settings, mon-client registry) | `/var/lib/mon-server/certs` (certmagic's ACME account and certificates) and the `mon-server` user that owns it; `-e monserver_wipe_certs=true` deletes the whole data dir and the user |
 | showcase | `conf.d/3ax-ui-showcase.conf` and `3ax-ui-showcase-acme.conf`, `/var/www/showcase`, `/var/www/showcase-acme`, the jail `jail.d/3ax-ui-showcase.conf` and its filter (nginx reloaded, fail2ban restarted) | the packages, the DNS record, the certificate `/etc/nginx/showcase-cert` and acme.sh's renewal of it; `-e showcase_wipe_cert=true` also deletes those and `/root/.acme.sh/<domain>[_ecc]` |
-| monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`; user and group `mon-client` | nothing |
+| monclient | unit `mon-client`; `/usr/local/bin/mon-client`, `/usr/local/bin/xray`, `/etc/mon-client`, `/var/lib/mon-client` (`state.json`, the token), `/var/cache/3ax-ui-orchestrator/{mon-client,xray}`, `/etc/sysctl.d/60-mon-client-ping.conf`; user and group `mon-client` | the running kernel's `net.ipv4.ping_group_range` (until a reboot) |
 
 The panel's chain registry is not touched on its own: a wiped panel forgets its hops, and a kept panel
 (`--tags hops`) sees the wiped boxes as broken and re-joins them on the next `site.yml`. The paths are
@@ -1091,9 +1101,9 @@ to look; the first group that fails ends the run.
 | hops | `x-ui -v` = `xui_version`; `x-ui chain status -c /etc/x-ui/proxy.json` is fresh: it answers as `hop_name`, the revision is not `stale`, the next hop is `reachable: true`, the relay is `running=true` with at least one port (up to 2 minutes, a new port list takes a poll per hop: `hop_verify_retries` x `hop_verify_delay`); with `hop_sub_scheme: https`, `proxy.json` has a `cert` and `https://<hop_host>:<hop_sub_port>/` answers TLS (certificate not validated), fetched from the next-outer hop, or from the controller for an edge (`hop_verify_tls_url`, `hop_verify_tls_probe_host`); an edge's neighbour target in the registry, with a `WARNING` (no failure) for the shared fallback or none |
 | panel + hops (only443) | from the controller (`roles/common/files/portscan.py`, TCP connect, all ports at once): 443 answers, the old ports do not (the sub port 2096, the inbounds' ports of `panel_inbounds`, on the panel its own port), waiting up to 2 minutes for an inner hop to close its old sub port; 80 closed is a `WARNING`; on the panel `GET <base>panel/` on 443 gets the cover page (200, no base path in it, not the panel's redirect to its login) and `POST <base>login` on 443 succeeds (the IP certificate is verified). UDP is left to the monitoring targets. `verify_front_scan: false` skips it |
 | monserver | `mon-server version` = `mon_version`; admin login (`POST /admin/login`); `GET /admin/api/settings` has `panelUrl` and `monToken`; `POST /admin/api/settings/check` with the saved `panelUrl`/`monToken`/`panelCa`/`realHost` answers `Panel reachable.` (same monitoring contract, the probe configs are readable too), and its probe links per path (`probeItems`) cover `direct` and every hop of group `hops` as `<hop_role>:<hop_name>`, with no path the inventory does not list |
-| monclient | `mon-client version` = `mon_version`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
+| monclient | `mon-client version` = `mon_version`; `net.ipv4.ping_group_range` takes in the `mon-client` group's GID, in the running kernel and in `/etc/sysctl.d/60-mon-client-ping.conf`; in `GET /admin/api/clients` the record named `mon_name` is enabled, has a live token and is `ONLINE` (up to 3 minutes) |
 | all (DNS) | one lookup the way the libc stub resolver does it (`roles/common/files/dnscheck.py time`: the `nameserver`s of `/etc/resolv.conf` in order, each waited for the file's `timeout`, `attempts` rounds; the root's NS records): slower than `common_dns_slow_ms` (1000 ms) or no answer is a `WARNING` naming the servers that did not answer, never a failure; see [DNS servers](#dns-servers). `verify_dns: false` skips it |
-| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`hops` → `<hop_role>:<hop_name>` of every host in group `hops`, or `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
+| panel (with mon-clients) | `GET <base>panel/api/monitoring/targets`: the panel's contact with mon-server is not stale, every enabled inbound (xray and the AmneziaWG one alike) has a target for every mon-client of group `monclient` on each path its `mon_paths` expands to (`edges` → `edge:<hop_name>` of every edge in group `hops`, `hops` → `<hop_role>:<hop_name>` of every host in group `hops`, either of them `proxy` without hops; a named hop only if it is in group `hops`; an xray inbound with `followChain` is not expected on `edge:<name>` unless `<name>` is the active edge of the registry, so on no edge path while no edge is active), and every target of an enabled inbound is `UP` (targets of disabled inbounds are `PAUSED` by design and ignored; so are the targets of a mon-client of group `monclient` on a path outside its expansion, `direct` and `inner:*` under `edges`: mon-server probes them only in a diagnostic sweep, `direct` stays `UNKNOWN` until the first one); up to 3 minutes (`panel_verify_targets_retries` x `panel_verify_targets_delay`) |
 | showcase | `nginx -t`; on the box against 127.0.0.1 with the showcase's name (`curl --resolve`, no DNS needed): port 80 answers 301 to `https://<domain>/`, 443 the cover page with a certificate for the name (verified), and an unknown subscription under the first path goes through every edge and ends on the cover page (not an error, not an edge's own page; it costs every edge one miss from the showcase's address); with `showcase_verify_sub` (a subscription id), that one comes back from an edge with `Subscription-Userinfo`; fail2ban runs `3ax-ui-showcase-probe` with an action; from the controller 80 and 443 answer on the public address; the DNS record at DNSExit's nameservers (a `WARNING`, no failure) |
 
 ## Prerequisites
@@ -1271,7 +1281,9 @@ field updated without re-keying, port and enable, the AWG server switched off by
 left alone, check mode, refusals, no private key or cookie in `-vvv` output, the TCP + Vision inbound migrated to
 XHTTP in place (keys, client ids/emails/subIds kept, Vision flow cleared, `tcpSettings` dropped), `followChain` taking
 the active edge's neighbour and not fought afterwards, the flag waiting for a neighbour target; and the targets play of
-`verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target; the AmneziaWG route
+`verify.yml` on every inbound UP, an inbound without targets, a missing path and a DOWN target, `mon_paths: [edges]` (every
+edge, standby included, checked, `direct` and `inner:*` left alone, `proxy` without a chain, a mon-client outside the
+inventory still checked); the AmneziaWG route
 step of `verify.yml` (the TPROXY inbound in xray's config, a warning without it or with `routeViaXray` off);
 `tests/panel/test_panel_front.py`: the «only 443» front against the same mock and local fakes — only443 applied
 with subscriptions/panel behind 443, the firewall and 80 kept in `firewallExtra`, then confirmed, idempotent, the
@@ -1342,6 +1354,10 @@ Let's Encrypt path through a fake acme.sh (issued through port 80, then kept), a
 the DNS record posted once and only read without a key, a refused update, the refusals, a config nginx refuses left
 unloaded, the verify step (green, a known subscription missing, an edge's own page for an unknown one, nginx down, the
 DNS warning) and the wipe step;
+`tests/monclient/test_monclient_inputs.py`: role monclient's inputs (the paths vocabulary with `edges`, `mon_gomemlimit`)
+and the unit's `GOMEMLIMIT`; `tests/monclient/test_monclient_icmp.py`: `net.ipv4.ping_group_range` on a stand-in
+`/proc` file and sysctl.d file — `1 0` becoming the group alone, an open range kept, a range without the group widened,
+idempotent reruns, and the verify step (green, a kernel range without the group, no sysctl.d file, no group);
 `tests/wipe/test_wipe.py`: `wipe.yml` on local stand-in boxes — refusal, what goes and what stays,
 the certificate flags, a repeated wipe and a bare box with `changed=0`, one group by tag; and checks that
 `wipe.yml` refuses without confirmation. The mon-server/mon-client plays of `verify.yml` have no mock and
@@ -1362,6 +1378,7 @@ docker run --rm -v "$PWD":/work -w /work python:3.12-slim sh -c '
   python3 tests/panel/test_domain.py && python3 tests/panel/test_captcha_host.py &&
   python3 tests/monserver/test_settings.py &&
   python3 tests/common/test_verify_front.py && python3 tests/common/test_dns.py &&
+  python3 tests/monclient/test_monclient_inputs.py && python3 tests/monclient/test_monclient_icmp.py &&
   python3 tests/wipe/test_wipe.py &&
   python3 tests/showcase/test_dnsexit_script.py &&
   apt-get update -qq && apt-get install -y -qq nginx fail2ban curl openssl >/dev/null &&

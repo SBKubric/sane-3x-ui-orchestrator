@@ -421,10 +421,12 @@ class PanelInboundsTest(unittest.TestCase):
     # --- per-hop paths (monitoring contract 3) --------------------------------------------------------
     CHAIN = ("-i", str(HERE / "hops.yml"))
 
-    def seed_paths(self, paths, down=()):
-        """Both inbounds with a target per path, UP unless the path is listed in down."""
+    def seed_paths(self, paths, down=(), states=None, awg_extra=()):
+        """Both inbounds with a target per path, UP unless the path is listed in down or states names its state;
+        awg_extra: more targets on the AWG inbound."""
         def targets(kind, inbound_id):
-            return [target(kind, inbound_id, p, state="DOWN" if p in down else "UP") for p in paths]
+            return [target(kind, inbound_id, p, state=(states or {}).get(p, "DOWN" if p in down else "UP"))
+                    for p in paths] + (list(awg_extra) if kind == "awg" else [])
         vless = {"kind": "xray", "inboundId": 1, "tag": "inbound-8443", "remark": "vless-reality", "protocol": "vless",
                  "port": 8443, "enable": True, "worst": "UP", "targets": targets("xray", 1)}
         awg = {"kind": "awg", "inboundId": 0, "tag": "inbound-amneziawg", "remark": "awg", "protocol": "amneziawg",
@@ -457,6 +459,40 @@ class PanelInboundsTest(unittest.TestCase):
         self.seed_paths(["direct", "proxy"])
         out = self.play("-e", '{"mon_paths": ["hops", "direct"]}', playbook=HERE / "verify_targets.yml")
         self.assertRegex(out, r"monitoring: 4 targets UP")
+
+    # --- paths: [edges], mon-server's default since v1.9.3 (SBKubric/sane-3x-ui-monitoring#100) -------------------
+    EDGES = ("-e", '{"mon_paths": ["edges"]}')
+
+    def test_verify_targets_edges_checks_the_edges_and_leaves_direct_and_inner_alone(self):
+        # direct is UNKNOWN until the first diagnostic sweep, inner:bridge only follows the edges.
+        self.seed_paths(["direct", "inner:bridge", "edge:proxy"], states={"direct": "UNKNOWN", "inner:bridge": "DOWN"})
+        out = flat(self.play(*self.CHAIN, *self.EDGES, playbook=HERE / "verify_targets.yml"))
+        self.assertIn("monitoring: 2 targets UP on vless-reality, awg; 4 on paths probed in a diagnostic sweep only, "
+                      "not checked (direct, inner:bridge)", out)
+
+    def test_verify_targets_edges_names_a_down_edge(self):
+        self.seed_paths(["direct", "inner:bridge", "edge:proxy"], down=["edge:proxy"])
+        out = flat(self.play(*self.CHAIN, *self.EDGES, playbook=HERE / "verify_targets.yml", expect_rc=2))
+        self.assertIn("monclient/edge:proxy -> awg (awg 0, port 51820): DOWN", out)
+        self.assertNotIn("monclient/inner:bridge ->", out)
+
+    def test_verify_targets_edges_needs_every_edge_standby_included(self):
+        self.seed_paths(["direct", "inner:bridge", "edge:proxy"])
+        out = flat(self.play(*self.CHAIN, "-i", str(HERE / "standby.yml"), *self.EDGES,
+                             playbook=HERE / "verify_targets.yml", expect_rc=2))
+        self.assertIn("awg (awg 0, port 51820) has no target for monclient/edge:proxy2", out)
+        self.assertNotIn("monclient/inner:bridge", out.split("has no target for", 1)[1])
+
+    def test_verify_targets_edges_without_a_chain_means_proxy(self):
+        self.seed_paths(["direct", "proxy"])
+        out = flat(self.play(*self.EDGES, playbook=HERE / "verify_targets.yml"))
+        self.assertIn("monitoring: 2 targets UP on vless-reality, awg; 2 on paths probed in a diagnostic sweep only", out)
+
+    def test_verify_targets_still_checks_a_mon_client_outside_the_inventory(self):
+        self.seed_paths(["direct", "proxy"], awg_extra=[target("awg", 0, "direct", state="DOWN", client="by-hand")])
+        out = flat(self.play(*self.EDGES, playbook=HERE / "verify_targets.yml", expect_rc=2))
+        self.assertIn("by-hand/direct -> awg (awg 0, port 51820): DOWN", out)
+        self.assertNotIn("monclient/direct ->", out)
 
     # --- chain followers on a standby edge (panel#157 Q2: the panel does not probe them there) ------------
     STANDBY = (*CHAIN, "-i", str(HERE / "standby.yml"))

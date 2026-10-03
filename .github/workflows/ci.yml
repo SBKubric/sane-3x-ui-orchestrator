@@ -95,6 +95,9 @@ jobs:
       - name: Role monclient inputs and unit
         run: python3 tests/monclient/test_monclient_inputs.py
 
+      - name: Role monclient's net.ipv4.ping_group_range (ICMP for the mon-client group) and its verify.yml check
+        run: python3 tests/monclient/test_monclient_icmp.py
+
       - name: wipe.yml on local stand-in boxes
         run: python3 tests/wipe/test_wipe.py
 

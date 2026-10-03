@@ -31,6 +31,15 @@ monclient_service: mon-client
 # --state-dir); state.json there means "registered".
 monclient_state_dir: "/var/lib/{{ monclient_service }}"
 monclient_log_level: info
+
+# ICMP for the host reachability check of a diagnostic sweep (SBKubric/sane-3x-ui-monitoring#100): mon-client runs
+# without root and with NoNewPrivileges, so it sends ICMP echo through unprivileged ICMP datagram sockets
+# (SOCK_DGRAM/IPPROTO_ICMP), which the kernel opens only for a group inside net.ipv4.ping_group_range ("1 0", the
+# kernel default, is nobody; systemd's sysctl.d defaults may open it to every group). The role widens the range to
+# take in the mon-client group, never narrows it, and keeps the result in a sysctl.d file for boots (tasks/icmp.yml).
+monclient_ping_group_range_file: /etc/sysctl.d/60-mon-client-ping.conf
+monclient_ping_group_range_proc: /proc/sys/net/ipv4/ping_group_range
+
 # Soft memory limit of the Go runtime (GOMEMLIMIT); empty = none. A guard against swap on a small box
 # (SBKubric/sane-3x-ui-monitoring#85): mon-client itself stays near 25 MB since the AWG probe's batch-1 bind
 # (v0.1.0-stand.5), xray runs as its own process and is not covered.
@@ -48,13 +57,15 @@ monclient_staging_roots: "{{ not acme_production | default(false) | bool }}"
 monclient_le_staging_roots: /etc/mon-client/le-staging-roots.pem
 
 # Approval payload (spec §6 of mon-server): name, region, paths. Paths vocabulary of monitoring contract 3
-# (SBKubric/sane-3x-ui-monitoring#61): direct, hops (every probed hop of the chain, including hops added later;
-# the proxy path while the chain has no probed hop), or one hop by path, edge:<hop_name> / inner:<hop_name>.
-# mon-server refuses the old word proxy.
+# (SBKubric/sane-3x-ui-monitoring#61, #100): edges (every edge front of the chain, active and standby, including
+# edges added later; the proxy path while the chain has no hop) is mon-server's default since v1.9.3: the other
+# paths are then probed only in a diagnostic sweep. hops (every probed hop of the chain, including hops added
+# later; the proxy path while the chain has no probed hop), direct, or one hop by path, edge:<hop_name> /
+# inner:<hop_name>, keep those paths probed all the time. mon-server refuses the old word proxy.
 monclient_name: "{{ mon_name | default(inventory_hostname) }}"
 monclient_region: "{{ mon_region | default('') }}"
-monclient_paths: "{{ mon_paths | default(['direct', 'hops']) }}"
-monclient_path_pattern: '^(direct|hops|(edge|inner):[a-z0-9-]{1,32})$'
+monclient_paths: "{{ mon_paths | default(['edges']) }}"
+monclient_path_pattern: '^(direct|hops|edges|(edge|inner):[a-z0-9-]{1,32})$'
 monclient_auto_approve: "{{ mon_auto_approve | default(true) | bool }}"
 # How long to wait for the pairing code in `journalctl -u mon-client` (a mon-client whose old token
 # is refused re-registers after its first heartbeat, up to a minute after start) and for the approved
@@ -71,6 +82,7 @@ monclient_wipe_paths:
   - "{{ monclient_state_dir }}"
   - "{{ monclient_cache_dir }}/mon-client"
   - "{{ monclient_cache_dir }}/xray"
+  - "{{ monclient_ping_group_range_file }}"
 
 # verify.yml (tasks/verify.yml): how long the mon-client may take to be ONLINE (retries x delay seconds).
 monclient_verify_retries: 18

@@ -1,7 +1,7 @@
 ---
-# verify.yml on a mon-client box: versions, and its record in mon-server's registry (GET
-# /admin/api/clients, matched by mon_name) enabled, with a live token and ONLINE within
-# monclient_verify_retries x monclient_verify_delay seconds.
+# verify.yml on a mon-client box: versions, net.ipv4.ping_group_range with the mon-client group (tasks/verify_icmp.yml),
+# and its record in mon-server's registry (GET /admin/api/clients, matched by mon_name) enabled, with a live token and
+# ONLINE within monclient_verify_retries x monclient_verify_delay seconds.
 - name: Read mon-client version
   ansible.builtin.command:
     argv: ["{{ monclient_bin_path }}", version]
@@ -19,6 +19,9 @@
       `{{ monclient_bin_path }} version` says
       '{{ (monclient_verify_version.stdout | default('') ~ ' ' ~ monclient_verify_version.msg | default('')) | trim }}'; run site.yml
     success_msg: "{{ monclient_verify_version.stdout | trim }}"
+
+- name: Check ICMP for the mon-client group
+  ansible.builtin.include_tasks: verify_icmp.yml
 
 - name: Check the registry of mon-server
   when: monclient_server_host | length > 0

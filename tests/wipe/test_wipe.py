@@ -40,7 +40,7 @@ MONSERVER = ["usr/local/bin/mon-server", "etc/mon-server/config.json", "var/lib/
              "var/cache/3ax-ui-orchestrator/mon-server/v0.1.0-stand.3/mon-server"]
 MONCLIENT = ["usr/local/bin/mon-client", "usr/local/bin/xray", "etc/mon-client/le-staging-roots.pem",
              "var/lib/mon-client/state.json", "var/cache/3ax-ui-orchestrator/mon-client/v0.1.0-stand.3/mon-client",
-             "var/cache/3ax-ui-orchestrator/xray/v26.3.27/xray"]
+             "var/cache/3ax-ui-orchestrator/xray/v26.3.27/xray", "etc/sysctl.d/60-mon-client-ping.conf"]
 SHOWCASE = ["etc/nginx/conf.d/3ax-ui-showcase.conf", "etc/nginx/conf.d/3ax-ui-showcase-acme.conf",
             "etc/nginx/conf.d/other-site.conf", "var/www/showcase/index.html",
             "var/www/showcase-acme/.well-known/acme-challenge/x", "etc/fail2ban/jail.d/3ax-ui-showcase.conf",
@@ -115,7 +115,8 @@ class WipeTest(unittest.TestCase):
             self.assertFalse(self.exists("mon-server", rel), f"mon-server: {rel} left")
         self.assertTrue(self.exists("mon-server", "var/lib/mon-server/certs/acme/key.pem"), "mon-server certs removed")
         for rel in ("usr/local/bin/mon-client", "usr/local/bin/xray", "etc/mon-client", "var/lib/mon-client",
-                    "var/cache/3ax-ui-orchestrator/mon-client", "var/cache/3ax-ui-orchestrator/xray"):
+                    "var/cache/3ax-ui-orchestrator/mon-client", "var/cache/3ax-ui-orchestrator/xray",
+                    "etc/sysctl.d/60-mon-client-ping.conf"):
             self.assertFalse(self.exists("mon-client", rel), f"mon-client: {rel} left")
         for rel in ("etc/nginx/conf.d/3ax-ui-showcase.conf", "etc/nginx/conf.d/3ax-ui-showcase-acme.conf",
                     "var/www/showcase", "var/www/showcase-acme", "etc/fail2ban/jail.d/3ax-ui-showcase.conf",

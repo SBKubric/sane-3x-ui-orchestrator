@@ -1,0 +1,46 @@
+---
+# verify.yml on a mon-client box: the mon-client group may open ICMP datagram sockets (the host reachability check of
+# a diagnostic sweep), now (the running kernel's net.ipv4.ping_group_range) and after a reboot (the sysctl.d file of
+# tasks/icmp.yml). Driven alone by tests/monclient/test_monclient_icmp.py.
+- name: Read the mon-client group
+  ansible.builtin.command:
+    argv: [getent, group, "{{ monclient_user }}"]
+  register: monclient_verify_group
+  changed_when: false
+  failed_when: false
+
+- name: Read net.ipv4.ping_group_range
+  ansible.builtin.slurp:
+    src: "{{ monclient_ping_group_range_proc }}"
+  register: monclient_verify_ping_now
+
+- name: Read the sysctl.d file
+  ansible.builtin.slurp:
+    src: "{{ monclient_ping_group_range_file }}"
+  register: monclient_verify_ping_file
+  failed_when: false
+
+- name: Check that the mon-client group may send ICMP echo
+  ansible.builtin.assert:
+    that:
+      - monclient_verify_gid | length > 0
+      - monclient_verify_range_now | length == 2
+      - monclient_verify_range_now[0] <= monclient_verify_gid | int <= monclient_verify_range_now[1]
+      - monclient_verify_range_file | length == 2
+      - monclient_verify_range_file[0] <= monclient_verify_gid | int <= monclient_verify_range_file[1]
+    fail_msg: >-
+      mon-client on {{ inventory_hostname }} cannot send ICMP echo (the host reachability check of a diagnostic sweep):
+      {{ ('no group ' ~ monclient_user) if monclient_verify_gid | length == 0 else
+         'net.ipv4.ping_group_range is "' ~ monclient_verify_range_now | join(' ') ~ '" now and '
+         ~ (('"' ~ monclient_verify_range_file | join(' ') ~ '"') if monclient_verify_range_file else 'not set')
+         ~ ' in ' ~ monclient_ping_group_range_file ~ ', group ' ~ monclient_user ~ ' is GID ' ~ monclient_verify_gid }};
+      run site.yml
+    success_msg: >-
+      net.ipv4.ping_group_range {{ monclient_verify_range_now | join(' ') }} takes in group {{ monclient_user }}
+      (GID {{ monclient_verify_gid }}), also in {{ monclient_ping_group_range_file }}
+  vars:
+    monclient_verify_gid: "{{ (monclient_verify_group.stdout | default('')).split(':')[2] | default('') if monclient_verify_group.rc == 0 else '' }}"
+    monclient_verify_range_now: "{{ (monclient_verify_ping_now.content | b64decode).split() | map('int') | list }}"
+    monclient_verify_range_file: >-
+      {{ (monclient_verify_ping_file.content | default('') | b64decode
+          | regex_search('(?m)^\s*net\.ipv4\.ping_group_range\s*=\s*([0-9]+)\s+([0-9]+)\s*$', '\1', '\2') or []) | map('int') | list }}

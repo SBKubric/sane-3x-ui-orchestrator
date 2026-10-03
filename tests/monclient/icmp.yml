@@ -1,0 +1,19 @@
+---
+# Role monclient's net.ipv4.ping_group_range (tasks/icmp.yml) and its verify.yml check (tasks/verify_icmp.yml) on
+# stand-ins: monclient_ping_group_range_proc and monclient_ping_group_range_file are files in a temp dir, the group is
+# the test runner's (see test_monclient_icmp.py).
+- name: Converge the ping group range
+  hosts: monclient
+  gather_facts: false
+  tasks:
+    - name: Let the mon-client group send ICMP echo
+      ansible.builtin.include_role:
+        name: monclient
+        tasks_from: icmp
+      when: icmp_step == 'converge'
+
+    - name: Check ICMP for the mon-client group
+      ansible.builtin.include_role:
+        name: monclient
+        tasks_from: verify_icmp
+      when: icmp_step == 'verify'
