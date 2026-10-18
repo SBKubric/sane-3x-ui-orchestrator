@@ -27,7 +27,7 @@ inventories/
   vault.yml.example    template of each profile's group_vars/all/vault.yml (git-ignored, yours)
   stand-chain/         panel + hops; monserver/monclient empty
   stand-full/          panel + hops + monserver + monclient + showcase
-  production/          the production chain, shaped as stand-full: panel <- bridge <- proxy / proxy2
+  production/          the production chain, shaped as stand-full: panel <- bridge <- proxy / proxy2 / cloudrix
 roles/
   common/              supported OS check, the host's DNS servers (tasks/dns.yml + files/dnscheck.py), base packages,
                        time sync; tasks/verify_front.yml + files/portscan.py: verify.yml's «only 443» check from the
@@ -68,7 +68,7 @@ monitoring groups. stand-full and production have the showcase `subgateway`; sta
 |---|---|---|
 | `inventories/stand-chain` | panel, hops | panel + proxy chain only |
 | `inventories/stand-full` | panel, hops (bridge, proxy, proxy2), monserver, monclient, showcase | the test stand |
-| `inventories/production` | panel, hops (bridge, proxy, proxy2), monserver, monclient, showcase | production; LE production for mon-server (`acme_production: true`) |
+| `inventories/production` | panel, hops (bridge, proxy, proxy2, cloudrix), monserver, monclient, showcase | production; LE production for mon-server (`acme_production: true`) |
 
 Every profile has its own vault, `inventories/<profile>/group_vars/all/vault.yml` (see [Vault](#vault)): the
 stand and production share no secret and no address, and the host names (`real`, `proxy`, …) may repeat.
